@@ -9,6 +9,7 @@ edition = "2025"
 modules = [
     "src/model/config.seen",
     "src/model/tensor_catalog.seen",
+    "src/model/contract_geometry.seen",
 ]
 
 [build]

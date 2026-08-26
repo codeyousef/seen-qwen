@@ -1,0 +1,205 @@
+///
+Checked scalar geometry for the pinned Qwen3.8-27B text contract.
+
+The byte widths supplied by the caller describe an explicit storage choice.
+This module does not estimate codec metadata, alignment, workspaces, or a
+runtime memory plan.
+
+Contract test: FEL-1398 / QWN-021C
+///
+
+import core.result.{Result}
+import inference.scalars.{checkedAdd64, checkedMultiply64}
+import seen_qwen.model.config.{Qwen38Config}
+import seen_qwen.model.tensor_catalog.{QwenTensorCatalog}
+
+pub class QwenContractError {
+    var code: String
+    var field: String
+    var message: String
+    var exitCode: Int
+    var retryable: Bool
+}
+
+pub class QwenContractGeometry {
+    var batchSize: UInt64
+    var contextTokens: UInt64
+    var kvScalarBytes: UInt64
+    var convolutionScalarBytes: UInt64
+    var kvScalarsPerToken: UInt64
+    var kvPayloadBytes: UInt64
+    var gdnRecurrentElements: UInt64
+    var gdnRecurrentBytes: UInt64
+    var convolutionElements: UInt64
+    var convolutionBytes: UInt64
+    var persistentStateBytes: UInt64
+    var kvAndPersistentStateBytes: UInt64
+}
+
+fun qwenContractError(code: String, field: String, message: String,
+    exitCode: Int) r: QwenContractError {
+    return QwenContractError{ code: code, field: field, message: message,
+        exitCode: exitCode, retryable: false }
+}
+
+fun qwenUnsupportedModel(field: String, message: String)
+    r: Result<Bool, QwenContractError> {
+    return Err<Bool, QwenContractError>(qwenContractError(
+        "qwen.contract.unsupported-model", field, message, 4))
+}
+
+pub fun validateQwen38Contract(config: Qwen38Config,
+    catalog: QwenTensorCatalog) r: Result<Bool, QwenContractError> {
+    if config.layers != 64 or config.linearAttentionLayers != 48 or
+        config.fullAttentionLayers != 16 or config.hiddenSize != 5120 or
+        config.intermediateSize != 17408 or config.vocabularySize != 248320 or
+        config.maxPositions != 262144 or config.fullAttentionInterval != 4 or
+        config.attentionHeads != 24 or config.attentionKvHeads != 4 or
+        config.attentionHeadDim != 256 or config.rotaryDim != 64 or
+        config.gdnKeyHeads != 16 or config.gdnValueHeads != 48 or
+        config.gdnKeyHeadDim != 128 or config.gdnValueHeadDim != 128 or
+        config.gdnConvKernel != 4 or config.mtpLayers != 1 {
+        return qwenUnsupportedModel("config",
+            "configuration is not the pinned Qwen3.8-27B text contract")
+    }
+    if catalog.closed {
+        return Err<Bool, QwenContractError>(qwenContractError(
+            "qwen.contract.invalid-state", "catalog",
+            "tensor catalog is closed", 11))
+    }
+    if catalog.length() != 1199 or catalog.requiredTextTensors != 851 or
+        catalog.requiredMtpTensors != 15 or
+        catalog.excludedVisionTensors != 333 or catalog.fingerprint !=
+        "5f466d43bae3059e54f0bfe183d0e82c822242f45a834d778414d3e5b5248f1f" {
+        return qwenUnsupportedModel("tensor_catalog",
+            "tensor catalog is not the pinned Qwen3.8-27B catalog")
+    }
+    return Ok<Bool, QwenContractError>(true)
+}
+
+fun qwenGeometryInput(field: String, message: String)
+    r: Result<QwenContractGeometry, QwenContractError> {
+    return Err<QwenContractGeometry, QwenContractError>(qwenContractError(
+        "qwen.geometry.input", field, message, 2))
+}
+
+fun qwenGeometryOverflow(field: String)
+    r: Result<QwenContractGeometry, QwenContractError> {
+    return Err<QwenContractGeometry, QwenContractError>(qwenContractError(
+        "qwen.geometry.overflow", field,
+        "checked 64-bit memory geometry overflowed", 2))
+}
+
+pub fun calculateQwen38ContractGeometry(config: Qwen38Config,
+    catalog: QwenTensorCatalog, batchSize: UInt64, contextTokens: UInt64,
+    kvScalarBytes: UInt64, convolutionScalarBytes: UInt64)
+    r: Result<QwenContractGeometry, QwenContractError> {
+    let contract = validateQwen38Contract(config, catalog)
+    if contract.isErr() {
+        return Err<QwenContractGeometry, QwenContractError>(
+            contract.unwrapErr())
+    }
+    if batchSize == (0 as UInt64) {
+        return qwenGeometryInput("batch_size", "batch size must be positive")
+    }
+    if contextTokens == (0 as UInt64) {
+        return qwenGeometryInput("context_tokens",
+            "context must be within the native range 1 through 262144")
+    }
+    let nativeContextBound = checkedAdd64(contextTokens,
+        9223372036854513663 as UInt64)
+    if nativeContextBound.isNone() {
+        return qwenGeometryInput("context_tokens",
+            "context must be within the native range 1 through 262144")
+    }
+    if kvScalarBytes == (0 as UInt64) {
+        return qwenGeometryInput("kv_scalar_bytes",
+            "KV scalar byte width must be positive")
+    }
+    if convolutionScalarBytes == (0 as UInt64) {
+        return qwenGeometryInput("convolution_scalar_bytes",
+            "convolution scalar byte width must be positive")
+    }
+
+    var next = checkedMultiply64(config.fullAttentionLayers as UInt64,
+        config.attentionKvHeads as UInt64)
+    if next.isNone() { return qwenGeometryOverflow("kv_scalars_per_token") }
+    next = checkedMultiply64(next.unwrap(), config.attentionHeadDim as UInt64)
+    if next.isNone() { return qwenGeometryOverflow("kv_scalars_per_token") }
+    next = checkedMultiply64(next.unwrap(), 2 as UInt64)
+    if next.isNone() { return qwenGeometryOverflow("kv_scalars_per_token") }
+    let kvScalarsPerToken = next.unwrap()
+
+    next = checkedMultiply64(kvScalarsPerToken, contextTokens)
+    if next.isNone() { return qwenGeometryOverflow("kv_payload_bytes") }
+    next = checkedMultiply64(next.unwrap(), batchSize)
+    if next.isNone() { return qwenGeometryOverflow("kv_payload_bytes") }
+    next = checkedMultiply64(next.unwrap(), kvScalarBytes)
+    if next.isNone() { return qwenGeometryOverflow("kv_payload_bytes") }
+    let kvPayloadBytes = next.unwrap()
+
+    next = checkedMultiply64(config.linearAttentionLayers as UInt64,
+        config.gdnValueHeads as UInt64)
+    if next.isNone() { return qwenGeometryOverflow("gdn_recurrent_elements") }
+    next = checkedMultiply64(next.unwrap(), config.gdnKeyHeadDim as UInt64)
+    if next.isNone() { return qwenGeometryOverflow("gdn_recurrent_elements") }
+    next = checkedMultiply64(next.unwrap(), config.gdnValueHeadDim as UInt64)
+    if next.isNone() { return qwenGeometryOverflow("gdn_recurrent_elements") }
+    next = checkedMultiply64(next.unwrap(), batchSize)
+    if next.isNone() { return qwenGeometryOverflow("gdn_recurrent_elements") }
+    let gdnRecurrentElements = next.unwrap()
+    next = checkedMultiply64(gdnRecurrentElements, 4 as UInt64)
+    if next.isNone() { return qwenGeometryOverflow("gdn_recurrent_bytes") }
+    let gdnRecurrentBytes = next.unwrap()
+
+    next = checkedMultiply64(config.gdnKeyHeads as UInt64,
+        config.gdnKeyHeadDim as UInt64)
+    if next.isNone() { return qwenGeometryOverflow("convolution_elements") }
+    let keyProjectionElements = next.unwrap()
+    next = checkedMultiply64(config.gdnValueHeads as UInt64,
+        config.gdnValueHeadDim as UInt64)
+    if next.isNone() { return qwenGeometryOverflow("convolution_elements") }
+    let valueProjectionElements = next.unwrap()
+    next = checkedMultiply64(keyProjectionElements, 2 as UInt64)
+    if next.isNone() { return qwenGeometryOverflow("convolution_elements") }
+    let convolutionWidth = checkedAdd64(next.unwrap(),
+        valueProjectionElements)
+    if convolutionWidth.isNone() {
+        return qwenGeometryOverflow("convolution_elements")
+    }
+    next = checkedMultiply64(convolutionWidth.unwrap(),
+        config.gdnConvKernel as UInt64)
+    if next.isNone() { return qwenGeometryOverflow("convolution_elements") }
+    next = checkedMultiply64(next.unwrap(),
+        config.linearAttentionLayers as UInt64)
+    if next.isNone() { return qwenGeometryOverflow("convolution_elements") }
+    next = checkedMultiply64(next.unwrap(), batchSize)
+    if next.isNone() { return qwenGeometryOverflow("convolution_elements") }
+    let convolutionElements = next.unwrap()
+    next = checkedMultiply64(convolutionElements, convolutionScalarBytes)
+    if next.isNone() { return qwenGeometryOverflow("convolution_bytes") }
+    let convolutionBytes = next.unwrap()
+
+    let persistent = checkedAdd64(gdnRecurrentBytes, convolutionBytes)
+    if persistent.isNone() {
+        return qwenGeometryOverflow("persistent_state_bytes")
+    }
+    let total = checkedAdd64(kvPayloadBytes, persistent.unwrap())
+    if total.isNone() {
+        return qwenGeometryOverflow("kv_and_persistent_state_bytes")
+    }
+    return Ok<QwenContractGeometry, QwenContractError>(QwenContractGeometry{
+        batchSize: batchSize,
+        contextTokens: contextTokens,
+        kvScalarBytes: kvScalarBytes,
+        convolutionScalarBytes: convolutionScalarBytes,
+        kvScalarsPerToken: kvScalarsPerToken,
+        kvPayloadBytes: kvPayloadBytes,
+        gdnRecurrentElements: gdnRecurrentElements,
+        gdnRecurrentBytes: gdnRecurrentBytes,
+        convolutionElements: convolutionElements,
+        convolutionBytes: convolutionBytes,
+        persistentStateBytes: persistent.unwrap(),
+        kvAndPersistentStateBytes: total.unwrap(),
+    })
+}

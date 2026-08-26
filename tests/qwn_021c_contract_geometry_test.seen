@@ -1,0 +1,77 @@
+import io.file.{readText}
+import seen_qwen.model.config.{parseQwen38Config}
+import seen_qwen.model.contract_geometry.{calculateQwen38ContractGeometry,
+    validateQwen38Contract}
+import seen_qwen.model.tensor_catalog.{parseQwenTensorCatalog}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun main() r: Int {
+    let configResult = parseQwen38Config(
+        readText("tests/fixtures/qwen3_8_config.json"))
+    let catalogResult = parseQwenTensorCatalog(
+        readText("tests/fixtures/qwen3_8_model.safetensors.index.json"))
+    require(configResult.isOkay() and catalogResult.isOkay(),
+        "load the pinned config and tensor catalog")
+    let config = configResult.unwrap()
+    let catalog = catalogResult.unwrap()
+    require(validateQwen38Contract(config, catalog).isOkay(),
+        "accept the complete pinned Qwen contract")
+
+    let calculated = calculateQwen38ContractGeometry(config, catalog,
+        1 as UInt64, 262144 as UInt64, 2 as UInt64, 2 as UInt64)
+    require(calculated.isOkay(), "calculate native-range BF16 scalar geometry")
+    let geometry = calculated.unwrap()
+    require(geometry.kvScalarsPerToken == (32768 as UInt64) and
+        geometry.kvPayloadBytes == (17179869184 as UInt64),
+        "calculate exact full-attention KV payload geometry")
+    require(geometry.gdnRecurrentElements == (37748736 as UInt64) and
+        geometry.gdnRecurrentBytes == (150994944 as UInt64),
+        "calculate exact float32 recurrent-state geometry")
+    require(geometry.convolutionElements == (1966080 as UInt64) and
+        geometry.convolutionBytes == (3932160 as UInt64) and
+        geometry.persistentStateBytes == (154927104 as UInt64) and
+        geometry.kvAndPersistentStateBytes == (17334796288 as UInt64),
+        "calculate convolution and checked aggregate geometry")
+
+    let zeroBatch = calculateQwen38ContractGeometry(config, catalog,
+        0 as UInt64, 1 as UInt64, 2 as UInt64, 2 as UInt64)
+    require(zeroBatch.isErr() and zeroBatch.unwrapErr().code ==
+        "qwen.geometry.input" and zeroBatch.unwrapErr().exitCode == 2 and
+        not zeroBatch.unwrapErr().retryable,
+        "return stable non-retryable input diagnostics")
+    require(calculateQwen38ContractGeometry(config, catalog, 1 as UInt64,
+        262145 as UInt64, 2 as UInt64, 2 as UInt64).isErr(),
+        "reject context beyond the native contract")
+    require(calculateQwen38ContractGeometry(config, catalog, 1 as UInt64,
+        1 as UInt64, 0 as UInt64, 2 as UInt64).isErr(),
+        "reject zero scalar widths")
+    let overflow = calculateQwen38ContractGeometry(config, catalog,
+        0x7FFFFFFFFFFFFFFF as UInt64, 262144 as UInt64,
+        8 as UInt64, 8 as UInt64)
+    require(overflow.isErr() and overflow.unwrapErr().code ==
+        "qwen.geometry.overflow", "reject checked 64-bit overflow")
+
+    config.layers = 63
+    let wrongConfig = validateQwen38Contract(config, catalog)
+    require(wrongConfig.isErr() and wrongConfig.unwrapErr().code ==
+        "qwen.contract.unsupported-model" and
+        wrongConfig.unwrapErr().exitCode == 4,
+        "reject forged unsupported model geometry")
+    config.layers = 64
+    catalog.requiredTextTensors = 850
+    require(validateQwen38Contract(config, catalog).isErr(),
+        "reject forged unsupported tensor catalogs")
+    catalog.requiredTextTensors = 851
+    catalog.close()
+    let closed = validateQwen38Contract(config, catalog)
+    require(closed.isErr() and closed.unwrapErr().code ==
+        "qwen.contract.invalid-state" and closed.unwrapErr().exitCode == 11,
+        "reject closed catalog state")
+    println("PASS: QWN-021C checked contract memory geometry and diagnostics")
+    return 0
+}
+
+main()
