@@ -8,6 +8,7 @@ visibility = "private"
 edition = "2025"
 modules = [
     "src/model/config.seen",
+    "src/model/tensor_catalog.seen",
 ]
 
 [build]
