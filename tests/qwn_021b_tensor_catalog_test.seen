@@ -1,0 +1,80 @@
+import io.file.{readText}
+import seen_qwen.model.tensor_catalog.{classifyQwenTensorName,
+    parseQwenTensorCatalog}
+import str.string.{replaceFirst}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun main() r: Int {
+    let indexText = readText(
+        "tests/fixtures/qwen3_8_model.safetensors.index.json")
+    require(indexText.length() == 112216, "load exact pinned tensor index")
+
+    let parsed = parseQwenTensorCatalog(indexText)
+    if parsed.isErr() {
+        let error = parsed.unwrapErr()
+        println("unexpected catalog error: " + error.code + " field=" +
+            error.field + " message=" + error.message)
+    }
+    require(parsed.isOkay(), "accept exact pinned tensor catalog")
+    let catalog = parsed.unwrap()
+    require(catalog.length() == 1199 and
+        catalog.requiredTextTensors == 851 and
+        catalog.requiredMtpTensors == 15 and
+        catalog.excludedVisionTensors == 333,
+        "derive exact locked tensor classification counts")
+    require(catalog.fingerprint ==
+        "5f466d43bae3059e54f0bfe183d0e82c822242f45a834d778414d3e5b5248f1f",
+        "derive exact deterministic catalog fingerprint")
+    require(catalog.nameAt(0).unwrap() == "lm_head.weight" and
+        catalog.shardAt(0).unwrap() ==
+            "model-00018-of-00018.safetensors",
+        "sort the catalog lexicographically")
+    require(catalog.categoryFor("lm_head.weight").unwrap() ==
+            "text" and
+        catalog.categoryFor("mtp.fc.weight").unwrap() == "mtp" and
+        catalog.categoryFor("model.visual.blocks.0.attn.proj.bias").unwrap() ==
+            "vision",
+        "classify text, MTP, and excluded vision tensors exactly once")
+    require(catalog.shouldExtractAt(0).unwrap(),
+        "extract required text tensors")
+    require(not catalog.shouldExtractAt(851).unwrap(),
+        "exclude vision tensors from extraction")
+    require(classifyQwenTensorName("other.weight").isErr() and
+        classifyQwenTensorName("mtp.").isErr() and
+        classifyQwenTensorName("model.visual.").isErr() and
+        classifyQwenTensorName("model.language_model.").isErr(),
+        "reject unknown and empty namespace suffixes")
+    require(catalog.nameAt(-1).isErr() and
+        catalog.nameAt(1199).isErr(), "reject catalog index boundaries")
+
+    let changedShard = replaceFirst(indexText,
+        "model-00018-of-00018.safetensors",
+        "model-00017-of-00018.safetensors")
+    let changed = parseQwenTensorCatalog(changedShard)
+    require(changed.isErr() and changed.unwrapErr().code ==
+        "qwen.catalog.fingerprint",
+        "reject changed tensor-to-shard assignments")
+    seen_string_release_owned(changedShard)
+
+    let unknownName = replaceFirst(indexText, "lm_head.weight", "other.weight")
+    let unknown = parseQwenTensorCatalog(unknownName)
+    require(unknown.isErr() and unknown.unwrapErr().code ==
+        "qwen.catalog.unknown", "reject unknown names in a full-size catalog")
+    seen_string_release_owned(unknownName)
+    require(parseQwenTensorCatalog("{}").isErr(),
+        "reject missing weight_map")
+
+    catalog.close()
+    catalog.close()
+    require(catalog.length() == 0 and catalog.categoryAt(0).isErr(),
+        "close catalog ownership idempotently")
+    println("PASS: QWN-021B deterministic tensor catalog and vision exclusion")
+    return 0
+}
+
+main()
