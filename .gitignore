@@ -1,5 +1,6 @@
 /docs/private/
 /.seen/
+/.seen_cache/
 /artifacts/
 /models/
 /weights/
@@ -29,4 +30,3 @@ __pycache__/
 *.pem
 *.key
 *.token
-

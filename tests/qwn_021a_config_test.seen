@@ -1,0 +1,114 @@
+import seen_qwen.model.config.{parseQwen38Config, qwenLayerIsFullAttention}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun layerTypes(lastLayer: String) r: String {
+    var text = "["
+    var layer = 0
+    while layer < 64 {
+        if layer > 0 { text = text + "," }
+        let kind = if layer == 63 {
+            lastLayer
+        } else if layer % 4 == 3 {
+            "full_attention"
+        } else {
+            "linear_attention"
+        }
+        text = text + "\"" + kind + "\""
+        layer = layer + 1
+    }
+    return text + "]"
+}
+
+fun validConfig(modelType: String, headDim: String, lastLayer: String)
+    r: String {
+    let quote = String.fromCharCode(34)
+    let closeObject = String.fromCharCode(125)
+    return "{" +
+        "\"architectures\":[\"Qwen3_5ForConditionalGeneration\"]," +
+        "\"model_type\":" + quote + modelType + quote + "," +
+        "\"language_model_only\":false," +
+        "\"tie_word_embeddings\":false," +
+        "\"text_config\":{" +
+        "\"model_type\":\"qwen3_5_text\"," +
+        "\"dtype\":\"bfloat16\"," +
+        "\"num_hidden_layers\":64," +
+        "\"hidden_size\":5120," +
+        "\"intermediate_size\":17408," +
+        "\"vocab_size\":248320," +
+        "\"max_position_embeddings\":262144," +
+        "\"full_attention_interval\":4," +
+        "\"mtp_num_hidden_layers\":1," +
+        "\"mtp_use_dedicated_embeddings\":false," +
+        "\"tie_word_embeddings\":false," +
+        "\"num_attention_heads\":24," +
+        "\"num_key_value_heads\":4," +
+        "\"head_dim\":" + headDim + "," +
+        "\"partial_rotary_factor\":0.25," +
+        "\"attention_bias\":false," +
+        "\"attention_dropout\":0.0," +
+        "\"attn_output_gate\":true," +
+        "\"rms_norm_eps\":0.000001," +
+        "\"linear_num_key_heads\":16," +
+        "\"linear_num_value_heads\":48," +
+        "\"linear_key_head_dim\":128," +
+        "\"linear_value_head_dim\":128," +
+        "\"linear_conv_kernel_dim\":4," +
+        "\"mamba_ssm_dtype\":\"float32\"," +
+        "\"output_gate_type\":\"swish\"," +
+        "\"hidden_act\":\"silu\"," +
+        "\"layer_types\":" + layerTypes(lastLayer) + "," +
+        "\"rope_parameters\":{" +
+        "\"rope_type\":\"default\"," +
+        "\"rope_theta\":10000000," +
+        "\"partial_rotary_factor\":0.25," +
+        "\"mrope_interleaved\":true," +
+        "\"mrope_section\":[11,11,10]" + closeObject + closeObject +
+        closeObject
+}
+
+fun main() r: Int {
+    let exactConfig = validConfig("qwen3_5", "256", "full_attention")
+    let parsed = parseQwen38Config(exactConfig)
+    if parsed.isErr() {
+        let error = parsed.unwrapErr()
+        println("unexpected parse error: " + error.code + " field=" +
+            error.field + " message=" + error.message)
+    }
+    require(parsed.isOkay(), "accept exact Qwen3.8-27B configuration")
+    let config = parsed.unwrap()
+    require(config.layers == 64 and config.linearAttentionLayers == 48 and
+        config.fullAttentionLayers == 16, "parse exact layer geometry")
+    require(config.attentionHeads == 24 and config.attentionKvHeads == 4 and
+        config.attentionHeadDim == 256 and config.rotaryDim == 64,
+        "parse exact attention geometry")
+    require(config.gdnKeyHeads == 16 and config.gdnValueHeads == 48 and
+        config.gdnKeyHeadDim == 128 and config.gdnValueHeadDim == 128 and
+        config.gdnConvKernel == 4, "parse exact GDN geometry")
+    require(not qwenLayerIsFullAttention(0).unwrap() and
+        qwenLayerIsFullAttention(3).unwrap() and
+        qwenLayerIsFullAttention(63).unwrap(),
+        "resolve schedule boundaries")
+    require(qwenLayerIsFullAttention(-1).isErr() and
+        qwenLayerIsFullAttention(64).isErr(),
+        "reject out-of-range layer indexes")
+    require(parseQwen38Config(validConfig(
+        "other", "256", "full_attention")).isErr(),
+        "reject incompatible model identity")
+    require(parseQwen38Config(validConfig(
+        "qwen3_5", "128", "full_attention")).isErr(),
+        "reject incompatible attention geometry")
+    require(parseQwen38Config(validConfig(
+        "qwen3_5", "256", "linear_attention")).isErr(),
+        "reject incompatible layer schedule")
+    require(parseQwen38Config("{\"model_type\":\"qwen3_5\"," +
+        "\"model_type\":\"other\"}").isErr(),
+        "reject duplicate JSON keys")
+    require(parseQwen38Config("[").isErr(), "reject malformed JSON")
+    println("PASS: QWN-021A exact Qwen config and geometry parsing")
+    return 0
+}
+
+main()

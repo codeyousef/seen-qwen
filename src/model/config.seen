@@ -1,0 +1,266 @@
+///
+Exact, bounded parser for the pinned Qwen3.8-27B text configuration.
+
+Qwen semantic source:
+QWEN-007 @ 562cfd944ee1f20702cfb0f4404014ee27c24813
+path: src/transformers/models/qwen3_5/configuration_qwen3_5.py
+symbol: Qwen3_5TextConfig
+model revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+config SHA-256: 191e0af232104ed8b65258cf3fb2b842e288008baca7633c11b82a1ac7203aab
+contract test: FEL-1395 / QWN-021A
+///
+
+import core.result.{Result}
+import json.strict.{StrictJsonLimits, parseStrictJson}
+import json.parser.{destroyJsonParseResult}
+import json.value.{JsonValue}
+
+pub class QwenConfigError {
+    var code: String
+    var field: String
+    var message: String
+}
+
+pub class Qwen38Config {
+    var layers: Int
+    var linearAttentionLayers: Int
+    var fullAttentionLayers: Int
+    var hiddenSize: Int
+    var intermediateSize: Int
+    var vocabularySize: Int
+    var maxPositions: Int
+    var fullAttentionInterval: Int
+    var attentionHeads: Int
+    var attentionKvHeads: Int
+    var attentionHeadDim: Int
+    var rotaryDim: Int
+    var gdnKeyHeads: Int
+    var gdnValueHeads: Int
+    var gdnKeyHeadDim: Int
+    var gdnValueHeadDim: Int
+    var gdnConvKernel: Int
+    var mtpLayers: Int
+}
+
+fun qwenConfigError(code: String, field: String, message: String)
+    r: QwenConfigError {
+    return QwenConfigError{ code: code, field: field, message: message }
+}
+
+fun qwenExactString(object: JsonValue, field: String, expected: String) r: Bool {
+    let value = object.get(field)
+    return not value.isNone() and value.unwrap().isString() and
+        value.unwrap().getString() == expected
+}
+
+fun qwenExactBool(object: JsonValue, field: String, expected: Bool) r: Bool {
+    let value = object.get(field)
+    return not value.isNone() and value.unwrap().isBool() and
+        value.unwrap().getBool() == expected
+}
+
+fun qwenExactNumber(object: JsonValue, field: String, expected: Float) r: Bool {
+    let value = object.get(field)
+    return not value.isNone() and value.unwrap().isNumber() and
+        value.unwrap().getNumber() == expected
+}
+
+fun qwenExactInt(object: JsonValue, field: String, expected: Int) r: Bool {
+    return qwenExactNumber(object, field, expected.toFloat())
+}
+
+pub fun qwenLayerIsFullAttention(layerIndex: Int)
+    r: Result<Bool, QwenConfigError> {
+    if layerIndex < 0 or layerIndex >= 64 {
+        return Err<Bool, QwenConfigError>(qwenConfigError(
+            "qwen.config.layer-index", "layer_types",
+            "layer index must be between 0 and 63"))
+    }
+    return Ok<Bool, QwenConfigError>(layerIndex % 4 == 3)
+}
+
+fun validateQwenLayerSchedule(config: JsonValue) r: Result<Bool, QwenConfigError> {
+    let layerTypes = config.get("layer_types")
+    if layerTypes.isNone() or not layerTypes.unwrap().isArray() or
+        layerTypes.unwrap().length() != 64 {
+        return Err<Bool, QwenConfigError>(qwenConfigError(
+            "qwen.config.layer-count", "text_config.layer_types",
+            "exactly 64 layer types are required"))
+    }
+    var layer = 0
+    while layer < 64 {
+        let entry = layerTypes.unwrap().getAt(layer)
+        let expected = if layer % 4 == 3 {
+            "full_attention"
+        } else {
+            "linear_attention"
+        }
+        if entry.isNone() or not entry.unwrap().isString() or
+            entry.unwrap().getString() != expected {
+            return Err<Bool, QwenConfigError>(qwenConfigError(
+                "qwen.config.layer-schedule", "text_config.layer_types",
+                "the pinned 3:1 linear/full attention schedule is required"))
+        }
+        layer = layer + 1
+    }
+    return Ok<Bool, QwenConfigError>(true)
+}
+
+fun validateQwenRopeGeometry(config: JsonValue) r: Result<Bool, QwenConfigError> {
+    let ropeValue = config.get("rope_parameters")
+    if ropeValue.isNone() or not ropeValue.unwrap().isObject() {
+        return Err<Bool, QwenConfigError>(qwenConfigError(
+            "qwen.config.rope", "text_config.rope_parameters",
+            "the pinned RoPE object is required"))
+    }
+    let rope = ropeValue.unwrap()
+    if not qwenExactString(rope, "rope_type", "default") or
+        not qwenExactNumber(rope, "rope_theta", 10000000.0) or
+        not qwenExactNumber(rope, "partial_rotary_factor", 0.25) or
+        not qwenExactBool(rope, "mrope_interleaved", true) {
+        return Err<Bool, QwenConfigError>(qwenConfigError(
+            "qwen.config.rope", "text_config.rope_parameters",
+            "RoPE type, theta, partial factor, and interleaving must match the lock"))
+    }
+    let sectionValue = rope.get("mrope_section")
+    if sectionValue.isNone() or not sectionValue.unwrap().isArray() or
+        sectionValue.unwrap().length() != 3 {
+        return Err<Bool, QwenConfigError>(qwenConfigError(
+            "qwen.config.rope-section", "text_config.rope_parameters.mrope_section",
+            "the text MRoPE section must contain three entries"))
+    }
+    let section = sectionValue.unwrap()
+    var index = 0
+    while index < 3 {
+        let value = section.getAt(index)
+        let expected = if index < 2 { 11.0 } else { 10.0 }
+        if value.isNone() or not value.unwrap().isNumber() or
+            value.unwrap().getNumber() != expected {
+            return Err<Bool, QwenConfigError>(qwenConfigError(
+                "qwen.config.rope-section",
+                "text_config.rope_parameters.mrope_section",
+                "the pinned MRoPE section [11, 11, 10] is required"))
+        }
+        index = index + 1
+    }
+    return Ok<Bool, QwenConfigError>(true)
+}
+
+pub fun parseQwen38Config(text: String)
+    r: Result<Qwen38Config, QwenConfigError> {
+    let parsed = parseStrictJson(text, StrictJsonLimits{
+        maxInputBytes: 1048576,
+        maxDepth: 24,
+        maxValues: 8192,
+        maxStringBytes: 65536,
+    })
+    if parsed.isErr() {
+        return Err<Qwen38Config, QwenConfigError>(qwenConfigError(
+            "qwen.config.json", "json", parsed.unwrapErr().message))
+    }
+    let document = parsed.unwrap()
+    let rootValue = document.value
+    if rootValue.isNone() or not rootValue.unwrap().isObject() {
+        destroyJsonParseResult(document, true)
+        return Err<Qwen38Config, QwenConfigError>(qwenConfigError(
+            "qwen.config.root", "json", "configuration root must be an object"))
+    }
+    let root = rootValue.unwrap()
+    let architectures = root.get("architectures")
+    if architectures.isNone() or not architectures.unwrap().isArray() or
+        architectures.unwrap().length() != 1 or
+        architectures.unwrap().getAt(0).isNone() or
+        not architectures.unwrap().getAt(0).unwrap().isString() or
+        architectures.unwrap().getAt(0).unwrap().getString() !=
+            "Qwen3_5ForConditionalGeneration" or
+        not qwenExactString(root, "model_type", "qwen3_5") or
+        not qwenExactBool(root, "language_model_only", false) or
+        not qwenExactBool(root, "tie_word_embeddings", false) {
+        destroyJsonParseResult(document, true)
+        return Err<Qwen38Config, QwenConfigError>(qwenConfigError(
+            "qwen.config.identity", "identity",
+            "top-level identity does not match the frozen Qwen3.8-27B contract"))
+    }
+    let textConfigValue = root.get("text_config")
+    if textConfigValue.isNone() or not textConfigValue.unwrap().isObject() {
+        destroyJsonParseResult(document, true)
+        return Err<Qwen38Config, QwenConfigError>(qwenConfigError(
+            "qwen.config.text", "text_config", "text_config must be an object"))
+    }
+    let config = textConfigValue.unwrap()
+    if not qwenExactString(config, "model_type", "qwen3_5_text") or
+        not qwenExactString(config, "dtype", "bfloat16") or
+        not qwenExactInt(config, "num_hidden_layers", 64) or
+        not qwenExactInt(config, "hidden_size", 5120) or
+        not qwenExactInt(config, "intermediate_size", 17408) or
+        not qwenExactInt(config, "vocab_size", 248320) or
+        not qwenExactInt(config, "max_position_embeddings", 262144) or
+        not qwenExactInt(config, "full_attention_interval", 4) or
+        not qwenExactInt(config, "mtp_num_hidden_layers", 1) or
+        not qwenExactBool(config, "mtp_use_dedicated_embeddings", false) or
+        not qwenExactBool(config, "tie_word_embeddings", false) {
+        destroyJsonParseResult(document, true)
+        return Err<Qwen38Config, QwenConfigError>(qwenConfigError(
+            "qwen.config.text-identity", "text_config",
+            "text identity or core geometry does not match the frozen contract"))
+    }
+    if not qwenExactInt(config, "num_attention_heads", 24) or
+        not qwenExactInt(config, "num_key_value_heads", 4) or
+        not qwenExactInt(config, "head_dim", 256) or
+        not qwenExactNumber(config, "partial_rotary_factor", 0.25) or
+        not qwenExactBool(config, "attention_bias", false) or
+        not qwenExactNumber(config, "attention_dropout", 0.0) or
+        not qwenExactBool(config, "attn_output_gate", true) or
+        not qwenExactNumber(config, "rms_norm_eps", 0.000001) {
+        destroyJsonParseResult(document, true)
+        return Err<Qwen38Config, QwenConfigError>(qwenConfigError(
+            "qwen.config.attention", "text_config",
+            "full-attention geometry or semantics does not match the frozen contract"))
+    }
+    if not qwenExactInt(config, "linear_num_key_heads", 16) or
+        not qwenExactInt(config, "linear_num_value_heads", 48) or
+        not qwenExactInt(config, "linear_key_head_dim", 128) or
+        not qwenExactInt(config, "linear_value_head_dim", 128) or
+        not qwenExactInt(config, "linear_conv_kernel_dim", 4) or
+        not qwenExactString(config, "mamba_ssm_dtype", "float32") or
+        not qwenExactString(config, "output_gate_type", "swish") or
+        not qwenExactString(config, "hidden_act", "silu") {
+        destroyJsonParseResult(document, true)
+        return Err<Qwen38Config, QwenConfigError>(qwenConfigError(
+            "qwen.config.gdn", "text_config",
+            "Gated DeltaNet geometry or semantics does not match the frozen contract"))
+    }
+    let layers = validateQwenLayerSchedule(config)
+    if layers.isErr() {
+        let error = layers.unwrapErr()
+        destroyJsonParseResult(document, true)
+        return Err<Qwen38Config, QwenConfigError>(error)
+    }
+    let rope = validateQwenRopeGeometry(config)
+    if rope.isErr() {
+        let error = rope.unwrapErr()
+        destroyJsonParseResult(document, true)
+        return Err<Qwen38Config, QwenConfigError>(error)
+    }
+    destroyJsonParseResult(document, true)
+    return Ok<Qwen38Config, QwenConfigError>(Qwen38Config{
+        layers: 64,
+        linearAttentionLayers: 48,
+        fullAttentionLayers: 16,
+        hiddenSize: 5120,
+        intermediateSize: 17408,
+        vocabularySize: 248320,
+        maxPositions: 262144,
+        fullAttentionInterval: 4,
+        attentionHeads: 24,
+        attentionKvHeads: 4,
+        attentionHeadDim: 256,
+        rotaryDim: 64,
+        gdnKeyHeads: 16,
+        gdnValueHeads: 48,
+        gdnKeyHeadDim: 128,
+        gdnValueHeadDim: 128,
+        gdnConvKernel: 4,
+        mtpLayers: 1,
+    })
+}
