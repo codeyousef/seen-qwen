@@ -1,0 +1,7 @@
+version = 2
+manifest_sha256 = "bd6f4542ef840b382957048be9fe9115e217e13423ab20c604877a761ed9d2c9"
+
+[root]
+name = "seen_qwen"
+version = "0.15.0-dev"
+dependencies = []
