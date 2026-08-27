@@ -103,11 +103,17 @@ outside_objects_before=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o \
 "$SEEN_PACKAGE_CLIENT" --expect-version 0.15.0 version |
     grep -Fx 'seen-pkg 0.15.0 (SEENPKG1)'
 python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.py \
-    tests/test_sampling_profiles.py
+    tests/test_sampling_profiles.py tests/test_hybrid_mini_contract.py
 "$SEEN_PACKAGE_CLIENT" audit --lock Seen.lock
+"$SEEN_COMPILER" check tests/qwn_023a_hybrid_mini_contract_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022d_sampling_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022b_tokenizer_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022c_chat_template_test.seen --frozen
+"$SEEN_COMPILER" compile tests/qwn_023a_hybrid_mini_contract_test.seen \
+    "$OUTPUT_ROOT/qwn_023a_hybrid_mini_contract_test" \
+    --release --lto=thin --target-cpu=x86-64 --no-cache \
+    --jobs 1 --opt-jobs 1 --no-fork --frozen
+"$OUTPUT_ROOT/qwn_023a_hybrid_mini_contract_test"
 "$SEEN_COMPILER" compile tests/qwn_022c_chat_template_test.seen \
     "$OUTPUT_ROOT/qwn_022c_chat_template_test" \
     --release --lto=thin --target-cpu=x86-64 --no-cache \
@@ -137,4 +143,4 @@ outside_objects_after=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o \
 [ -d "$ARTIFACT_ROOT" ] && [ ! -L "$ARTIFACT_ROOT" ] ||
     fail "project artifact root is unsafe"
 
-echo "PASS: exact locked Seen Qwen tokenizer, chat-template, and sampling gates"
+echo "PASS: exact locked Seen Qwen mini-model, tokenizer, chat-template, and sampling gates"

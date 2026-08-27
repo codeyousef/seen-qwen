@@ -1,0 +1,80 @@
+import io.file.{readText}
+import str.string.{replaceFirst}
+import seen_qwen.model.config.{parseQwen38Config, parseQwenHybridMiniContract}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun main() r: Int {
+    let text = readText("tests/fixtures/qwen3_8_hybrid_mini_contract.json")
+    let parsed = parseQwenHybridMiniContract(text)
+    if parsed.isErr() {
+        let error = parsed.unwrapErr()
+        println("unexpected mini-contract error: " + error.code + " field=" +
+            error.field + " message=" + error.message)
+    }
+    require(parsed.isOkay(), "accept exact hybrid mini-model contract")
+    let config = parsed.unwrap()
+    require(config.deterministicSeed == 20260827 and config.layers == 8 and
+        config.linearAttentionLayers == 6 and config.fullAttentionLayers == 2,
+        "freeze deterministic identity and 3:1 layer counts")
+    require(config.hiddenSize == 48 and config.intermediateSize == 160 and
+        config.vocabularySize == 256 and config.maxPositions == 128,
+        "freeze bounded core geometry")
+    require(config.attentionHeads == 6 and config.attentionKvHeads == 1 and
+        config.attentionHeadDim == 24 and config.rotaryDim == 6,
+        "freeze grouped-query and rotary geometry")
+    require(config.gdnKeyHeads == 2 and config.gdnValueHeads == 6 and
+        config.gdnKeyHeadDim == 8 and config.gdnValueHeadDim == 8 and
+        config.gdnConvKernel == 4 and config.mtpLayers == 1,
+        "freeze GDN and MTP geometry")
+    require(parseQwen38Config(text).isErr(),
+        "mini-model contract must never pass the production Qwen config parser")
+
+    require(parseQwenHybridMiniContract(replaceFirst(text,
+        "\"qwen_compatible\": false", "\"qwen_compatible\": true")).isErr(),
+        "reject a Qwen-compatibility claim")
+    require(parseQwenHybridMiniContract(replaceFirst(text,
+        "\"num_hidden_layers\": 8", "\"num_hidden_layers\": 12")).isErr(),
+        "reject a changed layer count")
+    require(parseQwenHybridMiniContract(replaceFirst(text,
+        "\"full_attention\"", "\"linear_attention\"")).isErr(),
+        "reject a changed hybrid schedule")
+    require(parseQwenHybridMiniContract(replaceFirst(text,
+        "\"num_key_value_heads\": 1", "\"num_key_value_heads\": 2")).isErr(),
+        "reject a changed grouped-query ratio")
+    require(parseQwenHybridMiniContract(replaceFirst(text,
+        "\"linear_num_value_heads\": 6", "\"linear_num_value_heads\": 5")).isErr(),
+        "reject a changed GDN head ratio")
+    require(parseQwenHybridMiniContract(replaceFirst(text,
+        "\"mtp_num_hidden_layers\": 1", "\"mtp_num_hidden_layers\": 0")).isErr(),
+        "reject removal of the MTP layer")
+    require(parseQwenHybridMiniContract(replaceFirst(text,
+        "\"model.language_model.*\"", "\"model.visual.*\"")).isErr(),
+        "reject vision in the required namespaces")
+    require(parseQwenHybridMiniContract(replaceFirst(text,
+        "\"schema\": \"seen-qwen-hybrid-mini-v1\",",
+        "\"schema\": \"seen-qwen-hybrid-mini-v1\",\n  \"schema\": \"duplicate\",")).isErr(),
+        "reject duplicate root fields")
+    require(parseQwenHybridMiniContract("[").isErr(), "reject malformed JSON")
+
+    var oversized = ""
+    var index = 0
+    while index < 17000 {
+        oversized = oversized + "x"
+        index = index + 1
+    }
+    require(parseQwenHybridMiniContract(oversized).isErr(),
+        "reject input beyond the strict byte bound")
+    index = 0
+    while index < 32 {
+        require(parseQwenHybridMiniContract(text).isOkay(),
+            "parse deterministically with cleanup")
+        index = index + 1
+    }
+    println("PASS: QWN-023A frozen deterministic hybrid mini-model contract")
+    return 0
+}
+
+main()
