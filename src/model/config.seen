@@ -42,6 +42,27 @@ pub class Qwen38Config {
     var mtpLayers: Int
 }
 
+pub class QwenHybridMiniContract {
+    var deterministicSeed: Int
+    var layers: Int
+    var linearAttentionLayers: Int
+    var fullAttentionLayers: Int
+    var hiddenSize: Int
+    var intermediateSize: Int
+    var vocabularySize: Int
+    var maxPositions: Int
+    var attentionHeads: Int
+    var attentionKvHeads: Int
+    var attentionHeadDim: Int
+    var rotaryDim: Int
+    var gdnKeyHeads: Int
+    var gdnValueHeads: Int
+    var gdnKeyHeadDim: Int
+    var gdnValueHeadDim: Int
+    var gdnConvKernel: Int
+    var mtpLayers: Int
+}
+
 fun qwenConfigError(code: String, field: String, message: String)
     r: QwenConfigError {
     return QwenConfigError{ code: code, field: field, message: message }
@@ -260,6 +281,195 @@ pub fun parseQwen38Config(text: String)
         gdnValueHeads: 48,
         gdnKeyHeadDim: 128,
         gdnValueHeadDim: 128,
+        gdnConvKernel: 4,
+        mtpLayers: 1,
+    })
+}
+
+fun validateHybridMiniSchedule(root: JsonValue) r: Result<Bool, QwenConfigError> {
+    let layerTypes = root.get("layer_types")
+    if layerTypes.isNone() or not layerTypes.unwrap().isArray() or
+        layerTypes.unwrap().length() != 8 {
+        return Err<Bool, QwenConfigError>(qwenConfigError(
+            "qwen.mini.schedule", "layer_types",
+            "exactly eight layer types are required"))
+    }
+    var layer = 0
+    while layer < 8 {
+        let value = layerTypes.unwrap().getAt(layer)
+        let expected = if layer % 4 == 3 {
+            "full_attention"
+        } else {
+            "linear_attention"
+        }
+        if value.isNone() or not value.unwrap().isString() or
+            value.unwrap().getString() != expected {
+            return Err<Bool, QwenConfigError>(qwenConfigError(
+                "qwen.mini.schedule", "layer_types",
+                "the exact 3:1 GDN/full-attention schedule is required"))
+        }
+        layer = layer + 1
+    }
+    return Ok<Bool, QwenConfigError>(true)
+}
+
+fun validateHybridMiniArrays(root: JsonValue) r: Result<Bool, QwenConfigError> {
+    let sectionValue = root.get("mrope_section")
+    if sectionValue.isNone() or not sectionValue.unwrap().isArray() or
+        sectionValue.unwrap().length() != 3 {
+        return Err<Bool, QwenConfigError>(qwenConfigError(
+            "qwen.mini.semantics", "mrope_section",
+            "the exact MRoPE section [1, 1, 1] is required"))
+    }
+    var index = 0
+    while index < 3 {
+        let value = sectionValue.unwrap().getAt(index)
+        if value.isNone() or not value.unwrap().isNumber() or
+            value.unwrap().getNumber() != 1.0 {
+            return Err<Bool, QwenConfigError>(qwenConfigError(
+                "qwen.mini.semantics", "mrope_section",
+                "the exact MRoPE section [1, 1, 1] is required"))
+        }
+        index = index + 1
+    }
+    let requiredValue = root.get("required_namespaces")
+    if requiredValue.isNone() or not requiredValue.unwrap().isArray() or
+        requiredValue.unwrap().length() != 3 {
+        return Err<Bool, QwenConfigError>(qwenConfigError(
+            "qwen.mini.namespaces", "required_namespaces",
+            "the exact text, LM-head, and MTP namespaces are required"))
+    }
+    let required = requiredValue.unwrap()
+    if required.getAt(0).isNone() or not required.getAt(0).unwrap().isString() or
+        required.getAt(0).unwrap().getString() != "model.language_model.*" or
+        required.getAt(1).isNone() or not required.getAt(1).unwrap().isString() or
+        required.getAt(1).unwrap().getString() != "lm_head.weight" or
+        required.getAt(2).isNone() or not required.getAt(2).unwrap().isString() or
+        required.getAt(2).unwrap().getString() != "mtp.*" {
+        return Err<Bool, QwenConfigError>(qwenConfigError(
+            "qwen.mini.namespaces", "required_namespaces",
+            "the exact text, LM-head, and MTP namespaces are required"))
+    }
+    let excludedValue = root.get("excluded_namespaces")
+    if excludedValue.isNone() or not excludedValue.unwrap().isArray() or
+        excludedValue.unwrap().length() != 1 or
+        excludedValue.unwrap().getAt(0).isNone() or
+        not excludedValue.unwrap().getAt(0).unwrap().isString() or
+        excludedValue.unwrap().getAt(0).unwrap().getString() != "model.visual.*" {
+        return Err<Bool, QwenConfigError>(qwenConfigError(
+            "qwen.mini.namespaces", "excluded_namespaces",
+            "the visual namespace must be excluded"))
+    }
+    return Ok<Bool, QwenConfigError>(true)
+}
+
+/// Parse the exact deterministic QWN-023 hybrid mini-model fixture contract.
+pub fun parseQwenHybridMiniContract(text: String)
+    r: Result<QwenHybridMiniContract, QwenConfigError> {
+    let parsed = parseStrictJson(text, StrictJsonLimits{
+        maxInputBytes: 16384,
+        maxDepth: 8,
+        maxValues: 128,
+        maxStringBytes: 4096,
+    })
+    if parsed.isErr() {
+        return Err<QwenHybridMiniContract, QwenConfigError>(qwenConfigError(
+            "qwen.mini.parse", "json", parsed.unwrapErr().message))
+    }
+    let document = parsed.unwrap()
+    let rootValue = document.value
+    if rootValue.isNone() or not rootValue.unwrap().isObject() {
+        destroyJsonParseResult(document, true)
+        return Err<QwenHybridMiniContract, QwenConfigError>(qwenConfigError(
+            "qwen.mini.identity", "json", "contract root must be an object"))
+    }
+    let root = rootValue.unwrap()
+    if root.length() != 39 or
+        not qwenExactString(root, "schema", "seen-qwen-hybrid-mini-v1") or
+        not qwenExactString(root, "fixture_id", "qwen3_8_hybrid_mini_v1") or
+        not qwenExactBool(root, "qwen_compatible", false) or
+        not qwenExactInt(root, "deterministic_seed", 20260827) or
+        not qwenExactString(root, "weights_dtype", "float32") {
+        destroyJsonParseResult(document, true)
+        return Err<QwenHybridMiniContract, QwenConfigError>(qwenConfigError(
+            "qwen.mini.identity", "identity",
+            "fixture identity, seed, dtype, and field set must match the lock"))
+    }
+    if not qwenExactInt(root, "num_hidden_layers", 8) or
+        not qwenExactInt(root, "linear_attention_layers", 6) or
+        not qwenExactInt(root, "full_attention_layers", 2) or
+        not qwenExactInt(root, "hidden_size", 48) or
+        not qwenExactInt(root, "intermediate_size", 160) or
+        not qwenExactInt(root, "vocab_size", 256) or
+        not qwenExactInt(root, "max_position_embeddings", 128) or
+        not qwenExactInt(root, "full_attention_interval", 4) {
+        destroyJsonParseResult(document, true)
+        return Err<QwenHybridMiniContract, QwenConfigError>(qwenConfigError(
+            "qwen.mini.geometry", "geometry",
+            "core mini-model geometry must match the lock"))
+    }
+    if not qwenExactInt(root, "num_attention_heads", 6) or
+        not qwenExactInt(root, "num_key_value_heads", 1) or
+        not qwenExactInt(root, "head_dim", 24) or
+        not qwenExactNumber(root, "partial_rotary_factor", 0.25) or
+        not qwenExactInt(root, "rotary_dim", 6) or
+        not qwenExactNumber(root, "rope_theta", 10000000.0) or
+        not qwenExactBool(root, "mrope_interleaved", true) or
+        not qwenExactBool(root, "attention_bias", false) or
+        not qwenExactNumber(root, "attention_dropout", 0.0) or
+        not qwenExactBool(root, "attn_output_gate", true) or
+        not qwenExactNumber(root, "rms_norm_eps", 0.000001) {
+        destroyJsonParseResult(document, true)
+        return Err<QwenHybridMiniContract, QwenConfigError>(qwenConfigError(
+            "qwen.mini.semantics", "attention",
+            "attention and RoPE semantics must match the lock"))
+    }
+    if not qwenExactInt(root, "linear_num_key_heads", 2) or
+        not qwenExactInt(root, "linear_num_value_heads", 6) or
+        not qwenExactInt(root, "linear_key_head_dim", 8) or
+        not qwenExactInt(root, "linear_value_head_dim", 8) or
+        not qwenExactInt(root, "linear_conv_kernel_dim", 4) or
+        not qwenExactString(root, "mamba_ssm_dtype", "float32") or
+        not qwenExactString(root, "output_gate_type", "swish") or
+        not qwenExactString(root, "hidden_act", "silu") or
+        not qwenExactInt(root, "mtp_num_hidden_layers", 1) or
+        not qwenExactBool(root, "mtp_use_dedicated_embeddings", false) or
+        not qwenExactBool(root, "tie_word_embeddings", false) {
+        destroyJsonParseResult(document, true)
+        return Err<QwenHybridMiniContract, QwenConfigError>(qwenConfigError(
+            "qwen.mini.semantics", "gdn-mtp",
+            "GDN, FFN, and MTP semantics must match the lock"))
+    }
+    let schedule = validateHybridMiniSchedule(root)
+    if schedule.isErr() {
+        let error = schedule.unwrapErr()
+        destroyJsonParseResult(document, true)
+        return Err<QwenHybridMiniContract, QwenConfigError>(error)
+    }
+    let arrays = validateHybridMiniArrays(root)
+    if arrays.isErr() {
+        let error = arrays.unwrapErr()
+        destroyJsonParseResult(document, true)
+        return Err<QwenHybridMiniContract, QwenConfigError>(error)
+    }
+    destroyJsonParseResult(document, true)
+    return Ok<QwenHybridMiniContract, QwenConfigError>(QwenHybridMiniContract{
+        deterministicSeed: 20260827,
+        layers: 8,
+        linearAttentionLayers: 6,
+        fullAttentionLayers: 2,
+        hiddenSize: 48,
+        intermediateSize: 160,
+        vocabularySize: 256,
+        maxPositions: 128,
+        attentionHeads: 6,
+        attentionKvHeads: 1,
+        attentionHeadDim: 24,
+        rotaryDim: 6,
+        gdnKeyHeads: 2,
+        gdnValueHeads: 6,
+        gdnKeyHeadDim: 8,
+        gdnValueHeadDim: 8,
         gdnConvKernel: 4,
         mtpLayers: 1,
     })
