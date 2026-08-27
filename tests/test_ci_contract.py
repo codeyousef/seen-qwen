@@ -30,7 +30,7 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-24.04", self.workflow)
         self.assertIn("timeout-minutes: 30", self.workflow)
         self.assertIn(
-            "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
             self.workflow,
         )
         self.assertNotRegex(self.workflow, r"uses: [^\n]+@(v|main|master)")
