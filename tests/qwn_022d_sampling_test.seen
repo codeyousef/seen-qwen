@@ -1,0 +1,90 @@
+import io.file.{readText}
+import str.string.{replaceAll, replaceFirst}
+import seen_qwen.tokenizer.tokenizer.{qwenSamplingQuery}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun main() r: Int {
+    let text = readText("profiles/sampling.toml")
+    let parsed = qwenSamplingQuery(text, "validate")
+    if parsed.isErr() {
+        let error = parsed.unwrapErr()
+        println("unexpected sampling parse error: " + error.code + " field=" +
+            error.field + " message=" + error.message)
+    }
+    require(parsed.isOkay(), "accept exact locked sampling profiles")
+    require(qwenSamplingQuery(text, "thinking.mode").unwrap() == "sampling" and
+        qwenSamplingQuery(text, "thinking.temperature").unwrap().toFloat() == 1.0 and
+        qwenSamplingQuery(text, "thinking.top_p").unwrap().toFloat() == 0.95 and
+        qwenSamplingQuery(text, "thinking.top_k").unwrap().toFloat().toInt() == 20 and
+        qwenSamplingQuery(text, "thinking.min_p").unwrap().toFloat() == 0.0 and
+        qwenSamplingQuery(text, "thinking.repetition_penalty").unwrap().toFloat() == 1.0 and
+        qwenSamplingQuery(text, "thinking.presence_penalty").unwrap().toFloat() == 0.0 and
+        qwenSamplingQuery(text, "thinking.seed_policy").unwrap() == "explicit" and
+        qwenSamplingQuery(text, "thinking.thinking_mode").unwrap() == "true" and
+        qwenSamplingQuery(text, "thinking.preserve_thinking").unwrap() == "true",
+        "resolve exact official thinking profile")
+
+    require(qwenSamplingQuery(text, "instruct.mode").unwrap() == "sampling" and
+        qwenSamplingQuery(text, "instruct.temperature").unwrap().toFloat() == 0.7 and
+        qwenSamplingQuery(text, "instruct.top_p").unwrap().toFloat() == 0.80 and
+        qwenSamplingQuery(text, "instruct.top_k").unwrap().toFloat().toInt() == 20 and
+        qwenSamplingQuery(text, "instruct.min_p").unwrap().toFloat() == 0.0 and
+        qwenSamplingQuery(text, "instruct.repetition_penalty").unwrap().toFloat() == 1.0 and
+        qwenSamplingQuery(text, "instruct.presence_penalty").unwrap().toFloat() == 1.5 and
+        qwenSamplingQuery(text, "instruct.seed_policy").unwrap() == "explicit" and
+        qwenSamplingQuery(text, "instruct.thinking_mode").unwrap() == "false" and
+        qwenSamplingQuery(text, "instruct.preserve_thinking").unwrap() == "true",
+        "resolve exact official instruct profile")
+
+    require(qwenSamplingQuery(text, "greedy.mode").unwrap() == "greedy" and
+        qwenSamplingQuery(text, "greedy.top_k").unwrap().toFloat().toInt() == 1 and
+        qwenSamplingQuery(text, "greedy.seed_policy").unwrap() == "unused",
+        "resolve deterministic greedy profile")
+    require(qwenSamplingQuery(text, "custom.mode").unwrap() == "custom" and
+        qwenSamplingQuery(text, "custom.top_k").unwrap().toFloat().toInt() == 248320 and
+        qwenSamplingQuery(text, "custom.seed_policy").unwrap() == "explicit",
+        "resolve bounded custom profile")
+    require(qwenSamplingQuery(text, "missing.mode").isErr(),
+        "reject unknown profile lookup")
+    require(qwenSamplingQuery(text, "thinking.unknown").isErr(),
+        "reject unknown field lookup")
+    require(qwenSamplingQuery(replaceFirst(text,
+        "temperature = 1.0", "temperature = 0.0"), "validate").isErr(),
+        "reject zero temperature")
+    require(qwenSamplingQuery(replaceAll(text,
+        "top_p = 1.0", "top_p = 0.0"), "validate").isErr(), "reject zero top-p")
+    require(qwenSamplingQuery(replaceAll(text,
+        "top_k = 1", "top_k = 0"), "validate").isErr(), "reject zero top-k")
+    require(qwenSamplingQuery(replaceAll(text,
+        "top_k = 248320", "top_k = 248321"), "validate").isErr(),
+        "reject top-k beyond padded vocabulary")
+    require(qwenSamplingQuery(replaceAll(text,
+        "min_p = 0.0", "min_p = -0.000001"), "validate").isErr(),
+        "reject negative min-p")
+    require(qwenSamplingQuery(replaceAll(text,
+        "repetition_penalty = 1.0", "repetition_penalty = 0.0"),
+        "validate").isErr(),
+        "reject zero repetition penalty")
+    require(qwenSamplingQuery(replaceAll(text,
+        "presence_penalty = 0.0", "presence_penalty = 2.000001"),
+        "validate").isErr(),
+        "reject high presence penalty")
+    require(qwenSamplingQuery(text + "\nmodel_id = \"duplicate\"\n",
+        "validate").isErr(),
+        "reject duplicate fields")
+    require(qwenSamplingQuery(text + "\nunknown = 1\n", "validate").isErr(),
+        "reject unknown fields")
+    require(qwenSamplingQuery(replaceAll(text,
+        "seed_max_inclusive = 9223372036854775807",
+        "seed_max_inclusive = 9223372036854775808"), "validate").isErr(),
+        "reject signed 64-bit overflow")
+    require(qwenSamplingQuery("[", "validate").isErr(), "reject malformed TOML")
+
+    println("PASS: QWN-022D immutable sampling profiles and deterministic bounds")
+    return 0
+}
+
+main()

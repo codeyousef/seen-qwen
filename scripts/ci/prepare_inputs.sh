@@ -17,10 +17,16 @@ SEEN_COMPATIBILITY_SHA256="3472e3b9e99234d51bdcf62aef985909cb0b6d574283ae5fcb761
 QWEN_REVISION="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 QWEN_VOCAB_URL="https://huggingface.co/Qwen/Qwen3.8-27B/resolve/$QWEN_REVISION/vocab.json?download=true"
 QWEN_MERGES_URL="https://huggingface.co/Qwen/Qwen3.8-27B/resolve/$QWEN_REVISION/merges.txt?download=true"
+QWEN_GENERATION_URL="https://huggingface.co/Qwen/Qwen3.8-27B/resolve/$QWEN_REVISION/generation_config.json?download=true"
+QWEN_MODEL_CARD_URL="https://huggingface.co/Qwen/Qwen3.8-27B/resolve/$QWEN_REVISION/README.md?download=true"
 QWEN_VOCAB_SHA256="ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
 QWEN_MERGES_SHA256="a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d"
+QWEN_GENERATION_SHA256="e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e"
+QWEN_MODEL_CARD_SHA256="57e4bdb258ee1a7d2635c5174ebd4e56abe392505cdb5f8bbb356b0dc4293641"
 QWEN_VOCAB_BYTES=6722759
 QWEN_MERGES_BYTES=3353259
+QWEN_GENERATION_BYTES=202
+QWEN_MODEL_CARD_BYTES=65012
 
 fail() {
     echo "ci-inputs: $*" >&2
@@ -123,5 +129,9 @@ download_verified "$QWEN_VOCAB_URL" "$ASSET_ROOT/vocab.json" \
     "$QWEN_VOCAB_SHA256" "$QWEN_VOCAB_BYTES"
 download_verified "$QWEN_MERGES_URL" "$ASSET_ROOT/merges.txt" \
     "$QWEN_MERGES_SHA256" "$QWEN_MERGES_BYTES"
+download_verified "$QWEN_GENERATION_URL" "$ASSET_ROOT/generation_config.json" \
+    "$QWEN_GENERATION_SHA256" "$QWEN_GENERATION_BYTES"
+download_verified "$QWEN_MODEL_CARD_URL" "$ASSET_ROOT/README.md" \
+    "$QWEN_MODEL_CARD_SHA256" "$QWEN_MODEL_CARD_BYTES"
 
-echo "PASS: exact Seen v0.15.0 toolchain and Qwen tokenizer inputs verified"
+echo "PASS: exact Seen v0.15.0 toolchain and Qwen tokenizer/sampling inputs verified"
