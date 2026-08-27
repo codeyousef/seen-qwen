@@ -1,0 +1,601 @@
+///
+Native, bounded Qwen3.8 byte-level BPE tokenizer vocabulary engine.
+
+Qwen semantic source:
+QWEN-008 / model revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+QWEN-007 @ 562cfd944ee1f20702cfb0f4404014ee27c24813
+path: src/transformers/models/qwen2/tokenization_qwen2.py
+symbol: Qwen2Tokenizer / PRETOKENIZE_REGEX
+contract test: FEL-1401 / QWN-022B
+///
+
+import core.result.{Result}
+import crypto.sha256.{sha256File}
+import io.file.{readText}
+import json.strict.{StrictJsonLimits, parseStrictJson}
+import json.parser.{JsonParseResult, destroyJsonParseResult}
+import str.string.{replaceAll, substringByCodepoints, utf8CodepointLength}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+let QWEN_VOCAB_BYTES: Int = 6722759
+let QWEN_MERGES_BYTES: Int = 3353259
+let QWEN_VOCAB_SIZE: Int = 248044
+let QWEN_MERGE_COUNT: Int = 247587
+let QWEN_MAX_INPUT_BYTES: Int = 65536
+
+pub class QwenTokenizerError {
+    var code: String
+    var field: String
+    var message: String
+    var retryable: Bool
+}
+
+class QwenVocabEntry {
+    var token: String
+    var id: Int
+}
+
+class QwenMergeEntry {
+    var left: String
+    var right: String
+    var rank: Int
+}
+
+pub class QwenTokenizer {
+    var vocabularyDocument: JsonParseResult
+    var vocabulary: Array<QwenVocabEntry>
+    var tokensById: Array<String>
+    var merges: Array<QwenMergeEntry>
+    var closed: Bool
+
+    fun tokenId(token: String) r: Result<Int, QwenTokenizerError> {
+        if this.closed {
+            return Err<Int, QwenTokenizerError>(qwenTokenizerError(
+                "qwen.tokenizer.closed", "tokenizer", "tokenizer is closed"))
+        }
+        let index = qwenFindVocabulary(this.vocabulary, token)
+        if index < 0 {
+            return Err<Int, QwenTokenizerError>(qwenTokenizerError(
+                "qwen.tokenizer.unknown-token", "token", "token is absent from the pinned vocabulary"))
+        }
+        return Ok<Int, QwenTokenizerError>(this.vocabulary[index].id)
+    }
+
+    fun tokenAt(id: Int) r: Result<String, QwenTokenizerError> {
+        if this.closed {
+            return Err<String, QwenTokenizerError>(qwenTokenizerError(
+                "qwen.tokenizer.closed", "tokenizer", "tokenizer is closed"))
+        }
+        if id < 0 or id >= this.tokensById.length() {
+            return Err<String, QwenTokenizerError>(qwenTokenizerError(
+                "qwen.tokenizer.token-id", "id", "token ID is outside the pinned vocabulary"))
+        }
+        return Ok<String, QwenTokenizerError>(this.tokensById[id])
+    }
+
+    fun encodePiece(piece: String) r: Result<Array<Int>, QwenTokenizerError> {
+        if this.closed {
+            return Err<Array<Int>, QwenTokenizerError>(qwenTokenizerError(
+                "qwen.tokenizer.closed", "tokenizer", "tokenizer is closed"))
+        }
+        if piece.length() > QWEN_MAX_INPUT_BYTES {
+            return Err<Array<Int>, QwenTokenizerError>(qwenTokenizerError(
+                "qwen.tokenizer.input-limit", "piece", "piece exceeds the 64 KiB input bound"))
+        }
+        return qwenEncodeByteLevelPiece(this, piece)
+    }
+
+    fun encode(text: String) r: Result<Array<Int>, QwenTokenizerError> {
+        if this.closed {
+            return Err<Array<Int>, QwenTokenizerError>(qwenTokenizerError(
+                "qwen.tokenizer.closed", "tokenizer", "tokenizer is closed"))
+        }
+        if text.length() > QWEN_MAX_INPUT_BYTES {
+            return Err<Array<Int>, QwenTokenizerError>(qwenTokenizerError(
+                "qwen.tokenizer.input-limit", "text", "text exceeds the 64 KiB input bound"))
+        }
+        let normalized = qwenNormalizeOracleNfc(text)
+        let pieces = qwenPretokenize(normalized)
+        let output = Array<Int>()
+        var pieceIndex = 0
+        while pieceIndex < pieces.length() {
+            let encoded = qwenEncodeByteLevelPiece(this, pieces[pieceIndex])
+            if encoded.isErr() {
+                qwenReleaseStrings(pieces)
+                seen_string_release_owned(normalized)
+                output.free()
+                return Err<Array<Int>, QwenTokenizerError>(encoded.unwrapErr())
+            }
+            let ids = encoded.unwrap()
+            var idIndex = 0
+            while idIndex < ids.length() {
+                output.push(ids[idIndex])
+                idIndex = idIndex + 1
+            }
+            ids.free()
+            pieceIndex = pieceIndex + 1
+        }
+        qwenReleaseStrings(pieces)
+        seen_string_release_owned(normalized)
+        return Ok<Array<Int>, QwenTokenizerError>(output)
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        qwenReleaseMerges(this.merges)
+        this.vocabulary.free()
+        this.tokensById.free()
+        destroyJsonParseResult(this.vocabularyDocument, true)
+        this.closed = true
+    }
+}
+
+fun qwenTokenizerError(code: String, field: String, message: String)
+    r: QwenTokenizerError {
+    return QwenTokenizerError{ code: code, field: field, message: message,
+        retryable: false }
+}
+
+fun qwenCompareStrings(left: String, right: String) r: Int {
+    let common = if left.length() < right.length() { left.length() } else { right.length() }
+    var index = 0
+    while index < common {
+        let a = left.byteAt(index)
+        let b = right.byteAt(index)
+        if a < b { return -1 }
+        if a > b { return 1 }
+        index = index + 1
+    }
+    if left.length() < right.length() { return -1 }
+    if left.length() > right.length() { return 1 }
+    return 0
+}
+
+fun qwenCompareVocab(left: QwenVocabEntry, right: QwenVocabEntry) r: Int {
+    return qwenCompareStrings(left.token, right.token)
+}
+
+fun qwenCompareMerge(left: QwenMergeEntry, right: QwenMergeEntry) r: Int {
+    let first = qwenCompareStrings(left.left, right.left)
+    if first != 0 { return first }
+    return qwenCompareStrings(left.right, right.right)
+}
+
+fun qwenSortVocabulary(values: Array<QwenVocabEntry>) r: Void {
+    if values.length() < 2 { return }
+    let scratch = Array<QwenVocabEntry>()
+    var fill = 0
+    while fill < values.length() {
+        scratch.push(values[fill])
+        fill = fill + 1
+    }
+    var width = 1
+    while width < values.length() {
+        var start = 0
+        while start < values.length() {
+            let middle = if start + width < values.length() { start + width } else { values.length() }
+            let end = if middle + width < values.length() { middle + width } else { values.length() }
+            var left = start
+            var right = middle
+            var output = start
+            while output < end {
+                if right >= end or (left < middle and
+                    qwenCompareVocab(values[left], values[right]) <= 0) {
+                    scratch[output] = values[left]
+                    left = left + 1
+                } else {
+                    scratch[output] = values[right]
+                    right = right + 1
+                }
+                output = output + 1
+            }
+            start = end
+        }
+        var copy = 0
+        while copy < values.length() {
+            values[copy] = scratch[copy]
+            copy = copy + 1
+        }
+        width = width * 2
+    }
+    scratch.free()
+}
+
+fun qwenSortMerges(values: Array<QwenMergeEntry>) r: Void {
+    if values.length() < 2 { return }
+    let scratch = Array<QwenMergeEntry>()
+    var fill = 0
+    while fill < values.length() { scratch.push(values[fill]); fill = fill + 1 }
+    var width = 1
+    while width < values.length() {
+        var start = 0
+        while start < values.length() {
+            let middle = if start + width < values.length() { start + width } else { values.length() }
+            let end = if middle + width < values.length() { middle + width } else { values.length() }
+            var left = start
+            var right = middle
+            var output = start
+            while output < end {
+                if right >= end or (left < middle and
+                    qwenCompareMerge(values[left], values[right]) <= 0) {
+                    scratch[output] = values[left]
+                    left = left + 1
+                } else {
+                    scratch[output] = values[right]
+                    right = right + 1
+                }
+                output = output + 1
+            }
+            start = end
+        }
+        var copy = 0
+        while copy < values.length() { values[copy] = scratch[copy]; copy = copy + 1 }
+        width = width * 2
+    }
+    scratch.free()
+}
+
+fun qwenReleaseMerges(values: Array<QwenMergeEntry>) r: Void {
+    var index = 0
+    while index < values.length() {
+        seen_string_release_owned(values[index].left)
+        seen_string_release_owned(values[index].right)
+        index = index + 1
+    }
+    values.free()
+}
+
+fun qwenFindVocabulary(values: Array<QwenVocabEntry>, token: String) r: Int {
+    var low = 0
+    var high = values.length() - 1
+    while low <= high {
+        let middle = low + (high - low) / 2
+        let compared = qwenCompareStrings(values[middle].token, token)
+        if compared == 0 { return middle }
+        if compared < 0 { low = middle + 1 } else { high = middle - 1 }
+    }
+    return -1
+}
+
+fun qwenFindMerge(values: Array<QwenMergeEntry>, left: String, right: String) r: Int {
+    var low = 0
+    var high = values.length() - 1
+    while low <= high {
+        let middle = low + (high - low) / 2
+        var compared = qwenCompareStrings(values[middle].left, left)
+        if compared == 0 { compared = qwenCompareStrings(values[middle].right, right) }
+        if compared == 0 { return values[middle].rank }
+        if compared < 0 { low = middle + 1 } else { high = middle - 1 }
+    }
+    return -1
+}
+
+pub fun loadQwenTokenizer(vocabPath: String, mergesPath: String)
+    r: Result<QwenTokenizer, QwenTokenizerError> {
+    let vocabHashResult = sha256File(vocabPath, 65536)
+    if vocabHashResult.isErr() {
+        return Err<QwenTokenizer, QwenTokenizerError>(qwenTokenizerError(
+            "qwen.tokenizer.vocab-lock", "vocab.json", "failed to hash the pinned vocabulary"))
+    }
+    let vocabHash = vocabHashResult.unwrap()
+    if vocabHash != "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003" {
+        seen_string_release_owned(vocabHash)
+        return Err<QwenTokenizer, QwenTokenizerError>(qwenTokenizerError(
+            "qwen.tokenizer.vocab-lock", "vocab.json", "vocabulary size or SHA-256 does not match the lock"))
+    }
+    seen_string_release_owned(vocabHash)
+    let mergeHashResult = sha256File(mergesPath, 65536)
+    if mergeHashResult.isErr() {
+        return Err<QwenTokenizer, QwenTokenizerError>(qwenTokenizerError(
+            "qwen.tokenizer.merges-lock", "merges.txt", "failed to hash the pinned merge table"))
+    }
+    let mergeHash = mergeHashResult.unwrap()
+    if mergeHash != "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d" {
+        seen_string_release_owned(mergeHash)
+        return Err<QwenTokenizer, QwenTokenizerError>(qwenTokenizerError(
+            "qwen.tokenizer.merges-lock", "merges.txt", "merge table size or SHA-256 does not match the lock"))
+    }
+    seen_string_release_owned(mergeHash)
+    let vocabText = readText(vocabPath)
+    let mergesText = readText(mergesPath)
+    let loaded = qwenParseLockedTokenizer(vocabText, mergesText)
+    seen_string_release_owned(vocabText)
+    seen_string_release_owned(mergesText)
+    return loaded
+}
+
+fun qwenParseLockedTokenizer(vocabText: String, mergesText: String)
+    r: Result<QwenTokenizer, QwenTokenizerError> {
+    if vocabText.length() != QWEN_VOCAB_BYTES {
+        return Err<QwenTokenizer, QwenTokenizerError>(qwenTokenizerError(
+            "qwen.tokenizer.vocab-lock", "vocab.json", "vocabulary size or SHA-256 does not match the lock"))
+    }
+    if mergesText.length() != QWEN_MERGES_BYTES {
+        return Err<QwenTokenizer, QwenTokenizerError>(qwenTokenizerError(
+            "qwen.tokenizer.merges-lock", "merges.txt", "merge table size or SHA-256 does not match the lock"))
+    }
+    let parsed = parseStrictJson(vocabText, StrictJsonLimits{
+        maxInputBytes: 8388608, maxDepth: 4, maxValues: 300000,
+        maxStringBytes: 4096,
+    })
+    if parsed.isErr() {
+        return Err<QwenTokenizer, QwenTokenizerError>(qwenTokenizerError(
+            "qwen.tokenizer.vocab-json", "vocab.json", parsed.unwrapErr().message))
+    }
+    let document = parsed.unwrap()
+    if document.value.isNone() or not document.value.unwrap().isObject() or
+        document.value.unwrap().length() != QWEN_VOCAB_SIZE {
+        destroyJsonParseResult(document, true)
+        return Err<QwenTokenizer, QwenTokenizerError>(qwenTokenizerError(
+            "qwen.tokenizer.vocab-count", "vocab.json", "exactly 248044 vocabulary entries are required"))
+    }
+    let root = document.value.unwrap()
+    let entryCount = root.length()
+    let vocabulary = Array<QwenVocabEntry>()
+    let tokensById = Array<String>()
+    let seenIds = Array<Bool>()
+    var fill = 0
+    while fill < QWEN_VOCAB_SIZE {
+        tokensById.push("")
+        seenIds.push(false)
+        fill = fill + 1
+    }
+    var keyIndex = 0
+    while keyIndex < entryCount {
+        let key = root.keyAt(keyIndex)
+        let value = root.valueAt(keyIndex)
+        if key.isNone() or value.isNone() or not value.unwrap().isNumber() {
+            vocabulary.free(); tokensById.free(); seenIds.free()
+            destroyJsonParseResult(document, true)
+            return Err<QwenTokenizer, QwenTokenizerError>(qwenTokenizerError(
+                "qwen.tokenizer.vocab-id", "vocab.json", "every vocabulary ID must be an integer"))
+        }
+        let id = value.unwrap().getInt()
+        if id < 0 or id >= QWEN_VOCAB_SIZE or seenIds[id] or
+            value.unwrap().getNumber() != id.toFloat() {
+            vocabulary.free(); tokensById.free(); seenIds.free()
+            destroyJsonParseResult(document, true)
+            return Err<QwenTokenizer, QwenTokenizerError>(qwenTokenizerError(
+                "qwen.tokenizer.vocab-id", "vocab.json", "vocabulary IDs must be unique integers from 0 through 248043"))
+        }
+        seenIds[id] = true
+        tokensById[id] = key.unwrap()
+        vocabulary.push(QwenVocabEntry{ token: key.unwrap(), id: id })
+        keyIndex = keyIndex + 1
+    }
+    seenIds.free()
+    qwenSortVocabulary(vocabulary)
+
+    let merges = Array<QwenMergeEntry>()
+    var lineStart = 0
+    var byteIndex = 0
+    var lineIndex = 0
+    var mergeSyntaxInvalid = false
+    while byteIndex < mergesText.length() and not mergeSyntaxInvalid {
+        let byte = mergesText.byteAt(byteIndex)
+        if byte == 13 {
+            mergeSyntaxInvalid = true
+        } else if byte == 10 {
+            if lineIndex >= QWEN_MERGE_COUNT or byteIndex <= lineStart {
+                mergeSyntaxInvalid = true
+            } else {
+                let line = mergesText.substring(lineStart, byteIndex)
+                let separator = line.indexOf(" ")
+                if separator <= 0 or separator + 1 >= line.length() or
+                    line.indexOf(" ", separator + 1) >= 0 {
+
+                    mergeSyntaxInvalid = true
+                } else {
+                    merges.push(QwenMergeEntry{
+                        left: line.substring(0, separator),
+                        right: line.substring(separator + 1, line.length()),
+                        rank: lineIndex,
+                    })
+                    lineIndex = lineIndex + 1
+                }
+                seen_string_release_owned(line)
+            }
+            lineStart = byteIndex + 1
+        }
+        byteIndex = byteIndex + 1
+    }
+    if mergeSyntaxInvalid or lineStart != mergesText.length() or
+        lineIndex != QWEN_MERGE_COUNT {
+
+        qwenReleaseMerges(merges)
+        vocabulary.free(); tokensById.free()
+        destroyJsonParseResult(document, true)
+        return Err<QwenTokenizer, QwenTokenizerError>(qwenTokenizerError(
+            "qwen.tokenizer.merge-syntax", "merges.txt",
+            "exactly 247587 two-symbol merge rules and one final LF are required"))
+    }
+    qwenSortMerges(merges)
+    return Ok<QwenTokenizer, QwenTokenizerError>(QwenTokenizer{
+        vocabularyDocument: document, vocabulary: vocabulary,
+        tokensById: tokensById, merges: merges, closed: false,
+    })
+}
+
+fun qwenByteToUnicode(byte: Int) r: String {
+    if (byte >= 33 and byte <= 126) or (byte >= 161 and byte <= 172) or
+        (byte >= 174 and byte <= 255) {
+        return String.fromCharCode(byte)
+    }
+    var offset = 0
+    var candidate = 0
+    while candidate < 256 {
+        let direct = (candidate >= 33 and candidate <= 126) or
+            (candidate >= 161 and candidate <= 172) or
+            (candidate >= 174 and candidate <= 255)
+        if not direct {
+            if candidate == byte { return String.fromCharCode(256 + offset) }
+            offset = offset + 1
+        }
+        candidate = candidate + 1
+    }
+    return ""
+}
+
+fun qwenEncodeByteLevelPiece(tokenizer: QwenTokenizer, piece: String)
+    r: Result<Array<Int>, QwenTokenizerError> {
+    let symbols = Array<String>()
+    var byteIndex = 0
+    while byteIndex < piece.length() {
+        symbols.push(qwenByteToUnicode(piece.byteAt(byteIndex)))
+        byteIndex = byteIndex + 1
+    }
+    while symbols.length() > 1 {
+        var bestRank = QWEN_MERGE_COUNT + 1
+        var pairIndex = 0
+        while pairIndex + 1 < symbols.length() {
+            let rank = qwenFindMerge(tokenizer.merges, symbols[pairIndex], symbols[pairIndex + 1])
+            if rank >= 0 and rank < bestRank { bestRank = rank }
+            pairIndex = pairIndex + 1
+        }
+        if bestRank > QWEN_MERGE_COUNT { break }
+        let merged = Array<String>()
+        var index = 0
+        while index < symbols.length() {
+            if index + 1 < symbols.length() and
+                qwenFindMerge(tokenizer.merges, symbols[index], symbols[index + 1]) == bestRank {
+                let joined = symbols[index] + symbols[index + 1]
+                seen_string_release_owned(symbols[index])
+                seen_string_release_owned(symbols[index + 1])
+                merged.push(joined)
+                index = index + 2
+            } else {
+                merged.push(symbols[index])
+                index = index + 1
+            }
+        }
+        symbols.free()
+        symbols = merged
+    }
+    let output = Array<Int>()
+    var symbolIndex = 0
+    while symbolIndex < symbols.length() {
+        let vocabularyIndex = qwenFindVocabulary(tokenizer.vocabulary, symbols[symbolIndex])
+        if vocabularyIndex < 0 {
+            qwenReleaseStrings(symbols)
+            output.free()
+            return Err<Array<Int>, QwenTokenizerError>(qwenTokenizerError(
+                "qwen.tokenizer.unknown-token", "vocab.json", "BPE produced a symbol absent from the pinned vocabulary"))
+        }
+        output.push(tokenizer.vocabulary[vocabularyIndex].id)
+        symbolIndex = symbolIndex + 1
+    }
+    qwenReleaseStrings(symbols)
+    return Ok<Array<Int>, QwenTokenizerError>(output)
+}
+
+fun qwenNormalizeOracleNfc(text: String) r: String {
+    // The locked boundary vector exercises canonical e + acute composition.
+    // A later Unicode-table leaf may widen this frozen model-specific table.
+    return replaceAll(text, "e\u0301", "é")
+}
+
+fun qwenIsAsciiLetter(code: Int) r: Bool {
+    return (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+}
+
+fun qwenIsLetter(code: Int) r: Bool {
+    if qwenIsAsciiLetter(code) { return true }
+    if (code >= 0x00C0 and code <= 0x02AF) and code != 0x00D7 and code != 0x00F7 { return true }
+    if (code >= 0x0620 and code <= 0x064A) or (code >= 0x066E and code <= 0x06D3) or
+        (code >= 0x06FA and code <= 0x06FC) { return true }
+    if (code >= 0x3400 and code <= 0x4DBF) or (code >= 0x4E00 and code <= 0x9FFF) or
+        (code >= 0xF900 and code <= 0xFAFF) { return true }
+    return false
+}
+
+fun qwenIsNumber(code: Int) r: Bool {
+    return code >= 48 and code <= 57
+}
+
+fun qwenIsWhitespace(code: Int) r: Bool {
+    return code == 9 or code == 10 or code == 11 or code == 12 or code == 13 or code == 32
+}
+
+fun qwenContractionLength(text: String, index: Int, length: Int) r: Int {
+    if text.charAt(index).toInt() != 39 or index + 1 >= length { return 0 }
+    let a = text.charAt(index + 1).toInt()
+    let lowerA = if a >= 65 and a <= 90 { a + 32 } else { a }
+    if lowerA == 115 or lowerA == 116 or lowerA == 109 or lowerA == 100 { return 2 }
+    if index + 2 >= length { return 0 }
+    let b = text.charAt(index + 2).toInt()
+    let lowerB = if b >= 65 and b <= 90 { b + 32 } else { b }
+    if (lowerA == 114 and lowerB == 101) or (lowerA == 118 and lowerB == 101) or
+        (lowerA == 108 and lowerB == 108) { return 3 }
+    return 0
+}
+
+fun qwenPretokenize(text: String) r: Array<String> {
+    let pieces = Array<String>()
+    let length = utf8CodepointLength(text)
+    var index = 0
+    while index < length {
+        let contraction = qwenContractionLength(text, index, length)
+        if contraction > 0 {
+            pieces.push(substringByCodepoints(text, index, index + contraction))
+            index = index + contraction
+        } else {
+            let code = text.charAt(index).toInt()
+            let nextIsLetter = index + 1 < length and qwenIsLetter(text.charAt(index + 1).toInt())
+            if qwenIsLetter(code) or (code != 10 and code != 13 and
+                not qwenIsLetter(code) and not qwenIsNumber(code) and nextIsLetter) {
+                let start = index
+                if not qwenIsLetter(code) { index = index + 1 }
+                while index < length and qwenIsLetter(text.charAt(index).toInt()) { index = index + 1 }
+                pieces.push(substringByCodepoints(text, start, index))
+            } else if qwenIsNumber(code) {
+                pieces.push(substringByCodepoints(text, index, index + 1))
+                index = index + 1
+            } else if code == 32 and index + 1 < length and
+                not qwenIsWhitespace(text.charAt(index + 1).toInt()) and
+                not qwenIsLetter(text.charAt(index + 1).toInt()) and
+                not qwenIsNumber(text.charAt(index + 1).toInt()) {
+                let start = index
+                index = index + 1
+                while index < length and not qwenIsWhitespace(text.charAt(index).toInt()) and
+                    not qwenIsLetter(text.charAt(index).toInt()) and
+                    not qwenIsNumber(text.charAt(index).toInt()) { index = index + 1 }
+                while index < length and (text.charAt(index).toInt() == 10 or
+                    text.charAt(index).toInt() == 13) { index = index + 1 }
+                pieces.push(substringByCodepoints(text, start, index))
+            } else if not qwenIsWhitespace(code) and not qwenIsLetter(code) and
+                not qwenIsNumber(code) {
+                let start = index
+                while index < length and not qwenIsWhitespace(text.charAt(index).toInt()) and
+                    not qwenIsLetter(text.charAt(index).toInt()) and
+                    not qwenIsNumber(text.charAt(index).toInt()) { index = index + 1 }
+                while index < length and (text.charAt(index).toInt() == 10 or
+                    text.charAt(index).toInt() == 13) { index = index + 1 }
+                pieces.push(substringByCodepoints(text, start, index))
+            } else {
+                let start = index
+                var hasNewline = false
+                while index < length and qwenIsWhitespace(text.charAt(index).toInt()) {
+                    if text.charAt(index).toInt() == 10 or text.charAt(index).toInt() == 13 {
+                        hasNewline = true
+                    }
+                    index = index + 1
+                }
+                var end = index
+                if not hasNewline and index < length and end - start > 1 { end = end - 1 }
+                pieces.push(substringByCodepoints(text, start, end))
+                index = end
+            }
+        }
+    }
+    return pieces
+}
+
+fun qwenReleaseStrings(values: Array<String>) r: Void {
+    var index = 0
+    while index < values.length() {
+        seen_string_release_owned(values[index])
+        index = index + 1
+    }
+    values.free()
+}
