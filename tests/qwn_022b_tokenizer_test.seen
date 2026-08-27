@@ -1,0 +1,109 @@
+import seen_qwen.tokenizer.tokenizer.{loadQwenTokenizer, qwenParseLockedTokenizer}
+import io.file.{readText}
+import str.string.{StringBuilder, replaceAll}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun requireIds(actual: Array<Int>, expected: Array<Int>, message: String) r: Void {
+    require(actual.length() == expected.length(), message + " length")
+    var index = 0
+    while index < expected.length() {
+        require(actual[index] == expected[index], message + " token ID")
+        index = index + 1
+    }
+    actual.free()
+    expected.free()
+}
+
+fun repeatA(count: Int) r: String {
+    let builder = StringBuilder.new()
+    var index = 0
+    while index < count {
+        builder.append("a")
+        index = index + 1
+    }
+    let result = builder.buildAndClear()
+    builder.free()
+    return result
+}
+
+fun main() r: Int {
+    let loaded = loadQwenTokenizer(
+        ".seen/oracle-assets-qwen38/vocab.json",
+        ".seen/oracle-assets-qwen38/merges.txt")
+    if loaded.isErr() {
+        let error = loaded.unwrapErr()
+        println("unexpected tokenizer error: " + error.code + " field=" +
+            error.field + " message=" + error.message)
+    }
+    require(loaded.isOkay(), "load exact pinned Qwen tokenizer assets")
+    let tokenizer = loaded.unwrap()
+    println("PASS: loaded exactly 248044 mixed UTF-8 vocabulary entries")
+    require(tokenizer.tokenId("!").unwrap() == 0 and
+        tokenizer.tokenId("Hello").unwrap() == 9419 and
+        tokenizer.tokenId("è¾ĥå°ıçļĦ").unwrap() == 124022 and
+        tokenizer.tokenAt(0).unwrap() == "!" and
+        tokenizer.tokenAt(124022).unwrap() == "è¾ĥå°ıçļĦ" and
+        tokenizer.tokenAt(248043).unwrap() == "ãģĤãĤĬãģ¾ãģĻãģĭ",
+        "preserve exact first, middle, and last vocabulary IDs")
+    require(tokenizer.tokenId("not-a-qwen-token-value").isErr() and
+        tokenizer.tokenAt(-1).isErr() and tokenizer.tokenAt(248044).isErr(),
+        "reject unknown token and ID boundaries")
+
+    let vocabText = readText(".seen/oracle-assets-qwen38/vocab.json")
+    let mergesText = readText(".seen/oracle-assets-qwen38/merges.txt")
+    let duplicateVocabText = replaceAll(vocabText,
+        "\": 248043\n}", "\": 124022\n}")
+    require(duplicateVocabText.length() == vocabText.length(),
+        "keep duplicate-ID fixture at the locked vocabulary byte length")
+    let duplicateId = qwenParseLockedTokenizer(duplicateVocabText, mergesText)
+    require(duplicateId.isErr() and
+        duplicateId.unwrapErr().code == "qwen.tokenizer.vocab-id",
+        "reject duplicate vocabulary IDs deterministically")
+    println("PASS: duplicate vocabulary ID rejected")
+    seen_string_release_owned(duplicateVocabText)
+    seen_string_release_owned(vocabText)
+    seen_string_release_owned(mergesText)
+
+    requireIds(tokenizer.encode("Hello, world!").unwrap(),
+        [9419, 11, 1814, 0], "ASCII oracle")
+    requireIds(tokenizer.encode("مرحبًا بالعالم").unwrap(),
+        [148739, 161785, 150021, 182946, 149650], "Arabic oracle")
+    requireIds(tokenizer.encode("café e\u0301 中文 🚀").unwrap(),
+        [895, 56868, 3825, 220, 99986, 10838, 248, 222],
+        "Unicode normalization oracle")
+    requireIds(tokenizer.encode(
+        "fun main() r: Int {\n    return 0\n}\n").unwrap(),
+        [11555, 1822, 363, 427, 25, 1286, 313, 198, 262, 460,
+            220, 15, 198, 92, 198], "Seen code oracle")
+    requireIds(tokenizer.encode(" \t\n\n  ").unwrap(),
+        [6800, 271, 256], "whitespace oracle")
+
+    let longInput = repeatA(1024)
+    let longIds = tokenizer.encode(longInput).unwrap()
+    require(longIds.length() == 128, "bound long oracle token count")
+    var longIndex = 0
+    while longIndex < longIds.length() {
+        require(longIds[longIndex] == 67089, "match long oracle token IDs")
+        longIndex = longIndex + 1
+    }
+    longIds.free()
+    let oversizedInput = repeatA(65537)
+    require(tokenizer.encode(oversizedInput).isErr(),
+        "reject input beyond the fixed 64 KiB admission bound")
+    seen_string_release_owned(longInput)
+    seen_string_release_owned(oversizedInput)
+
+    tokenizer.close()
+    tokenizer.close()
+    require(tokenizer.tokenId("!").isErr() and tokenizer.encode("x").isErr(),
+        "close tokenizer ownership idempotently")
+    println("PASS: QWN-022B native Qwen vocabulary, byte-level BPE, and tokenization")
+    return 0
+}
+
+main()

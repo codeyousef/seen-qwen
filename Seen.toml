@@ -10,6 +10,7 @@ modules = [
     "src/model/config.seen",
     "src/model/tensor_catalog.seen",
     "src/model/contract_geometry.seen",
+    "src/tokenizer/tokenizer.seen",
 ]
 
 [build]

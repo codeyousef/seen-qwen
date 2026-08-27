@@ -1,5 +1,13 @@
 version = 2
-manifest_sha256 = "9d300812e5a925f29c5d555ed0f856a8427e22eb4de3ee3efcdbc1c4648568a8"
+manifest_sha256 = "ab2963293ad288eb65f1719ecc91d6df9e3774d810bc77221b72fe82414ed3c0"
+
+# Audited Seen release toolchain identity (paths are intentionally excluded).
+# release_tag = "v0.15.0"
+# certified_commit = "dc741efafb859cd7c46bc920a220a22ae7a79de1"
+# tag_object = "eccadd785b8f5b2cda8932c820428d859214b8c9"
+# linux_x64_archive_sha256 = "439edd029c39f0e53b1d9736a5f7ca6b7ef333ac461703162ed3a25748e121be"
+# packaged_compiler_sha256 = "0a9b56f81fcaeab8f6f0e22e30d908832f843e112dacd6a6a67954106e881516"
+# compatibility = "seen-compatibility-manifest-v1; compiler=0.15.0; layout=seen-layout-abi-v2; object-cache=seen-object-cache-abi-v3; package-interface=seen-package-interface-v2; package-object-manifest=seen-package-object-manifest-v2; prebuilt-package=seen-prebuilt-package-v2; package-client=0.15.0/SEENPKG1; runtime=runtime-v2; stdlib=0.4.0/manifest-v1; llvm-min=19; target=linux-x86_64; cpu=x86-64"
 
 [root]
 name = "seen_qwen"
