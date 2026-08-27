@@ -14,7 +14,8 @@ import crypto.sha256.{sha256File}
 import io.file.{readText}
 import json.strict.{StrictJsonLimits, parseStrictJson}
 import json.parser.{JsonParseResult, destroyJsonParseResult}
-import str.string.{replaceAll, substringByCodepoints, utf8CodepointLength}
+import str.string.{StringBuilder, replaceAll, substringByCodepoints,
+    utf8CodepointLength, trim, startsWith, endsWith}
 
 extern "C" fun seen_string_release_owned(value: String) r: Void
 
@@ -29,6 +30,87 @@ pub class QwenTokenizerError {
     var field: String
     var message: String
     var retryable: Bool
+}
+
+pub class QwenChatError {
+    var code: String
+    var field: String
+    var message: String
+    var retryable: Bool
+}
+
+pub class QwenChatArgument {
+    var name: String
+    var value: String
+}
+
+pub class QwenChatToolCall {
+    var name: String
+    var arguments: Array<QwenChatArgument>
+}
+
+pub class QwenChatMessage {
+    var role: String
+    var content: String
+    var reasoningContent: String
+    var toolCalls: Array<QwenChatToolCall>
+}
+
+pub class QwenChatOptions {
+    var addGenerationPrompt: Bool
+    var enableThinking: Bool
+    var preserveThinking: Bool
+    var reasoningEffort: String
+    /// Exact deterministic `tool | tojson` entries, admitted only after
+    /// bounded strict-JSON object validation.
+    var tools: Array<String>
+}
+
+pub class QwenChatConversation {
+    var messages: Array<QwenChatMessage>
+    var options: QwenChatOptions
+    var closed: Bool
+
+    fun close() r: Void {
+        if this.closed { return }
+        var messageIndex = 0
+        while messageIndex < this.messages.length() {
+            var callIndex = 0
+            while callIndex < this.messages[messageIndex].toolCalls.length() {
+                this.messages[messageIndex].toolCalls[callIndex].arguments.free()
+                callIndex = callIndex + 1
+            }
+            this.messages[messageIndex].toolCalls.free()
+            messageIndex = messageIndex + 1
+        }
+        this.messages.free()
+        this.options.tools.free()
+        this.closed = true
+    }
+}
+
+pub fun qwenChatOptions() r: QwenChatOptions {
+    return QwenChatOptions{ addGenerationPrompt: false, enableThinking: true,
+        preserveThinking: true, reasoningEffort: "xhigh", tools: Array<String>() }
+}
+
+pub fun qwenChatConversation() r: Result<QwenChatConversation, QwenChatError> {
+    return Ok<QwenChatConversation, QwenChatError>(QwenChatConversation{
+        messages: Array<QwenChatMessage>(), options: qwenChatOptions(), closed: false })
+}
+
+pub fun qwenChatMessage(role: String, content: String) r: QwenChatMessage {
+    return QwenChatMessage{ role: role, content: content, reasoningContent: "",
+        toolCalls: Array<QwenChatToolCall>() }
+}
+
+pub fun qwenChatArgument(name: String, value: String) r: QwenChatArgument {
+    return QwenChatArgument{ name: name, value: value }
+}
+
+pub fun qwenChatToolCall(name: String, arguments: Array<QwenChatArgument>)
+    r: QwenChatToolCall {
+    return QwenChatToolCall{ name: name, arguments: arguments }
 }
 
 class QwenVocabEntry {
@@ -121,6 +203,66 @@ pub class QwenTokenizer {
         return Ok<Array<Int>, QwenTokenizerError>(output)
     }
 
+    /// Encode ordinary text while recognizing the immutable Qwen added-token table.
+    /// This is the entry point used by rendered chat prompts; `encode` deliberately
+    /// remains the ordinary-text BPE operation.
+    fun encodeSpecialAware(text: String) r: Result<Array<Int>, QwenTokenizerError> {
+        if this.closed {
+            return Err<Array<Int>, QwenTokenizerError>(qwenTokenizerError(
+                "qwen.tokenizer.closed", "tokenizer", "tokenizer is closed"))
+        }
+        if text.length() > QWEN_MAX_INPUT_BYTES {
+            return Err<Array<Int>, QwenTokenizerError>(qwenTokenizerError(
+                "qwen.tokenizer.input-limit", "text", "text exceeds the 64 KiB input bound"))
+        }
+        let output = Array<Int>()
+        var segmentStart = 0
+        var index = 0
+        while index < text.length() {
+            let special = qwenSpecialTokenAt(text, index)
+            if special >= 0 {
+                if segmentStart < index {
+                    let ordinary = text.substring(segmentStart, index)
+                    let encoded = this.encode(ordinary)
+                    seen_string_release_owned(ordinary)
+                    if encoded.isErr() {
+                        output.free()
+                        return Err<Array<Int>, QwenTokenizerError>(encoded.unwrapErr())
+                    }
+                    let ids = encoded.unwrap()
+                    var idIndex = 0
+                    while idIndex < ids.length() {
+                        output.push(ids[idIndex])
+                        idIndex = idIndex + 1
+                    }
+                    ids.free()
+                }
+                output.push(qwenSpecialTokenIdAt(special))
+                index = index + qwenSpecialTokenTextAt(special).length()
+                segmentStart = index
+            } else {
+                index = index + 1
+            }
+        }
+        if segmentStart < text.length() {
+            let ordinary = text.substring(segmentStart, text.length())
+            let encoded = this.encode(ordinary)
+            seen_string_release_owned(ordinary)
+            if encoded.isErr() {
+                output.free()
+                return Err<Array<Int>, QwenTokenizerError>(encoded.unwrapErr())
+            }
+            let ids = encoded.unwrap()
+            var idIndex = 0
+            while idIndex < ids.length() {
+                output.push(ids[idIndex])
+                idIndex = idIndex + 1
+            }
+            ids.free()
+        }
+        return Ok<Array<Int>, QwenTokenizerError>(output)
+    }
+
     fun close() r: Void {
         if this.closed { return }
         qwenReleaseMerges(this.merges)
@@ -129,6 +271,225 @@ pub class QwenTokenizer {
         destroyJsonParseResult(this.vocabularyDocument, true)
         this.closed = true
     }
+}
+
+fun qwenStringMatchesAt(text: String, offset: Int, token: String) r: Bool {
+    if offset < 0 or offset + token.length() > text.length() { return false }
+    var index = 0
+    while index < token.length() {
+        if text.byteAt(offset + index) != token.byteAt(index) { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun qwenSpecialTokenTextAt(index: Int) r: String {
+    let tokens = [
+        "<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|object_ref_start|>",
+        "<|object_ref_end|>", "<|box_start|>", "<|box_end|>", "<|quad_start|>",
+        "<|quad_end|>", "<|vision_start|>", "<|vision_end|>", "<|vision_pad|>",
+        "<|image_pad|>", "<|video_pad|>", "<tool_call>", "</tool_call>",
+        "<|fim_prefix|>", "<|fim_middle|>", "<|fim_suffix|>", "<|fim_pad|>",
+        "<|repo_name|>", "<|file_sep|>", "<tool_response>", "</tool_response>",
+        "<think>", "</think>", "<|audio_start|>", "<|audio_end|>",
+        "<tts_pad>", "<tts_text_bos>", "<tts_text_eod>",
+        "<tts_text_bos_single>", "<|audio_pad|>"
+    ]
+    let token = tokens[index]
+    tokens.free()
+    return token
+}
+
+fun qwenSpecialTokenIdAt(index: Int) r: Int {
+    return 248044 + index
+}
+
+fun qwenSpecialTokenAt(text: String, offset: Int) r: Int {
+    if offset < 0 or offset >= text.length() or text.byteAt(offset) != 60 { return -1 }
+    var index = 0
+    while index < 33 {
+        let token = qwenSpecialTokenTextAt(index)
+        if qwenStringMatchesAt(text, offset, token) { return index }
+        index = index + 1
+    }
+    return -1
+}
+
+let QWEN_CHAT_MAX_MESSAGES: Int = 4096
+let QWEN_CHAT_MAX_TOOLS: Int = 256
+let QWEN_CHAT_MAX_OUTPUT_BYTES: Int = 65536
+let QWEN_REASONING_XHIGH: String = "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer."
+let QWEN_REASONING_LOW: String = "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration."
+
+fun qwenChatError(code: String, field: String, message: String) r: QwenChatError {
+    return QwenChatError{ code: code, field: field, message: message, retryable: false }
+}
+
+fun qwenAppendSystem(builder: StringBuilder, instructions: String,
+    systemContent: String) r: Void {
+    builder.append("<|im_start|>system\n")
+    if instructions.length() > 0 {
+        builder.append(instructions)
+        if systemContent.length() > 0 { builder.append("\n\n") }
+    }
+    builder.append(systemContent)
+    builder.append("<|im_end|>\n")
+}
+
+fun qwenValidateTools(tools: Array<String>) r: Result<Bool, QwenChatError> {
+    if tools.length() > QWEN_CHAT_MAX_TOOLS {
+        return Err<Bool, QwenChatError>(qwenChatError("qwen.chat.tools-limit", "tools",
+            "tool count exceeds the fixed bound"))
+    }
+    var index = 0
+    while index < tools.length() {
+        let parsed = parseStrictJson(tools[index], StrictJsonLimits{
+            maxInputBytes: 16384, maxDepth: 32, maxValues: 2048, maxStringBytes: 8192 })
+        if parsed.isErr() {
+            let parseError = parsed.unwrapErr()
+            return Err<Bool, QwenChatError>(qwenChatError("qwen.chat.tool-json", "tools",
+                "tool definition is not bounded strict JSON: " + parseError.code +
+                " at " + parseError.position.toString() + ": " + parseError.message))
+        }
+        let document = parsed.unwrap()
+        let root = document.value.unwrap()
+        if not root.isObject() {
+            destroyJsonParseResult(document, true)
+            return Err<Bool, QwenChatError>(qwenChatError("qwen.chat.tool-object", "tools",
+                "tool definition must be a JSON object"))
+        }
+        destroyJsonParseResult(document, true)
+        index = index + 1
+    }
+    return Ok<Bool, QwenChatError>(true)
+}
+
+/// Render the pinned text-only Qwen3.8 chat contract. Authority: QWEN-008,
+/// revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 and chat-template SHA-256
+/// c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041.
+pub fun renderQwenChat(messages: Array<QwenChatMessage>, options: QwenChatOptions)
+    r: Result<String, QwenChatError> {
+    if messages.length() == 0 {
+        return Err<String, QwenChatError>(qwenChatError("qwen.chat.no-messages", "messages",
+            "Cannot apply chat template to an empty conversation. Provide at least one message."))
+    }
+    if messages.length() > QWEN_CHAT_MAX_MESSAGES {
+        return Err<String, QwenChatError>(qwenChatError("qwen.chat.messages-limit", "messages",
+            "message count exceeds the fixed bound"))
+    }
+    let toolsValid = qwenValidateTools(options.tools)
+    if toolsValid.isErr() { return Err<String, QwenChatError>(toolsValid.unwrapErr()) }
+    var instructions = ""
+    if options.enableThinking {
+        if options.reasoningEffort == "xhigh" { instructions = QWEN_REASONING_XHIGH }
+        else if options.reasoningEffort == "low" { instructions = QWEN_REASONING_LOW }
+        else if options.reasoningEffort != "medium" {
+            return Err<String, QwenChatError>(qwenChatError("qwen.chat.reasoning-effort",
+                "reasoning_effort", "Unexpected reasoning effort " + options.reasoningEffort +
+                ". Supported types are xhigh (default), medium, and low."))
+        }
+    }
+    var lastQuery = -1
+    var reverse = messages.length() - 1
+    while reverse >= 0 {
+        if lastQuery < 0 and messages[reverse].role == "user" {
+            let query = trim(messages[reverse].content)
+            if not (startsWith(query, "<tool_response>") and
+                endsWith(query, "</tool_response>")) {
+                lastQuery = reverse
+            }
+        }
+        reverse = reverse - 1
+    }
+    if lastQuery < 0 {
+        return Err<String, QwenChatError>(qwenChatError("qwen.chat.no-user-query", "messages",
+            "No user query found in messages."))
+    }
+    var roleIndex = 0
+    while roleIndex < messages.length() {
+        let role = messages[roleIndex].role
+        if role == "system" and roleIndex != 0 {
+            return Err<String, QwenChatError>(qwenChatError("qwen.chat.system-position", "messages",
+                "System message must be at the beginning."))
+        }
+        if role != "system" and role != "user" and role != "assistant" and role != "tool" {
+            return Err<String, QwenChatError>(qwenChatError("qwen.chat.role", "messages",
+                "Unexpected message role."))
+        }
+        roleIndex = roleIndex + 1
+    }
+    let builder = StringBuilder.new()
+    let systemContent = if messages[0].role == "system" { trim(messages[0].content) } else { "" }
+    if options.tools.length() > 0 {
+        builder.append("<|im_start|>system\n")
+        if instructions.length() > 0 { builder.append(instructions); builder.append("\n\n") }
+        builder.append("# Tools\n\nYou have access to the following functions:\n\n<tools>")
+        var toolIndex = 0
+        while toolIndex < options.tools.length() {
+            builder.append("\n"); builder.append(options.tools[toolIndex]); toolIndex = toolIndex + 1
+        }
+        builder.append("\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>")
+        if systemContent.length() > 0 { builder.append("\n\n"); builder.append(systemContent) }
+        builder.append("<|im_end|>\n")
+    } else if systemContent.length() > 0 or instructions.length() > 0 {
+        qwenAppendSystem(builder, instructions, systemContent)
+    }
+    var index = 0
+    while index < messages.length() {
+        let message = messages[index]
+        let content = trim(message.content)
+        if message.role == "user" {
+            builder.append("<|im_start|>user\n"); builder.append(content); builder.append("<|im_end|>\n")
+        } else if message.role == "assistant" {
+            builder.append("<|im_start|>assistant\n")
+            if options.preserveThinking or index > lastQuery {
+                builder.append("<think>\n"); builder.append(trim(message.reasoningContent))
+                builder.append("\n</think>\n\n")
+            }
+            builder.append(content)
+            var callIndex = 0
+            while callIndex < message.toolCalls.length() {
+                let call = message.toolCalls[callIndex]
+                if call.name.length() == 0 {
+                    builder.free()
+                    return Err<String, QwenChatError>(qwenChatError("qwen.chat.tool-call-name",
+                        "tool_calls", "tool call name must not be empty"))
+                }
+                if callIndex > 0 or content.length() > 0 { builder.append("\n\n") }
+                builder.append("<tool_call>\n<function="); builder.append(call.name); builder.append(">\n")
+                var argumentIndex = 0
+                while argumentIndex < call.arguments.length() {
+                    let argument = call.arguments[argumentIndex]
+                    builder.append("<parameter="); builder.append(argument.name); builder.append(">\n")
+                    builder.append(argument.value); builder.append("\n</parameter>\n")
+                    argumentIndex = argumentIndex + 1
+                }
+                builder.append("</function>\n</tool_call>")
+                callIndex = callIndex + 1
+            }
+            builder.append("<|im_end|>\n")
+        } else if message.role == "tool" {
+            if index == 0 or messages[index - 1].role != "tool" { builder.append("<|im_start|>user") }
+            builder.append("\n<tool_response>\n"); builder.append(content); builder.append("\n</tool_response>")
+            if index + 1 >= messages.length() or messages[index + 1].role != "tool" {
+                builder.append("<|im_end|>\n")
+            }
+        }
+        index = index + 1
+    }
+    if options.addGenerationPrompt {
+        builder.append("<|im_start|>assistant\n")
+        if options.enableThinking { builder.append("<think>\n") }
+        else { builder.append("<think>\n\n</think>\n\n") }
+    }
+    if builder.length() > QWEN_CHAT_MAX_OUTPUT_BYTES {
+        builder.free()
+        return Err<String, QwenChatError>(qwenChatError("qwen.chat.output-limit", "messages",
+            "rendered prompt exceeds the 64 KiB bound"))
+    }
+    let rendered = builder.buildAndClear()
+    builder.free()
+    return Ok<String, QwenChatError>(rendered)
 }
 
 fun qwenTokenizerError(code: String, field: String, message: String)

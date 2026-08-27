@@ -1,0 +1,152 @@
+import seen_qwen.tokenizer.tokenizer.{loadQwenTokenizer, qwenSpecialTokenTextAt,
+    qwenChatMessage, qwenChatArgument, qwenChatToolCall, qwenChatConversation,
+    renderQwenChat}
+import io.file.{readText}
+import json.strict.{StrictJsonLimits, parseStrictJson}
+import json.parser.{destroyJsonParseResult}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun main() r: Int {
+    let fixtureText = readText("tests/fixtures/qwen3_8_tokenizer_oracles.json")
+    let fixtureParsed = parseStrictJson(fixtureText, StrictJsonLimits{
+        maxInputBytes: 262144, maxDepth: 64, maxValues: 8192, maxStringBytes: 131072 })
+    require(fixtureParsed.isOkay(), "parse locked Qwen oracle fixture")
+    let fixtureDocument = fixtureParsed.unwrap()
+    let fixtureRoot = fixtureDocument.value.unwrap()
+    let vectors = fixtureRoot.get("chat_vectors").unwrap()
+    require(vectors.length() == 5, "lock exactly five chat-template oracle vectors")
+
+    let loaded = loadQwenTokenizer(".seen/oracle-assets-qwen38/vocab.json",
+        ".seen/oracle-assets-qwen38/merges.txt")
+    require(loaded.isOkay(), "load exact pinned tokenizer for chat token IDs")
+    let tokenizer = loaded.unwrap()
+
+    var vectorIndex = 0
+    while vectorIndex < vectors.length() {
+        let vector = vectors.getAt(vectorIndex).unwrap()
+        let name = vector.get("name").unwrap().getString()
+        let expectedRendered = vector.get("rendered").unwrap().getString()
+        let expectedIds = vector.get("token_ids").unwrap()
+        let conversation = qwenChatConversation().unwrap()
+        var ownedToolJson = ""
+        conversation.options.addGenerationPrompt = true
+        if name == "user_xhigh_generation_prompt" {
+            conversation.messages.push(qwenChatMessage("user", "Explain checked addition."))
+        } else if name == "system_user_low" {
+            conversation.options.reasoningEffort = "low"
+            conversation.messages.push(qwenChatMessage("system", "Answer in Arabic."))
+            conversation.messages.push(qwenChatMessage("user", "ما معنى الذاكرة؟"))
+        } else if name == "thinking_disabled" {
+            conversation.options.enableThinking = false
+            conversation.messages.push(qwenChatMessage("user", "Return 2 + 2."))
+        } else if name == "preserve_thinking_false" {
+            conversation.options.preserveThinking = false
+            conversation.messages.push(qwenChatMessage("user", "First question"))
+            let assistant = qwenChatMessage("assistant", "First answer")
+            assistant.reasoningContent = "private prior reasoning"
+            conversation.messages.push(assistant)
+            conversation.messages.push(qwenChatMessage("user", "Second question"))
+        } else {
+            ownedToolJson = "{\"type\": \"function\", \"function\": {\"name\": \"weather\", \"description\": \"Get weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}" +
+                "}, \"required\": [\"city\"]}" + "}" + "}"
+            conversation.options.tools.push(ownedToolJson)
+            conversation.messages.push(qwenChatMessage("user", "Weather in Riyadh?"))
+            let assistant = qwenChatMessage("assistant", "")
+            assistant.reasoningContent = "Need current weather."
+            let arguments = [qwenChatArgument("city", "Riyadh")]
+            assistant.toolCalls.push(qwenChatToolCall("weather", arguments))
+            conversation.messages.push(assistant)
+            conversation.messages.push(qwenChatMessage("tool", "{\"temperature_c\": 38}"))
+        }
+        let renderedResult = renderQwenChat(conversation.messages, conversation.options)
+        if renderedResult.isErr() {
+            if conversation.options.tools.length() > 0 {
+                println("admitted tool bytes=" + conversation.options.tools[0])
+            }
+            let error = renderedResult.unwrapErr()
+            println("chat render error vector=" + name + " code=" + error.code +
+                " field=" + error.field + " message=" + error.message)
+        }
+        require(renderedResult.isOkay(), "render accepted chat vector " + name)
+        let rendered = renderedResult.unwrap()
+        require(rendered == expectedRendered, "match exact rendered chat oracle " + name)
+        let actualIdsResult = tokenizer.encodeSpecialAware(rendered)
+        require(actualIdsResult.isOkay(), "encode special-aware chat vector " + name)
+        let actualIds = actualIdsResult.unwrap()
+        require(actualIds.length() == expectedIds.length(), "match chat token count " + name)
+        var idIndex = 0
+        while idIndex < actualIds.length() {
+            if actualIds[idIndex] != expectedIds.getAt(idIndex).unwrap().getInt() {
+                println("chat token mismatch vector=" + name + " index=" + idIndex.toString() +
+                    " actual=" + actualIds[idIndex].toString() + " expected=" +
+                    expectedIds.getAt(idIndex).unwrap().getInt().toString())
+            }
+            require(actualIds[idIndex] == expectedIds.getAt(idIndex).unwrap().getInt(),
+                "match exact chat token ID " + name)
+            idIndex = idIndex + 1
+        }
+        actualIds.free()
+        seen_string_release_owned(rendered)
+        conversation.close()
+        conversation.close()
+        if ownedToolJson.length() > 0 { seen_string_release_owned(ownedToolJson) }
+        vectorIndex = vectorIndex + 1
+    }
+    println("PASS: five exact Qwen chat render and token-ID oracles")
+
+    var specialIndex = 0
+    while specialIndex < 33 {
+        let encoded = tokenizer.encodeSpecialAware(qwenSpecialTokenTextAt(specialIndex))
+        require(encoded.isOkay(), "encode registered special token")
+        let ids = encoded.unwrap()
+        require(ids.length() == 1 and ids[0] == 248044 + specialIndex,
+            "preserve immutable added-token ID")
+        ids.free()
+        specialIndex = specialIndex + 1
+    }
+    println("PASS: all 33 immutable Qwen special-token IDs")
+
+    let noMessages = qwenChatConversation().unwrap()
+    let noMessagesResult = renderQwenChat(noMessages.messages, noMessages.options)
+    require(noMessagesResult.isErr() and noMessagesResult.unwrapErr().code ==
+        "qwen.chat.no-messages", "reject an empty conversation")
+    noMessages.close()
+
+    let invalid = qwenChatConversation().unwrap()
+    invalid.messages.push(qwenChatMessage("user", "Hi"))
+    invalid.options.reasoningEffort = "invalid"
+    let invalidResult = renderQwenChat(invalid.messages, invalid.options)
+    require(invalidResult.isErr() and invalidResult.unwrapErr().code ==
+        "qwen.chat.reasoning-effort", "reject invalid reasoning effort")
+    invalid.close()
+
+    let lateSystem = qwenChatConversation().unwrap()
+    lateSystem.messages.push(qwenChatMessage("user", "Hi"))
+    lateSystem.messages.push(qwenChatMessage("system", "Too late"))
+    let lateResult = renderQwenChat(lateSystem.messages, lateSystem.options)
+    require(lateResult.isErr() and lateResult.unwrapErr().code ==
+        "qwen.chat.system-position", "reject late system message")
+    lateSystem.close()
+
+    let malformedTool = qwenChatConversation().unwrap()
+    malformedTool.messages.push(qwenChatMessage("user", "Hi"))
+    malformedTool.options.tools.push("{\"unterminated\":")
+    let malformedToolResult = renderQwenChat(malformedTool.messages, malformedTool.options)
+    require(malformedToolResult.isErr() and malformedToolResult.unwrapErr().code ==
+        "qwen.chat.tool-json", "reject malformed tool JSON")
+    malformedTool.close()
+    println("PASS: bounded negative chat-template semantics")
+
+    tokenizer.close()
+    destroyJsonParseResult(fixtureDocument, true)
+    seen_string_release_owned(fixtureText)
+    println("PASS: QWN-022C deterministic cleanup")
+    return 0
+}
+
+main()

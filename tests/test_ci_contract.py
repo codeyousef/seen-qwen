@@ -85,11 +85,12 @@ class CiContractTests(unittest.TestCase):
             "SEEN_JOBS",
             "SEEN_OPT_JOBS",
             "MemAvailable",
-            "MEMORY_CEILING_BYTES=4294967296",
+            "MEMORY_CEILING_BYTES=6442450944",
             "SEEN_EXPECTED_MEMORY_BYTES",
             "--release --lto=thin --target-cpu=x86-64 --no-cache",
             "--jobs 1 --opt-jobs 1 --no-fork --frozen",
             "qwn_022b_tokenizer_test",
+            "qwn_022c_chat_template_test",
             "test_qwen_tokenizer_oracles.py",
             "seen-pkg",
             "outside_objects_before",
@@ -97,7 +98,7 @@ class CiContractTests(unittest.TestCase):
         ):
             self.assertIn(required, self.runner + self.inner)
         self.assertRegex(self.inner, re.compile(r'\[ "\$\(ulimit -s\)" = "8192" \]'))
-        self.assertIn('[ "$memory_max" -le 4294967296 ]', self.inner)
+        self.assertIn('[ "$memory_max" -le 6442450944 ]', self.inner)
 
 
 if __name__ == "__main__":
