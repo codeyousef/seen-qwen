@@ -1,0 +1,69 @@
+schema_version = 1
+model_id = "Qwen/Qwen3.8-27B"
+model_revision = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+model_card_sha256 = "57e4bdb258ee1a7d2635c5174ebd4e56abe392505cdb5f8bbb356b0dc4293641"
+generation_config_sha256 = "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e"
+
+[custom.bounds]
+temperature_min_exclusive = 0.0
+temperature_max_inclusive = 2.0
+top_p_min_exclusive = 0.0
+top_p_max_inclusive = 1.0
+top_k_min_inclusive = 1
+top_k_max_inclusive = 248320
+min_p_min_inclusive = 0.0
+min_p_max_inclusive = 1.0
+repetition_penalty_min_exclusive = 0.0
+repetition_penalty_max_inclusive = 2.0
+presence_penalty_min_inclusive = -2.0
+presence_penalty_max_inclusive = 2.0
+seed_min_inclusive = 0
+seed_max_inclusive = 9223372036854775807
+
+[presets.thinking]
+mode = "sampling"
+temperature = 1.0
+top_p = 0.95
+top_k = 20
+min_p = 0.0
+repetition_penalty = 1.0
+presence_penalty = 0.0
+seed_policy = "explicit"
+thinking_mode = true
+preserve_thinking = true
+
+[presets.instruct]
+mode = "sampling"
+temperature = 0.7
+top_p = 0.80
+top_k = 20
+min_p = 0.0
+repetition_penalty = 1.0
+presence_penalty = 1.5
+seed_policy = "explicit"
+thinking_mode = false
+preserve_thinking = true
+
+[presets.greedy]
+mode = "greedy"
+temperature = 1.0
+top_p = 1.0
+top_k = 1
+min_p = 0.0
+repetition_penalty = 1.0
+presence_penalty = 0.0
+seed_policy = "unused"
+thinking_mode = true
+preserve_thinking = true
+
+[presets.custom]
+mode = "custom"
+temperature = 1.0
+top_p = 1.0
+top_k = 248320
+min_p = 0.0
+repetition_penalty = 1.0
+presence_penalty = 0.0
+seed_policy = "explicit"
+thinking_mode = true
+preserve_thinking = true

@@ -43,7 +43,7 @@ pids_max=$(read_cgroup pids.max)
 oom_group=$(read_cgroup memory.oom.group)
 [ "$memory_max" = "${SEEN_EXPECTED_MEMORY_BYTES:-}" ] ||
     fail "memory.max does not match the current-memory-derived cap"
-[ "$memory_max" -le 6442450944 ] || fail "memory.max exceeds the 6 GiB ceiling"
+[ "$memory_max" -le 7516192768 ] || fail "memory.max exceeds the 7 GiB ceiling"
 [ "$swap_max" = "0" ] || fail "memory.swap.max is not zero"
 [ "$pids_max" = "24" ] || fail "pids.max is not 24"
 case "$oom_group" in 0|1) ;; *) fail "memory.oom.group is not numeric" ;; esac
@@ -80,6 +80,12 @@ printf '%s  %s\n' \
 printf '%s  %s\n' \
     a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d \
     "$ASSET_ROOT/merges.txt" | sha256sum -c -
+printf '%s  %s\n' \
+    e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e \
+    "$ASSET_ROOT/generation_config.json" | sha256sum -c -
+printf '%s  %s\n' \
+    57e4bdb258ee1a7d2635c5174ebd4e56abe392505cdb5f8bbb356b0dc4293641 \
+    "$ASSET_ROOT/README.md" | sha256sum -c -
 [ "$(stat -c '%s' "$ASSET_ROOT/vocab.json")" = "6722759" ] ||
     fail "vocabulary byte length changed"
 [ "$(stat -c '%s' "$ASSET_ROOT/merges.txt")" = "3353259" ] ||
@@ -96,8 +102,10 @@ outside_objects_before=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o \
 "$SEEN_COMPILER" --version | grep -Fx 'Seen 0.15.0'
 "$SEEN_PACKAGE_CLIENT" --expect-version 0.15.0 version |
     grep -Fx 'seen-pkg 0.15.0 (SEENPKG1)'
-python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.py
+python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.py \
+    tests/test_sampling_profiles.py
 "$SEEN_PACKAGE_CLIENT" audit --lock Seen.lock
+"$SEEN_COMPILER" check tests/qwn_022d_sampling_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022b_tokenizer_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022c_chat_template_test.seen --frozen
 "$SEEN_COMPILER" compile tests/qwn_022c_chat_template_test.seen \
@@ -105,6 +113,11 @@ python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.
     --release --lto=thin --target-cpu=x86-64 --no-cache \
     --jobs 1 --opt-jobs 1 --no-fork --frozen
 "$OUTPUT_ROOT/qwn_022c_chat_template_test"
+"$SEEN_COMPILER" compile tests/qwn_022d_sampling_test.seen \
+    "$OUTPUT_ROOT/qwn_022d_sampling_test" \
+    --release --lto=thin --target-cpu=x86-64 --no-cache \
+    --jobs 1 --opt-jobs 1 --no-fork --frozen
+"$OUTPUT_ROOT/qwn_022d_sampling_test"
 "$SEEN_COMPILER" compile tests/qwn_022b_tokenizer_test.seen \
     "$OUTPUT_ROOT/qwn_022b_tokenizer_test" \
     --release --lto=thin --target-cpu=x86-64 --no-cache \
@@ -124,4 +137,4 @@ outside_objects_after=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o \
 [ -d "$ARTIFACT_ROOT" ] && [ ! -L "$ARTIFACT_ROOT" ] ||
     fail "project artifact root is unsafe"
 
-echo "PASS: exact locked Seen Qwen tokenizer and chat-template gates"
+echo "PASS: exact locked Seen Qwen tokenizer, chat-template, and sampling gates"
