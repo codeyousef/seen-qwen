@@ -47,11 +47,11 @@ pub class CpuTensor {
     }
 }
 
-fun f32(value: Float) r: Float {
+pub fun f32(value: Float) r: Float {
     return (value as Float32) as Float
 }
 
-fun cpuReferenceError(code: String, operation: String, message: String,
+pub fun cpuReferenceError(code: String, operation: String, message: String,
     exitCode: Int) r: CpuReferenceError {
     return CpuReferenceError{ code: code, operation: operation,
         message: message, exitCode: exitCode, retryable: false }
@@ -76,7 +76,7 @@ fun cpuNumericalError(operation: String)
         "operation encountered a non-finite Float32 intermediate", 2))
 }
 
-fun copyShape(shape: Array<UInt64>) r: Array<UInt64> {
+pub fun copyShape(shape: Array<UInt64>) r: Array<UInt64> {
     let copied = Array<UInt64>()
     var index = 0
     while index < shape.length() {
@@ -86,7 +86,7 @@ fun copyShape(shape: Array<UInt64>) r: Array<UInt64> {
     return copied
 }
 
-fun cpuShapeElements(shape: Array<UInt64>, elementLimit: UInt64,
+pub fun cpuShapeElements(shape: Array<UInt64>, elementLimit: UInt64,
     operation: String) r: Result<UInt64, CpuReferenceError> {
     if shape.length() == 0 or shape.length() > 8 {
         return Err<UInt64, CpuReferenceError>(cpuReferenceError(
@@ -130,7 +130,7 @@ fun cpuValuesFinite(values: Array<Float>) r: Bool {
     return true
 }
 
-fun validateCpuTensor(tensor: CpuTensor, elementLimit: UInt64,
+pub fun validateCpuTensor(tensor: CpuTensor, elementLimit: UInt64,
     operation: String) r: Result<UInt64, CpuReferenceError> {
     if tensor.closed {
         return Err<UInt64, CpuReferenceError>(cpuReferenceError(
@@ -149,7 +149,7 @@ fun validateCpuTensor(tensor: CpuTensor, elementLimit: UInt64,
     return Ok<UInt64, CpuReferenceError>(elements.unwrap())
 }
 
-fun ownedCpuTensor(shape: Array<UInt64>, values: Array<Float>,
+pub fun ownedCpuTensor(shape: Array<UInt64>, values: Array<Float>,
     operation: String) r: Result<CpuTensor, CpuReferenceError> {
     if not cpuValuesFinite(values) {
         shape.free(); values.free()
@@ -193,7 +193,7 @@ pub fun createCpuTensor(shape: Array<UInt64>, values: Array<Float>,
     })
 }
 
-fun cpuSameShape(left: CpuTensor, right: CpuTensor) r: Bool {
+pub fun cpuSameShape(left: CpuTensor, right: CpuTensor) r: Bool {
     if left.closed or right.closed or
         left.shape.length() != right.shape.length() { return false }
     var index = 0

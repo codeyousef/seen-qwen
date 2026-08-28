@@ -1,0 +1,416 @@
+///
+/// Bounded FP32 text RoPE, grouped-query attention, and owned KV-cache.
+///
+/// Qwen semantic source:
+/// QWEN-006 @ 562cfd944ee1f20702cfb0f4404014ee27c24813
+/// path: src/transformers/models/qwen3_5/modeling_qwen3_5.py
+/// symbols: apply_rotary_pos_emb, repeat_kv, eager_attention_forward,
+///          Qwen3_5Attention.forward
+/// contract test: FEL-1406 / QWN-024B
+///
+/// This reference path is batch-one, contiguous, and deliberately scalar. It
+/// keeps Float storage while f32() explicitly narrows every elementary result
+/// to IEEE Float32 (SeenLang FEL-1545).
+///
+
+import core.result.{Result}
+import math.math.{cos, exp, isfinite, pow, sin, sqrt}
+import seen_qwen.model.cpu_reference.{CpuReferenceError, CpuTensor,
+    copyShape, cpuReferenceError, cpuSameShape, cpuShapeElements, f32,
+    ownedCpuTensor, validateCpuTensor}
+
+pub class CpuRotaryPair {
+    var query: CpuTensor
+    var key: CpuTensor
+    var closed: Bool
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.query.close(); this.key.close(); this.closed = true
+    }
+}
+
+pub class CpuAttentionOutput {
+    var attended: CpuTensor
+    var probabilities: CpuTensor
+    var closed: Bool
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.attended.close(); this.probabilities.close(); this.closed = true
+    }
+}
+
+pub class CpuKvCache {
+    var keys: Array<Float>
+    var values: Array<Float>
+    var capacity: UInt64
+    var used: UInt64
+    var kvHeads: UInt64
+    var headDim: UInt64
+    var closed: Bool
+
+    fun length() r: UInt64 {
+        if this.closed { return 0 as UInt64 }
+        return this.used
+    }
+
+    fun reset() r: Result<Bool, CpuReferenceError> {
+        if this.closed {
+            return Err<Bool, CpuReferenceError>(attentionError(
+                "qwen.cpu.closed", "kv_cache.reset", "KV cache is closed", 11))
+        }
+        this.keys.clear(); this.values.clear(); this.used = 0 as UInt64
+        return Ok<Bool, CpuReferenceError>(true)
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.keys.free(); this.values.free(); this.used = 0 as UInt64
+        this.closed = true
+    }
+}
+
+fun attentionError(code: String, operation: String, message: String,
+    exitCode: Int = 2) r: CpuReferenceError {
+    return cpuReferenceError(code, operation, message, exitCode)
+}
+
+fun attentionTensorError(code: String, operation: String, message: String,
+    exitCode: Int = 2) r: Result<CpuTensor, CpuReferenceError> {
+    return Err<CpuTensor, CpuReferenceError>(attentionError(
+        code, operation, message, exitCode))
+}
+
+fun attentionShape3(first: UInt64, second: UInt64, third: UInt64) r: Array<UInt64> {
+    let shape = Array<UInt64>()
+    shape.push(first); shape.push(second); shape.push(third)
+    return shape
+}
+
+fun tensorIsRank3(tensor: CpuTensor) r: Bool {
+    return not tensor.closed and tensor.shape.length() == 3
+}
+
+fun validateCache(cache: CpuKvCache, operation: String)
+    r: Result<Bool, CpuReferenceError> {
+    if cache.closed {
+        return Err<Bool, CpuReferenceError>(attentionError(
+            "qwen.cpu.closed", operation, "KV cache is closed", 11))
+    }
+    if cache.used > cache.capacity or cache.kvHeads == (0 as UInt64) or
+        cache.headDim == (0 as UInt64) {
+        return Err<Bool, CpuReferenceError>(attentionError(
+            "qwen.cpu.invalid-state", operation,
+            "KV cache storage no longer matches its geometry", 11))
+    }
+    if cache.used == (0 as UInt64) {
+        if cache.keys.length() != 0 or cache.values.length() != 0 {
+            return Err<Bool, CpuReferenceError>(attentionError(
+                "qwen.cpu.invalid-state", operation,
+                "empty KV cache contains storage", 11))
+        }
+        return Ok<Bool, CpuReferenceError>(true)
+    }
+    let shape = attentionShape3(cache.used, cache.kvHeads, cache.headDim)
+    let elements = cpuShapeElements(shape, 0x7FFFFFFFFFFFFFFF as UInt64,
+        operation)
+    shape.free()
+    if elements.isErr() or elements.unwrap() != (cache.keys.length() as UInt64) or
+        elements.unwrap() != (cache.values.length() as UInt64) {
+        return Err<Bool, CpuReferenceError>(attentionError(
+            "qwen.cpu.invalid-state", operation,
+            "KV cache storage no longer matches its geometry", 11))
+    }
+    return Ok<Bool, CpuReferenceError>(true)
+}
+
+pub fun createCpuKvCache(capacity: UInt64, kvHeads: UInt64, headDim: UInt64,
+    elementLimit: UInt64) r: Result<CpuKvCache, CpuReferenceError> {
+    let shape = attentionShape3(capacity, kvHeads, headDim)
+    let elements = cpuShapeElements(shape, elementLimit, "kv_cache.create")
+    shape.free()
+    if elements.isErr() {
+        return Err<CpuKvCache, CpuReferenceError>(elements.unwrapErr())
+    }
+    if elements.unwrap() > (0x7FFFFFFFFFFFFFFF as UInt64) {
+        return Err<CpuKvCache, CpuReferenceError>(attentionError(
+            "qwen.cpu.limit", "kv_cache.create",
+            "KV cache element count exceeds addressable array storage"))
+    }
+    return Ok<CpuKvCache, CpuReferenceError>(CpuKvCache{
+        keys: Array<Float>(), values: Array<Float>(), capacity: capacity,
+        used: 0 as UInt64, kvHeads: kvHeads, headDim: headDim, closed: false
+    })
+}
+
+pub fun appendCpuKvCache(cache: CpuKvCache, key: CpuTensor,
+    value: CpuTensor, startPosition: UInt64, elementLimit: UInt64)
+    r: Result<Bool, CpuReferenceError> {
+    let cacheValid = validateCache(cache, "kv_cache.append")
+    if cacheValid.isErr() {
+        return Err<Bool, CpuReferenceError>(cacheValid.unwrapErr())
+    }
+    let keyValid = validateCpuTensor(key, elementLimit, "kv_cache.append")
+    if keyValid.isErr() {
+        return Err<Bool, CpuReferenceError>(keyValid.unwrapErr())
+    }
+    let valueValid = validateCpuTensor(value, elementLimit, "kv_cache.append")
+    if valueValid.isErr() {
+        return Err<Bool, CpuReferenceError>(valueValid.unwrapErr())
+    }
+    if not tensorIsRank3(key) or not tensorIsRank3(value) or
+        not cpuSameShape(key, value) or key.shape[1] != cache.kvHeads or
+        key.shape[2] != cache.headDim {
+        return Err<Bool, CpuReferenceError>(attentionError(
+            "qwen.cpu.shape", "kv_cache.append",
+            "key/value must be matching [tokens, kv_heads, head_dim] tensors"))
+    }
+    let tokens = key.shape[0]
+    if startPosition != cache.used {
+        return Err<Bool, CpuReferenceError>(attentionError(
+            "qwen.cpu.position", "kv_cache.append",
+            "cache append position must exactly equal the current length"))
+    }
+    if tokens > cache.capacity - cache.used {
+        return Err<Bool, CpuReferenceError>(attentionError(
+            "qwen.cpu.capacity", "kv_cache.append",
+            "KV cache capacity would be exceeded"))
+    }
+    var index = 0
+    while index < key.values.length() {
+        cache.keys.push(key.values[index]); cache.values.push(value.values[index])
+        index = index + 1
+    }
+    cache.used = cache.used + tokens
+    return Ok<Bool, CpuReferenceError>(true)
+}
+
+fun rotateTensor(input: CpuTensor, positionOffset: UInt64, rotaryDim: UInt64,
+    theta: Float, maxPosition: UInt64, elementLimit: UInt64,
+    operation: String) r: Result<CpuTensor, CpuReferenceError> {
+    let valid = validateCpuTensor(input, elementLimit, operation)
+    if valid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(valid.unwrapErr())
+    }
+    if not tensorIsRank3(input) or rotaryDim == (0 as UInt64) or
+        rotaryDim > input.shape[2] or rotaryDim % (2 as UInt64) != (0 as UInt64) {
+        return attentionTensorError("qwen.cpu.shape", operation,
+            "RoPE requires rank-three input and a positive even rotary dimension")
+    }
+    if theta <= 0.0 or not isfinite(theta) {
+        return attentionTensorError("qwen.cpu.input", operation,
+            "RoPE theta must be finite and positive")
+    }
+    let tokens = input.shape[0]
+    if maxPosition > (0x7FFFFFFFFFFFFFFF as UInt64) or
+        positionOffset > maxPosition or tokens > maxPosition - positionOffset {
+        return attentionTensorError("qwen.cpu.position", operation,
+            "RoPE positions exceed the explicit position bound")
+    }
+    let heads = input.shape[1]
+    let headDim = input.shape[2]
+    let half = rotaryDim / (2 as UInt64)
+    let output = Array<Float>()
+    var token: UInt64 = 0 as UInt64
+    while token < tokens {
+        let position = positionOffset + token
+        var head: UInt64 = 0 as UInt64
+        while head < heads {
+            var dimension: UInt64 = 0 as UInt64
+            while dimension < headDim {
+                let sourceIndex = ((token * heads + head) * headDim + dimension) as Int
+                if dimension < rotaryDim {
+                    let frequencyIndex = dimension % half
+                    let exponent = f32((((frequencyIndex * (2 as UInt64)) as Int) as Float) /
+                        ((rotaryDim as Int) as Float))
+                    let inverseFrequency = f32(1.0 / f32(pow(theta, exponent)))
+                    let angle = f32(((position as Int) as Float) * inverseFrequency)
+                    let cosine = f32(cos(angle)); let sine = f32(sin(angle))
+                    let rotatedDimension = if dimension < half {
+                        dimension + half
+                    } else {
+                        dimension - half
+                    }
+                    let rotatedIndex = ((token * heads + head) * headDim +
+                        rotatedDimension) as Int
+                    let rotated = if dimension < half {
+                        f32(-input.values[rotatedIndex])
+                    } else {
+                        input.values[rotatedIndex]
+                    }
+                    let directTerm = f32(input.values[sourceIndex] * cosine)
+                    let rotatedTerm = f32(rotated * sine)
+                    output.push(f32(directTerm + rotatedTerm))
+                } else {
+                    output.push(input.values[sourceIndex])
+                }
+                dimension = dimension + (1 as UInt64)
+            }
+            head = head + (1 as UInt64)
+        }
+        token = token + (1 as UInt64)
+    }
+    return ownedCpuTensor(copyShape(input.shape), output, operation)
+}
+
+pub fun cpuApplyPartialRotary(query: CpuTensor, key: CpuTensor,
+    positionOffset: UInt64, rotaryDim: UInt64, theta: Float,
+    maxPosition: UInt64, elementLimit: UInt64)
+    r: Result<CpuRotaryPair, CpuReferenceError> {
+    if not tensorIsRank3(query) or not tensorIsRank3(key) or
+        query.shape[0] != key.shape[0] or query.shape[2] != key.shape[2] {
+        return Err<CpuRotaryPair, CpuReferenceError>(attentionError(
+            "qwen.cpu.shape", "partial_rope",
+            "query/key must share token count and head dimension"))
+    }
+    let rotatedQuery = rotateTensor(query, positionOffset, rotaryDim, theta,
+        maxPosition, elementLimit, "partial_rope.query")
+    if rotatedQuery.isErr() {
+        return Err<CpuRotaryPair, CpuReferenceError>(rotatedQuery.unwrapErr())
+    }
+    let rotatedKey = rotateTensor(key, positionOffset, rotaryDim, theta,
+        maxPosition, elementLimit, "partial_rope.key")
+    if rotatedKey.isErr() {
+        rotatedQuery.unwrap().close()
+        return Err<CpuRotaryPair, CpuReferenceError>(rotatedKey.unwrapErr())
+    }
+    return Ok<CpuRotaryPair, CpuReferenceError>(CpuRotaryPair{
+        query: rotatedQuery.unwrap(), key: rotatedKey.unwrap(), closed: false
+    })
+}
+
+pub fun cpuGroupedQueryAttention(query: CpuTensor, cache: CpuKvCache,
+    queryStart: UInt64, elementLimit: UInt64)
+    r: Result<CpuAttentionOutput, CpuReferenceError> {
+    let cacheValid = validateCache(cache, "attention")
+    if cacheValid.isErr() {
+        return Err<CpuAttentionOutput, CpuReferenceError>(cacheValid.unwrapErr())
+    }
+    let queryValid = validateCpuTensor(query, elementLimit, "attention")
+    if queryValid.isErr() {
+        return Err<CpuAttentionOutput, CpuReferenceError>(queryValid.unwrapErr())
+    }
+    if not tensorIsRank3(query) or query.shape[2] != cache.headDim or
+        query.shape[1] % cache.kvHeads != (0 as UInt64) {
+        return Err<CpuAttentionOutput, CpuReferenceError>(attentionError(
+            "qwen.cpu.shape", "attention",
+            "query heads must be divisible by KV heads with matching head dimensions"))
+    }
+    let tokens = query.shape[0]
+    if queryStart > cache.used or tokens > cache.used - queryStart or
+        queryStart + tokens != cache.used {
+        return Err<CpuAttentionOutput, CpuReferenceError>(attentionError(
+            "qwen.cpu.position", "attention",
+            "query block must end at the current cache length"))
+    }
+    let queryHeads = query.shape[1]
+    let repeat = queryHeads / cache.kvHeads
+    let scale = f32(1.0 / f32(sqrt((cache.headDim as Int) as Float)))
+    let attendedValues = Array<Float>()
+    let probabilityValues = Array<Float>()
+    var token: UInt64 = 0 as UInt64
+    while token < tokens {
+        let causalLength = queryStart + token + (1 as UInt64)
+        var head: UInt64 = 0 as UInt64
+        while head < queryHeads {
+            let kvHead = head / repeat
+            let scores = Array<Float>()
+            var maximum: Float = 0.0
+            var keyPosition: UInt64 = 0 as UInt64
+            while keyPosition < causalLength {
+                var dot: Float = 0.0
+                var dimension: UInt64 = 0 as UInt64
+                while dimension < cache.headDim {
+                    let queryIndex = ((token * queryHeads + head) * cache.headDim +
+                        dimension) as Int
+                    let keyIndex = ((keyPosition * cache.kvHeads + kvHead) *
+                        cache.headDim + dimension) as Int
+                    let product = f32(query.values[queryIndex] * cache.keys[keyIndex])
+                    dot = f32(dot + product)
+                    dimension = dimension + (1 as UInt64)
+                }
+                let score = f32(dot * scale)
+                if keyPosition == (0 as UInt64) or score > maximum { maximum = score }
+                scores.push(score)
+                keyPosition = keyPosition + (1 as UInt64)
+            }
+            var denominator: Float = 0.0
+            keyPosition = 0 as UInt64
+            while keyPosition < causalLength {
+                let exponential = f32(exp(f32(scores[keyPosition as Int] - maximum)))
+                scores[keyPosition as Int] = exponential
+                denominator = f32(denominator + exponential)
+                keyPosition = keyPosition + (1 as UInt64)
+            }
+            keyPosition = 0 as UInt64
+            while keyPosition < cache.used {
+                if keyPosition < causalLength {
+                    probabilityValues.push(f32(scores[keyPosition as Int] / denominator))
+                } else {
+                    probabilityValues.push(0.0)
+                }
+                keyPosition = keyPosition + (1 as UInt64)
+            }
+            var dimension: UInt64 = 0 as UInt64
+            while dimension < cache.headDim {
+                var sum: Float = 0.0
+                keyPosition = 0 as UInt64
+                while keyPosition < causalLength {
+                    let probability = f32(scores[keyPosition as Int] / denominator)
+                    let valueIndex = ((keyPosition * cache.kvHeads + kvHead) *
+                        cache.headDim + dimension) as Int
+                    sum = f32(sum + f32(probability * cache.values[valueIndex]))
+                    keyPosition = keyPosition + (1 as UInt64)
+                }
+                attendedValues.push(sum)
+                dimension = dimension + (1 as UInt64)
+            }
+            scores.free(); head = head + (1 as UInt64)
+        }
+        token = token + (1 as UInt64)
+    }
+    let attended = ownedCpuTensor(copyShape(query.shape), attendedValues,
+        "attention")
+    if attended.isErr() {
+        probabilityValues.free()
+        return Err<CpuAttentionOutput, CpuReferenceError>(attended.unwrapErr())
+    }
+    let probabilityShape = attentionShape3(tokens, queryHeads, cache.used)
+    let probabilities = ownedCpuTensor(probabilityShape, probabilityValues,
+        "attention.probabilities")
+    if probabilities.isErr() {
+        attended.unwrap().close()
+        return Err<CpuAttentionOutput, CpuReferenceError>(probabilities.unwrapErr())
+    }
+    return Ok<CpuAttentionOutput, CpuReferenceError>(CpuAttentionOutput{
+        attended: attended.unwrap(), probabilities: probabilities.unwrap(),
+        closed: false
+    })
+}
+
+pub fun cpuApplyAttentionGate(attended: CpuTensor, gate: CpuTensor,
+    elementLimit: UInt64) r: Result<CpuTensor, CpuReferenceError> {
+    let attendedValid = validateCpuTensor(attended, elementLimit,
+        "attention.gate")
+    if attendedValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(attendedValid.unwrapErr())
+    }
+    let gateValid = validateCpuTensor(gate, elementLimit, "attention.gate")
+    if gateValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(gateValid.unwrapErr())
+    }
+    if not cpuSameShape(attended, gate) {
+        return attentionTensorError("qwen.cpu.shape", "attention.gate",
+            "attention output and gate tensors must match")
+    }
+    let output = Array<Float>()
+    var index = 0
+    while index < attended.values.length() {
+        let exponential = f32(exp(f32(-gate.values[index])))
+        let sigmoid = f32(1.0 / f32(1.0 + exponential))
+        output.push(f32(attended.values[index] * sigmoid))
+        index = index + 1
+    }
+    return ownedCpuTensor(copyShape(attended.shape), output, "attention.gate")
+}

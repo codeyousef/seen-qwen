@@ -11,6 +11,7 @@ modules = [
     "src/model/tensor_catalog.seen",
     "src/model/contract_geometry.seen",
     "src/model/cpu_reference.seen",
+    "src/model/cpu_attention.seen",
     "src/tokenizer/tokenizer.seen",
 ]
 
