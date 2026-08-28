@@ -12,6 +12,7 @@ modules = [
     "src/model/contract_geometry.seen",
     "src/model/cpu_reference.seen",
     "src/model/cpu_attention.seen",
+    "src/model/cpu_gdn.seen",
     "src/tokenizer/tokenizer.seen",
 ]
 

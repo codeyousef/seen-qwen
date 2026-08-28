@@ -1,0 +1,486 @@
+///
+/// Bounded FP32 causal convolution and Gated DeltaNet recurrent reference.
+///
+/// Qwen semantic source:
+/// QWEN-006 @ 562cfd944ee1f20702cfb0f4404014ee27c24813
+/// path: src/transformers/models/qwen3_5/modeling_qwen3_5.py
+/// contract test: FEL-1410 / QWN-024C
+///
+/// State is owned, batch-one, contiguous, and updated strictly in token order.
+/// Float storage is narrowed through f32() after elementary operations to
+/// preserve IEEE Float32 reference semantics (SeenLang FEL-1545).
+///
+
+import core.result.{Result}
+import math.math.{exp, isfinite, sqrt}
+import seen_qwen.model.cpu_reference.{CpuReferenceError, CpuTensor, copyShape,
+    cpuReferenceError, cpuSameShape, cpuShapeElements, f32, ownedCpuTensor,
+    validateCpuTensor}
+
+pub class CpuCausalConvState {
+    var history: Array<Float>
+    var channels: UInt64
+    var kernel: UInt64
+    var processed: UInt64
+    var closed: Bool
+
+    fun reset() r: Result<Bool, CpuReferenceError> {
+        if this.closed {
+            return Err<Bool, CpuReferenceError>(gdnError(
+                "qwen.cpu.closed", "gdn.conv.reset", "convolution state is closed", 11))
+        }
+        var index = 0
+        while index < this.history.length() {
+            this.history[index] = 0.0; index = index + 1
+        }
+        this.processed = 0 as UInt64
+        return Ok<Bool, CpuReferenceError>(true)
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.history.free(); this.processed = 0 as UInt64; this.closed = true
+    }
+}
+
+pub class CpuGdnState {
+    var values: Array<Float>
+    var valueHeads: UInt64
+    var keyDim: UInt64
+    var valueDim: UInt64
+    var processed: UInt64
+    var closed: Bool
+
+    fun reset() r: Result<Bool, CpuReferenceError> {
+        if this.closed {
+            return Err<Bool, CpuReferenceError>(gdnError(
+                "qwen.cpu.closed", "gdn.state.reset", "GDN state is closed", 11))
+        }
+        var index = 0
+        while index < this.values.length() {
+            this.values[index] = 0.0; index = index + 1
+        }
+        this.processed = 0 as UInt64
+        return Ok<Bool, CpuReferenceError>(true)
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.values.free(); this.processed = 0 as UInt64; this.closed = true
+    }
+}
+
+fun gdnError(code: String, operation: String, message: String,
+    exitCode: Int = 2) r: CpuReferenceError {
+    return cpuReferenceError(code, operation, message, exitCode)
+}
+
+fun gdnShape2(first: UInt64, second: UInt64) r: Array<UInt64> {
+    let shape = Array<UInt64>(); shape.push(first); shape.push(second); return shape
+}
+
+fun gdnShape3(first: UInt64, second: UInt64, third: UInt64) r: Array<UInt64> {
+    let shape = Array<UInt64>()
+    shape.push(first); shape.push(second); shape.push(third); return shape
+}
+
+fun gdnRank2(tensor: CpuTensor) r: Bool {
+    return not tensor.closed and tensor.shape.length() == 2
+}
+
+fun gdnRank3(tensor: CpuTensor) r: Bool {
+    return not tensor.closed and tensor.shape.length() == 3
+}
+
+fun validateConvState(state: CpuCausalConvState, operation: String)
+    r: Result<Bool, CpuReferenceError> {
+    if state.closed {
+        return Err<Bool, CpuReferenceError>(gdnError(
+            "qwen.cpu.closed", operation, "convolution state is closed", 11))
+    }
+    if state.channels == (0 as UInt64) or state.kernel == (0 as UInt64) {
+        return Err<Bool, CpuReferenceError>(gdnError(
+            "qwen.cpu.invalid-state", operation,
+            "convolution state has invalid geometry", 11))
+    }
+    let historySlots = state.kernel - (1 as UInt64)
+    var expected: UInt64 = 0 as UInt64
+    if historySlots > (0 as UInt64) {
+        let shape = gdnShape2(historySlots, state.channels)
+        let elements = cpuShapeElements(shape, 0x7FFFFFFFFFFFFFFF as UInt64, operation)
+        shape.free()
+        if elements.isErr() {
+            return Err<Bool, CpuReferenceError>(gdnError(
+                "qwen.cpu.invalid-state", operation,
+                "convolution state geometry overflowed", 11))
+        }
+        expected = elements.unwrap()
+    }
+    if expected != (state.history.length() as UInt64) {
+        return Err<Bool, CpuReferenceError>(gdnError(
+            "qwen.cpu.invalid-state", operation,
+            "convolution history no longer matches its geometry", 11))
+    }
+    var historyIndex = 0
+    while historyIndex < state.history.length() {
+        if not isfinite(state.history[historyIndex]) {
+            return Err<Bool, CpuReferenceError>(gdnError(
+                "qwen.cpu.invalid-state", operation,
+                "convolution history contains a non-finite value", 11))
+        }
+        historyIndex = historyIndex + 1
+    }
+    return Ok<Bool, CpuReferenceError>(true)
+}
+
+fun validateGdnState(state: CpuGdnState, operation: String)
+    r: Result<Bool, CpuReferenceError> {
+    if state.closed {
+        return Err<Bool, CpuReferenceError>(gdnError(
+            "qwen.cpu.closed", operation, "GDN state is closed", 11))
+    }
+    let shape = gdnShape3(state.valueHeads, state.keyDim, state.valueDim)
+    let elements = cpuShapeElements(shape, 0x7FFFFFFFFFFFFFFF as UInt64, operation)
+    shape.free()
+    if elements.isErr() or elements.unwrap() != (state.values.length() as UInt64) {
+        return Err<Bool, CpuReferenceError>(gdnError(
+            "qwen.cpu.invalid-state", operation,
+            "GDN state storage no longer matches its geometry", 11))
+    }
+    var stateIndex = 0
+    while stateIndex < state.values.length() {
+        if not isfinite(state.values[stateIndex]) {
+            return Err<Bool, CpuReferenceError>(gdnError(
+                "qwen.cpu.invalid-state", operation,
+                "GDN state contains a non-finite value", 11))
+        }
+        stateIndex = stateIndex + 1
+    }
+    return Ok<Bool, CpuReferenceError>(true)
+}
+
+pub fun createCpuCausalConvState(channels: UInt64, kernel: UInt64,
+    elementLimit: UInt64) r: Result<CpuCausalConvState, CpuReferenceError> {
+    if kernel == (0 as UInt64) {
+        return Err<CpuCausalConvState, CpuReferenceError>(gdnError(
+            "qwen.cpu.shape", "gdn.conv.create", "kernel length must be positive"))
+    }
+    let shape = gdnShape2(kernel - (1 as UInt64), channels)
+    let history = Array<Float>()
+    if kernel > (1 as UInt64) {
+        let elements = cpuShapeElements(shape, elementLimit, "gdn.conv.create")
+        if elements.isErr() {
+            shape.free()
+            return Err<CpuCausalConvState, CpuReferenceError>(elements.unwrapErr())
+        }
+        var index: UInt64 = 0 as UInt64
+        while index < elements.unwrap() {
+            history.push(0.0); index = index + (1 as UInt64)
+        }
+    } else if channels == (0 as UInt64) or elementLimit == (0 as UInt64) {
+        shape.free()
+        return Err<CpuCausalConvState, CpuReferenceError>(gdnError(
+            "qwen.cpu.shape", "gdn.conv.create", "channels and limit must be positive"))
+    }
+    shape.free()
+    return Ok<CpuCausalConvState, CpuReferenceError>(CpuCausalConvState{
+        history: history, channels: channels, kernel: kernel,
+        processed: 0 as UInt64, closed: false
+    })
+}
+
+pub fun createCpuGdnState(valueHeads: UInt64, keyDim: UInt64,
+    valueDim: UInt64, elementLimit: UInt64)
+    r: Result<CpuGdnState, CpuReferenceError> {
+    let shape = gdnShape3(valueHeads, keyDim, valueDim)
+    let elements = cpuShapeElements(shape, elementLimit, "gdn.state.create")
+    shape.free()
+    if elements.isErr() {
+        return Err<CpuGdnState, CpuReferenceError>(elements.unwrapErr())
+    }
+    let values = Array<Float>()
+    var index: UInt64 = 0 as UInt64
+    while index < elements.unwrap() {
+        values.push(0.0); index = index + (1 as UInt64)
+    }
+    return Ok<CpuGdnState, CpuReferenceError>(CpuGdnState{
+        values: values, valueHeads: valueHeads, keyDim: keyDim,
+        valueDim: valueDim, processed: 0 as UInt64, closed: false
+    })
+}
+
+pub fun cpuCausalDepthwiseConv(input: CpuTensor, weights: CpuTensor,
+    state: CpuCausalConvState, startPosition: UInt64, elementLimit: UInt64)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let stateValid = validateConvState(state, "gdn.conv")
+    if stateValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(stateValid.unwrapErr())
+    }
+    let inputValid = validateCpuTensor(input, elementLimit, "gdn.conv")
+    if inputValid.isErr() { return Err<CpuTensor, CpuReferenceError>(inputValid.unwrapErr()) }
+    let weightValid = validateCpuTensor(weights, elementLimit, "gdn.conv")
+    if weightValid.isErr() { return Err<CpuTensor, CpuReferenceError>(weightValid.unwrapErr()) }
+    if not gdnRank2(input) or not gdnRank2(weights) or
+        input.shape[1] != state.channels or weights.shape[0] != state.channels or
+        weights.shape[1] != state.kernel {
+        return Err<CpuTensor, CpuReferenceError>(gdnError(
+            "qwen.cpu.shape", "gdn.conv",
+            "input [tokens, channels] and weights [channels, kernel] must match state"))
+    }
+    if startPosition != state.processed {
+        return Err<CpuTensor, CpuReferenceError>(gdnError(
+            "qwen.cpu.position", "gdn.conv",
+            "convolution chunk must start at the current state position"))
+    }
+    let tokens = input.shape[0]
+    let endingPosition = state.processed + tokens
+    if endingPosition < state.processed {
+        return Err<CpuTensor, CpuReferenceError>(gdnError(
+            "qwen.cpu.overflow", "gdn.conv",
+            "convolution position would overflow"))
+    }
+    let historySlots = state.kernel - (1 as UInt64)
+    let output = Array<Float>()
+    let workingHistory = Array<Float>()
+    var copyIndex = 0
+    while copyIndex < state.history.length() {
+        workingHistory.push(state.history[copyIndex]); copyIndex = copyIndex + 1
+    }
+    var token: UInt64 = 0 as UInt64
+    while token < tokens {
+        var channel: UInt64 = 0 as UInt64
+        while channel < state.channels {
+            var sum: Float = 0.0
+            var tap: UInt64 = 0 as UInt64
+            while tap < historySlots {
+                let historyIndex = (tap * state.channels + channel) as Int
+                let weightIndex = (channel * state.kernel + tap) as Int
+                sum = f32(sum + f32(workingHistory[historyIndex] * weights.values[weightIndex]))
+                tap = tap + (1 as UInt64)
+            }
+            let inputIndex = (token * state.channels + channel) as Int
+            let currentWeight = (channel * state.kernel + historySlots) as Int
+            sum = f32(sum + f32(input.values[inputIndex] * weights.values[currentWeight]))
+            let silu = f32(sum / f32(1.0 + f32(exp(f32(-sum)))))
+            output.push(silu)
+            channel = channel + (1 as UInt64)
+        }
+        if historySlots > (0 as UInt64) {
+            var slot: UInt64 = 0 as UInt64
+            while slot + (1 as UInt64) < historySlots {
+                channel = 0 as UInt64
+                while channel < state.channels {
+                    workingHistory[(slot * state.channels + channel) as Int] =
+                        workingHistory[((slot + (1 as UInt64)) * state.channels + channel) as Int]
+                    channel = channel + (1 as UInt64)
+                }
+                slot = slot + (1 as UInt64)
+            }
+            channel = 0 as UInt64
+            while channel < state.channels {
+                workingHistory[((historySlots - (1 as UInt64)) * state.channels + channel) as Int] =
+                    input.values[(token * state.channels + channel) as Int]
+                channel = channel + (1 as UInt64)
+            }
+        }
+        token = token + (1 as UInt64)
+    }
+    let result = ownedCpuTensor(copyShape(input.shape), output, "gdn.conv")
+    if result.isErr() {
+        workingHistory.free()
+        return Err<CpuTensor, CpuReferenceError>(result.unwrapErr())
+    }
+    copyIndex = 0
+    while copyIndex < state.history.length() {
+        state.history[copyIndex] = workingHistory[copyIndex]; copyIndex = copyIndex + 1
+    }
+    workingHistory.free(); state.processed = endingPosition
+    return result
+}
+
+pub fun cpuGdnRecurrent(query: CpuTensor, key: CpuTensor, value: CpuTensor,
+    beta: CpuTensor, logDecay: CpuTensor, state: CpuGdnState,
+    startPosition: UInt64, elementLimit: UInt64)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let stateValid = validateGdnState(state, "gdn.recurrent")
+    if stateValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(stateValid.unwrapErr())
+    }
+    let queryValid = validateCpuTensor(query, elementLimit, "gdn.recurrent")
+    if queryValid.isErr() { return Err<CpuTensor, CpuReferenceError>(queryValid.unwrapErr()) }
+    let keyValid = validateCpuTensor(key, elementLimit, "gdn.recurrent")
+    if keyValid.isErr() { return Err<CpuTensor, CpuReferenceError>(keyValid.unwrapErr()) }
+    let valueValid = validateCpuTensor(value, elementLimit, "gdn.recurrent")
+    if valueValid.isErr() { return Err<CpuTensor, CpuReferenceError>(valueValid.unwrapErr()) }
+    let betaValid = validateCpuTensor(beta, elementLimit, "gdn.recurrent")
+    if betaValid.isErr() { return Err<CpuTensor, CpuReferenceError>(betaValid.unwrapErr()) }
+    let decayValid = validateCpuTensor(logDecay, elementLimit, "gdn.recurrent")
+    if decayValid.isErr() { return Err<CpuTensor, CpuReferenceError>(decayValid.unwrapErr()) }
+    if not gdnRank3(query) or not gdnRank3(key) or not gdnRank3(value) or
+        not gdnRank2(beta) or not gdnRank2(logDecay) or
+        not cpuSameShape(query, key) or not cpuSameShape(beta, logDecay) or
+        query.shape[0] != value.shape[0] or query.shape[1] != value.shape[1] or
+        beta.shape[0] != query.shape[0] or beta.shape[1] != query.shape[1] or
+        query.shape[1] != state.valueHeads or query.shape[2] != state.keyDim or
+        value.shape[2] != state.valueDim {
+        return Err<CpuTensor, CpuReferenceError>(gdnError(
+            "qwen.cpu.shape", "gdn.recurrent",
+            "Q/K/V, beta, decay, and recurrent state geometry must match"))
+    }
+    if startPosition != state.processed {
+        return Err<CpuTensor, CpuReferenceError>(gdnError(
+            "qwen.cpu.position", "gdn.recurrent",
+            "GDN chunk must start at the current state position"))
+    }
+    let tokens = query.shape[0]
+    let endingPosition = state.processed + tokens
+    if endingPosition < state.processed {
+        return Err<CpuTensor, CpuReferenceError>(gdnError(
+            "qwen.cpu.overflow", "gdn.recurrent", "GDN position would overflow"))
+    }
+    var scalarCheck = 0
+    while scalarCheck < beta.values.length() {
+        if beta.values[scalarCheck] < 0.0 or beta.values[scalarCheck] > 1.0 or
+            logDecay.values[scalarCheck] > 0.0 or
+            not isfinite(exp(logDecay.values[scalarCheck])) {
+            return Err<CpuTensor, CpuReferenceError>(gdnError(
+                "qwen.cpu.input", "gdn.recurrent",
+                "beta must be in [0,1] and log decay must produce finite non-growth"))
+        }
+        scalarCheck = scalarCheck + 1
+    }
+    let output = Array<Float>()
+    let workingState = Array<Float>()
+    var stateCopyIndex = 0
+    while stateCopyIndex < state.values.length() {
+        workingState.push(state.values[stateCopyIndex]); stateCopyIndex = stateCopyIndex + 1
+    }
+    var token: UInt64 = 0 as UInt64
+    while token < tokens {
+        var head: UInt64 = 0 as UInt64
+        while head < state.valueHeads {
+            let scalarIndex = (token * state.valueHeads + head) as Int
+            let decayFactor = f32(exp(logDecay.values[scalarIndex]))
+            var keyIndex: UInt64 = 0 as UInt64
+            while keyIndex < state.keyDim {
+                var valueIndex: UInt64 = 0 as UInt64
+                while valueIndex < state.valueDim {
+                    let stateIndex = ((head * state.keyDim + keyIndex) *
+                        state.valueDim + valueIndex) as Int
+                    workingState[stateIndex] = f32(workingState[stateIndex] * decayFactor)
+                    valueIndex = valueIndex + (1 as UInt64)
+                }
+                keyIndex = keyIndex + (1 as UInt64)
+            }
+            var valueIndex: UInt64 = 0 as UInt64
+            while valueIndex < state.valueDim {
+                var memory: Float = 0.0
+                keyIndex = 0 as UInt64
+                while keyIndex < state.keyDim {
+                    let stateIndex = ((head * state.keyDim + keyIndex) *
+                        state.valueDim + valueIndex) as Int
+                    let keyValueIndex = ((token * state.valueHeads + head) *
+                        state.keyDim + keyIndex) as Int
+                    memory = f32(memory + f32(workingState[stateIndex] *
+                        key.values[keyValueIndex]))
+                    keyIndex = keyIndex + (1 as UInt64)
+                }
+                let sourceValueIndex = ((token * state.valueHeads + head) *
+                    state.valueDim + valueIndex) as Int
+                let delta = f32(f32(value.values[sourceValueIndex] - memory) *
+                    beta.values[scalarIndex])
+                keyIndex = 0 as UInt64
+                while keyIndex < state.keyDim {
+                    let stateIndex = ((head * state.keyDim + keyIndex) *
+                        state.valueDim + valueIndex) as Int
+                    let keyValueIndex = ((token * state.valueHeads + head) *
+                        state.keyDim + keyIndex) as Int
+                    workingState[stateIndex] = f32(workingState[stateIndex] +
+                        f32(key.values[keyValueIndex] * delta))
+                    keyIndex = keyIndex + (1 as UInt64)
+                }
+                valueIndex = valueIndex + (1 as UInt64)
+            }
+            valueIndex = 0 as UInt64
+            while valueIndex < state.valueDim {
+                var attended: Float = 0.0
+                keyIndex = 0 as UInt64
+                while keyIndex < state.keyDim {
+                    let stateIndex = ((head * state.keyDim + keyIndex) *
+                        state.valueDim + valueIndex) as Int
+                    let queryIndex = ((token * state.valueHeads + head) *
+                        state.keyDim + keyIndex) as Int
+                    attended = f32(attended + f32(workingState[stateIndex] *
+                        query.values[queryIndex]))
+                    keyIndex = keyIndex + (1 as UInt64)
+                }
+                output.push(attended); valueIndex = valueIndex + (1 as UInt64)
+            }
+            head = head + (1 as UInt64)
+        }
+        token = token + (1 as UInt64)
+    }
+    let shape = gdnShape3(tokens, state.valueHeads, state.valueDim)
+    let result = ownedCpuTensor(shape, output, "gdn.recurrent")
+    if result.isErr() {
+        workingState.free()
+        return Err<CpuTensor, CpuReferenceError>(result.unwrapErr())
+    }
+    stateCopyIndex = 0
+    while stateCopyIndex < state.values.length() {
+        state.values[stateCopyIndex] = workingState[stateCopyIndex]
+        stateCopyIndex = stateCopyIndex + 1
+    }
+    workingState.free(); state.processed = endingPosition
+    return result
+}
+
+pub fun cpuGdnGatedRmsNorm(core: CpuTensor, gate: CpuTensor,
+    weight: Array<Float>, epsilon: Float, elementLimit: UInt64)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let coreValid = validateCpuTensor(core, elementLimit, "gdn.gated_norm")
+    if coreValid.isErr() { return Err<CpuTensor, CpuReferenceError>(coreValid.unwrapErr()) }
+    let gateValid = validateCpuTensor(gate, elementLimit, "gdn.gated_norm")
+    if gateValid.isErr() { return Err<CpuTensor, CpuReferenceError>(gateValid.unwrapErr()) }
+    if not gdnRank3(core) or not cpuSameShape(core, gate) or
+        weight.length() != (core.shape[2] as Int) or epsilon <= 0.0 or
+        not isfinite(epsilon) {
+        return Err<CpuTensor, CpuReferenceError>(gdnError(
+            "qwen.cpu.shape", "gdn.gated_norm",
+            "core/gate, weight, and positive epsilon geometry must match"))
+    }
+    var weightIndex = 0
+    while weightIndex < weight.length() {
+        if not isfinite(weight[weightIndex]) {
+            return Err<CpuTensor, CpuReferenceError>(gdnError(
+                "qwen.cpu.input", "gdn.gated_norm", "normalization weight must be finite"))
+        }
+        weightIndex = weightIndex + 1
+    }
+    let rows = core.shape[0] * core.shape[1]
+    let width = core.shape[2]
+    let output = Array<Float>()
+    var row: UInt64 = 0 as UInt64
+    while row < rows {
+        var sumSquares: Float = 0.0
+        var dimension: UInt64 = 0 as UInt64
+        while dimension < width {
+            let index = (row * width + dimension) as Int
+            sumSquares = f32(sumSquares + f32(core.values[index] * core.values[index]))
+            dimension = dimension + (1 as UInt64)
+        }
+        let mean = f32(sumSquares / ((width as Int) as Float))
+        let inverseRms = f32(1.0 / f32(sqrt(f32(mean + epsilon))))
+        dimension = 0 as UInt64
+        while dimension < width {
+            let index = (row * width + dimension) as Int
+            let normalized = f32(core.values[index] * inverseRms)
+            let sigmoid = f32(1.0 / f32(1.0 + f32(exp(f32(-gate.values[index])))))
+            let silu = f32(gate.values[index] * sigmoid)
+            output.push(f32(f32(weight[dimension as Int] * normalized) * silu))
+            dimension = dimension + (1 as UInt64)
+        }
+        row = row + (1 as UInt64)
+    }
+    return ownedCpuTensor(copyShape(core.shape), output, "gdn.gated_norm")
+}
