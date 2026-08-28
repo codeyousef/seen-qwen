@@ -1,0 +1,152 @@
+///
+/// Bounded CPU FFN, MTP fusion stem, logits, and greedy-selection reference.
+///
+/// Qwen semantic sources:
+/// QWEN-006 @ 562cfd944ee1f20702cfb0f4404014ee27c24813
+/// QwenLM/Confident-Decoding @ 22283d7a1b4eff75fb0d63fb2e862ade39df7b73
+/// contract test: FEL-1409 / QWN-024D
+///
+/// Seeded non-greedy sampling is intentionally explicit-unsupported here. Its
+/// RNG and filtering contract belongs to FEL-1451 / QWN-044B; this CPU leaf
+/// never substitutes greedy selection for a requested sampling mode.
+///
+
+import core.result.{Result}
+import seen_qwen.model.cpu_reference.{CpuReferenceError, CpuTensor,
+    cpuLinear, cpuReferenceError, cpuRmsNorm, cpuSwiGlu, copyShape,
+    ownedCpuTensor, validateCpuTensor}
+
+fun headError(code: String, operation: String, message: String,
+    exitCode: Int = 2) r: CpuReferenceError {
+    return cpuReferenceError(code, operation, message, exitCode)
+}
+
+pub fun cpuFfn(input: CpuTensor, gateWeight: CpuTensor,
+    upWeight: CpuTensor, downWeight: CpuTensor, elementLimit: UInt64)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let gate = cpuLinear(input, gateWeight, elementLimit)
+    if gate.isErr() { return Err<CpuTensor, CpuReferenceError>(gate.unwrapErr()) }
+    let up = cpuLinear(input, upWeight, elementLimit)
+    if up.isErr() {
+        gate.unwrap().close()
+        return Err<CpuTensor, CpuReferenceError>(up.unwrapErr())
+    }
+    let activated = cpuSwiGlu(gate.unwrap(), up.unwrap(), elementLimit)
+    gate.unwrap().close(); up.unwrap().close()
+    if activated.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(activated.unwrapErr())
+    }
+    let output = cpuLinear(activated.unwrap(), downWeight, elementLimit)
+    activated.unwrap().close()
+    return output
+}
+
+fun concatenateLast(left: CpuTensor, right: CpuTensor, elementLimit: UInt64)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let leftValid = validateCpuTensor(left, elementLimit, "mtp.stem")
+    if leftValid.isErr() { return Err<CpuTensor, CpuReferenceError>(leftValid.unwrapErr()) }
+    let rightValid = validateCpuTensor(right, elementLimit, "mtp.stem")
+    if rightValid.isErr() { return Err<CpuTensor, CpuReferenceError>(rightValid.unwrapErr()) }
+    if left.shape.length() == 0 or left.shape.length() != right.shape.length() {
+        return Err<CpuTensor, CpuReferenceError>(headError(
+            "qwen.cpu.shape", "mtp.stem", "MTP inputs must have matching positive rank"))
+    }
+    var dimension = 0
+    while dimension + 1 < left.shape.length() {
+        if left.shape[dimension] != right.shape[dimension] {
+            return Err<CpuTensor, CpuReferenceError>(headError(
+                "qwen.cpu.shape", "mtp.stem",
+                "MTP inputs must match outside the last dimension"))
+        }
+        dimension = dimension + 1
+    }
+    let leftWidth = left.shape[left.shape.length() - 1]
+    let rightWidth = right.shape[right.shape.length() - 1]
+    let combinedWidth = leftWidth + rightWidth
+    if combinedWidth < leftWidth {
+        return Err<CpuTensor, CpuReferenceError>(headError(
+            "qwen.cpu.overflow", "mtp.stem", "MTP concatenated width overflowed"))
+    }
+    let rows = (left.values.length() as UInt64) / leftWidth
+    let values = Array<Float>()
+    var row: UInt64 = 0 as UInt64
+    while row < rows {
+        var column: UInt64 = 0 as UInt64
+        while column < leftWidth {
+            values.push(left.values[(row * leftWidth + column) as Int])
+            column = column + (1 as UInt64)
+        }
+        column = 0 as UInt64
+        while column < rightWidth {
+            values.push(right.values[(row * rightWidth + column) as Int])
+            column = column + (1 as UInt64)
+        }
+        row = row + (1 as UInt64)
+    }
+    let shape = copyShape(left.shape); shape[shape.length() - 1] = combinedWidth
+    return ownedCpuTensor(shape, values, "mtp.stem")
+}
+
+pub fun cpuMtpStem(inputEmbedding: CpuTensor, baseHidden: CpuTensor,
+    embeddingNormWeight: CpuTensor, hiddenNormWeight: CpuTensor,
+    fusionWeight: CpuTensor, epsilon: Float, elementLimit: UInt64)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let embedding = cpuRmsNorm(inputEmbedding, embeddingNormWeight, epsilon,
+        elementLimit)
+    if embedding.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(embedding.unwrapErr())
+    }
+    let hidden = cpuRmsNorm(baseHidden, hiddenNormWeight, epsilon, elementLimit)
+    if hidden.isErr() {
+        embedding.unwrap().close()
+        return Err<CpuTensor, CpuReferenceError>(hidden.unwrapErr())
+    }
+    let joined = concatenateLast(embedding.unwrap(), hidden.unwrap(), elementLimit)
+    embedding.unwrap().close(); hidden.unwrap().close()
+    if joined.isErr() { return Err<CpuTensor, CpuReferenceError>(joined.unwrapErr()) }
+    let stem = cpuLinear(joined.unwrap(), fusionWeight, elementLimit)
+    joined.unwrap().close(); return stem
+}
+
+pub fun cpuProjectLogits(hidden: CpuTensor, lmHeadWeight: CpuTensor,
+    elementLimit: UInt64) r: Result<CpuTensor, CpuReferenceError> {
+    return cpuLinear(hidden, lmHeadWeight, elementLimit)
+}
+
+pub fun cpuGreedyToken(logits: CpuTensor, vocabularySize: UInt64,
+    elementLimit: UInt64) r: Result<Int, CpuReferenceError> {
+    let valid = validateCpuTensor(logits, elementLimit, "sampling.greedy")
+    if valid.isErr() { return Err<Int, CpuReferenceError>(valid.unwrapErr()) }
+    if logits.shape.length() == 0 or vocabularySize == (0 as UInt64) {
+        return Err<Int, CpuReferenceError>(headError(
+            "qwen.cpu.shape", "sampling.greedy",
+            "logits and vocabulary size must be non-empty"))
+    }
+    let width = logits.shape[logits.shape.length() - 1]
+    if vocabularySize > width {
+        return Err<Int, CpuReferenceError>(headError(
+            "qwen.cpu.bounds", "sampling.greedy",
+            "vocabulary size exceeds the logits width"))
+    }
+    let rowStart = logits.values.length() - (width as Int)
+    var best = 0
+    var token = 1
+    while token < (vocabularySize as Int) {
+        if logits.values[rowStart + token] > logits.values[rowStart + best] {
+            best = token
+        }
+        token = token + 1
+    }
+    return Ok<Int, CpuReferenceError>(best)
+}
+
+pub fun cpuSelectToken(logits: CpuTensor, mode: String,
+    vocabularySize: UInt64, elementLimit: UInt64)
+    r: Result<Int, CpuReferenceError> {
+    if mode == "greedy" {
+        return cpuGreedyToken(logits, vocabularySize, elementLimit)
+    }
+    return Err<Int, CpuReferenceError>(headError(
+        "qwen.cpu.unsupported", "sampling.dispatch",
+        "seeded non-greedy sampling requires the FEL-1451 RNG contract", 3))
+}
