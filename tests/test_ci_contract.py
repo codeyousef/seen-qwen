@@ -101,6 +101,7 @@ class CiContractTests(unittest.TestCase):
             "test_sampling_profiles.py",
             "test_hybrid_mini_contract.py",
             "test_hybrid_mini_assets.py",
+            "test_hybrid_mini_oracle.py",
             "test_qwen_tokenizer_oracles.py",
             "seen-pkg",
             "outside_objects_before",

@@ -104,7 +104,7 @@ outside_objects_before=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o \
     grep -Fx 'seen-pkg 0.17.0 (SEENPKG1)'
 python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.py \
     tests/test_sampling_profiles.py tests/test_hybrid_mini_contract.py \
-    tests/test_hybrid_mini_assets.py
+    tests/test_hybrid_mini_assets.py tests/test_hybrid_mini_oracle.py
 "$SEEN_PACKAGE_CLIENT" audit --lock Seen.lock
 "$SEEN_COMPILER" check tests/qwn_023b_hybrid_mini_assets_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_023a_hybrid_mini_contract_test.seen --frozen
