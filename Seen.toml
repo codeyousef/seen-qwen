@@ -13,6 +13,7 @@ modules = [
     "src/model/cpu_reference.seen",
     "src/model/cpu_attention.seen",
     "src/model/cpu_gdn.seen",
+    "src/model/cpu_head.seen",
     "src/tokenizer/tokenizer.seen",
 ]
 

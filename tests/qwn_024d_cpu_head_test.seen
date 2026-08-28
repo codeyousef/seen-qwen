@@ -1,0 +1,193 @@
+import crypto.sha256.{sha256File}
+import io.file.{readText, readTextChecked}
+import json.parser.{destroyJsonParseResult}
+import json.strict.{StrictJsonLimits, parseStrictJson}
+import json.value.{JsonValue}
+import math.math.{abs}
+import seen_qwen.model.cpu_head.{cpuFfn, cpuGreedyToken, cpuMtpStem,
+    cpuProjectLogits, cpuSelectToken}
+import seen_qwen.model.cpu_reference.{CpuTensor, createCpuTensor}
+import seen_qwen.tokenizer.tokenizer.{qwenSamplingQuery}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun headTestNear(actual: Float, expected: Float,
+    tolerance: Float = 0.00002) r: Bool {
+    return abs(actual - expected) <= tolerance
+}
+
+fun headTestShape1(first: UInt64) r: Array<UInt64> {
+    let shape = Array<UInt64>(); shape.push(first); return shape
+}
+
+fun headTestShape2(first: UInt64, second: UInt64) r: Array<UInt64> {
+    let shape = Array<UInt64>(); shape.push(first); shape.push(second); return shape
+}
+
+fun headJsonNumbers(root: JsonValue, name: String, expectedLength: Int)
+    r: Array<Float> {
+    let field = root.get(name)
+    require(not field.isNone() and field.unwrap().isArray() and
+        field.unwrap().length() == expectedLength, "load exact head oracle array " + name)
+    let values = Array<Float>(); var index = 0
+    while index < expectedLength {
+        let value = field.unwrap().getAt(index)
+        require(not value.isNone() and value.unwrap().isNumber(),
+            "require numeric head oracle entry")
+        values.push(value.unwrap().getNumber()); index = index + 1
+    }
+    return values
+}
+
+fun headMake1(values: Array<Float>, first: UInt64,
+    limit: UInt64 = 16384 as UInt64) r: CpuTensor {
+    let shape = headTestShape1(first); let result = createCpuTensor(shape, values, limit)
+    shape.free(); require(result.isOkay(), "create bounded rank-one head tensor")
+    return result.unwrap()
+}
+
+fun headMake2(values: Array<Float>, first: UInt64, second: UInt64,
+    limit: UInt64 = 16384 as UInt64) r: CpuTensor {
+    let shape = headTestShape2(first, second)
+    let result = createCpuTensor(shape, values, limit); shape.free()
+    require(result.isOkay(), "create bounded rank-two head tensor")
+    return result.unwrap()
+}
+
+fun headRequireValues(actual: Array<Float>, expected: Array<Float>,
+    message: String, tolerance: Float = 0.00002) r: Void {
+    require(actual.length() == expected.length(), message + " length")
+    var index = 0
+    while index < expected.length() {
+        require(headTestNear(actual[index], expected[index], tolerance), message)
+        index = index + 1
+    }
+}
+
+fun selected(values: Array<Float>, ids: Array<Int>) r: Array<Float> {
+    let output = Array<Float>(); var index = 0
+    while index < ids.length() {
+        output.push(values[ids[index]]); index = index + 1
+    }
+    return output
+}
+
+fun main() r: Int {
+    let oraclePath = "tests/fixtures/qwn_024d_cpu_head_oracle.json"
+    let oracleHash = sha256File(oraclePath, 196608)
+    require(oracleHash.isOkay() and oracleHash.unwrap() ==
+        "98dcd9ff0ca710d9f21579cfb4222698777b12ae2338541a3eb943642eddd56b",
+        "match content-addressed CPU head oracle")
+    let hashText = oracleHash.unwrap(); seen_string_release_owned(hashText)
+    let read = readTextChecked(oraclePath); require(read.success, "read CPU head oracle")
+    let parsed = parseStrictJson(read.content, StrictJsonLimits{
+        maxInputBytes: 196608, maxDepth: 8, maxValues: 8000, maxStringBytes: 256
+    })
+    require(parsed.isOkay(), "strictly parse CPU head oracle")
+    let document = parsed.unwrap(); let root = document.value.unwrap()
+    let mlpInputValues = headJsonNumbers(root, "mlp_input", 48)
+    let gateWeightValues = headJsonNumbers(root, "gate_weight", 384)
+    let upWeightValues = headJsonNumbers(root, "up_weight", 384)
+    let downWeightValues = headJsonNumbers(root, "down_weight", 48)
+    let expectedFfn = headJsonNumbers(root, "ffn_output", 6)
+    let mtpEmbeddingValues = headJsonNumbers(root, "mtp_input_embedding", 48)
+    let mtpBaseValues = headJsonNumbers(root, "mtp_base_hidden", 48)
+    let mtpEmbeddingNormValues = headJsonNumbers(root,
+        "mtp_embedding_norm_weight", 48)
+    let mtpHiddenNormValues = headJsonNumbers(root, "mtp_hidden_norm_weight", 48)
+    let mtpFusionValues = headJsonNumbers(root, "mtp_fusion_weight", 4608)
+    let expectedMtpStem = headJsonNumbers(root, "mtp_stem", 48)
+    let lmHeadRowsValues = headJsonNumbers(root, "lm_head_rows", 240)
+    let baseHiddenValues = headJsonNumbers(root, "base_hidden", 48)
+    let baseLogitValues = headJsonNumbers(root, "base_logits", 256)
+    let mtpHiddenValues = headJsonNumbers(root, "mtp_hidden", 48)
+    let mtpLogitValues = headJsonNumbers(root, "mtp_logits", 256)
+    destroyJsonParseResult(document, true); seen_string_release_owned(read.content)
+
+    let mlpInput = headMake2(mlpInputValues, 1 as UInt64, 48 as UInt64)
+    let gateWeight = headMake2(gateWeightValues, 8 as UInt64, 48 as UInt64)
+    let upWeight = headMake2(upWeightValues, 8 as UInt64, 48 as UInt64)
+    let downWeight = headMake2(downWeightValues, 6 as UInt64, 8 as UInt64)
+    let ffn = cpuFfn(mlpInput, gateWeight, upWeight, downWeight,
+        16384 as UInt64)
+    require(ffn.isOkay(), "run bounded SwiGLU FFN")
+    headRequireValues(ffn.unwrap().values, expectedFfn,
+        "match pinned reduced Qwen FFN", 0.00003)
+
+    let mtpEmbedding = headMake2(mtpEmbeddingValues, 1 as UInt64, 48 as UInt64)
+    let mtpBase = headMake2(mtpBaseValues, 1 as UInt64, 48 as UInt64)
+    let mtpEmbeddingNorm = headMake1(mtpEmbeddingNormValues, 48 as UInt64)
+    let mtpHiddenNorm = headMake1(mtpHiddenNormValues, 48 as UInt64)
+    let mtpFusion = headMake2(mtpFusionValues, 48 as UInt64, 96 as UInt64)
+    let stem = cpuMtpStem(mtpEmbedding, mtpBase, mtpEmbeddingNorm,
+        mtpHiddenNorm, mtpFusion, 0.000001, 16384 as UInt64)
+    require(stem.isOkay(), "run shared-embedding MTP fusion stem")
+    headRequireValues(stem.unwrap().values, expectedMtpStem,
+        "match pinned MTP normalization and fusion projection", 0.00003)
+
+    let lmRows = headMake2(lmHeadRowsValues, 5 as UInt64, 48 as UInt64)
+    let baseHidden = headMake2(baseHiddenValues, 1 as UInt64, 48 as UInt64)
+    let mtpHidden = headMake2(mtpHiddenValues, 1 as UInt64, 48 as UInt64)
+    let baseProjection = cpuProjectLogits(baseHidden, lmRows, 16384 as UInt64)
+    let mtpProjection = cpuProjectLogits(mtpHidden, lmRows, 16384 as UInt64)
+    require(baseProjection.isOkay() and mtpProjection.isOkay(),
+        "project selected base and MTP logits")
+    let tokenRows = Array<Int>(); tokenRows.push(0); tokenRows.push(1)
+    tokenRows.push(166); tokenRows.push(170); tokenRows.push(255)
+    let expectedBaseRows = selected(baseLogitValues, tokenRows)
+    let expectedMtpRows = selected(mtpLogitValues, tokenRows)
+    headRequireValues(baseProjection.unwrap().values, expectedBaseRows,
+        "match pinned base LM-head rows", 0.00003)
+    headRequireValues(mtpProjection.unwrap().values, expectedMtpRows,
+        "match pinned MTP LM-head rows", 0.00003)
+
+    let baseLogits = headMake2(baseLogitValues, 1 as UInt64, 256 as UInt64)
+    let mtpLogits = headMake2(mtpLogitValues, 1 as UInt64, 256 as UInt64)
+    let samplingText = readText("profiles/sampling.toml")
+    let greedyMode = qwenSamplingQuery(samplingText, "greedy.mode").unwrap()
+    let thinkingMode = qwenSamplingQuery(samplingText, "thinking.mode").unwrap()
+    require(cpuSelectToken(baseLogits, greedyMode, 256 as UInt64,
+        16384 as UInt64).unwrap() == 170, "select pinned base greedy token")
+    require(cpuGreedyToken(mtpLogits, 256 as UInt64,
+        16384 as UInt64).unwrap() == 166, "select pinned MTP greedy token")
+    let unsupported = cpuSelectToken(baseLogits, thinkingMode,
+        256 as UInt64, 16384 as UInt64)
+    require(unsupported.isErr() and unsupported.unwrapErr().code ==
+        "qwen.cpu.unsupported" and unsupported.unwrapErr().exitCode == 3,
+        "never silently replace seeded sampling with greedy")
+    let tiedValues = Array<Float>(); tiedValues.push(2.0); tiedValues.push(2.0)
+    tiedValues.push(1.0)
+    let tied = headMake2(tiedValues, 1 as UInt64, 3 as UInt64)
+    require(cpuGreedyToken(tied, 3 as UInt64, 16 as UInt64).unwrap() == 0,
+        "resolve greedy ties to the lowest token ID")
+    require(cpuGreedyToken(tied, 4 as UInt64, 16 as UInt64).isErr(),
+        "reject vocabulary bounds beyond logit width")
+
+    let ownedValue = ffn.unwrap().values[0]; mlpInput.values[0] = 99.0
+    require(ffn.unwrap().values[0] == ownedValue, "FFN output owns its storage")
+    baseLogits.close(); baseLogits.close()
+    require(cpuGreedyToken(baseLogits, 256 as UInt64,
+        16384 as UInt64).isErr(), "reject logits use after close")
+
+    ffn.unwrap().close(); stem.unwrap().close(); baseProjection.unwrap().close()
+    mtpProjection.unwrap().close(); mtpLogits.close(); tied.close()
+    mlpInput.close(); gateWeight.close(); upWeight.close(); downWeight.close()
+    mtpEmbedding.close(); mtpBase.close(); mtpEmbeddingNorm.close()
+    mtpHiddenNorm.close(); mtpFusion.close(); lmRows.close(); baseHidden.close()
+    mtpHidden.close()
+    mlpInputValues.free(); gateWeightValues.free(); upWeightValues.free()
+    downWeightValues.free(); expectedFfn.free(); mtpEmbeddingValues.free()
+    mtpBaseValues.free(); mtpEmbeddingNormValues.free(); mtpHiddenNormValues.free()
+    mtpFusionValues.free(); expectedMtpStem.free(); lmHeadRowsValues.free()
+    baseHiddenValues.free(); baseLogitValues.free(); mtpHiddenValues.free()
+    mtpLogitValues.free(); tokenRows.free(); expectedBaseRows.free()
+    expectedMtpRows.free(); tiedValues.free()
+    println("PASS: QWN-024D CPU FFN, MTP stem, logits, and explicit sampling dispatch")
+    return 0
+}
+
+main()
