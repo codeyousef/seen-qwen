@@ -1,0 +1,67 @@
+{
+  "assets": {
+    "expected.safetensors": {
+      "bytes": 240784,
+      "sha256": "dfa4e8eb7550e7e694c9044d63f602e406fea09153a849274250b046db350096"
+    }
+  },
+  "comparison": {
+    "atol": 1e-05,
+    "dtype": "F32",
+    "rtol": 1e-05
+  },
+  "coverage": {
+    "base_layers": 8,
+    "full_attention_layers": 2,
+    "linear_attention_layers": 6,
+    "mtp_layers": 1,
+    "non_finite_values": 0,
+    "tensor_count": 147
+  },
+  "dependencies": {
+    "contract_sha256": "f29839615771e344bf89329f2195e5921fc8ea371849249be55722ab1999dddf",
+    "model_safetensors_sha256": "16ecca9cb396099db0c92d835840264e7b45d12cd6221d7af5462ac8576c94a9"
+  },
+  "environment": {
+    "deterministic_algorithms": true,
+    "device": "cpu",
+    "python": "3.14.7",
+    "threads": 1,
+    "torch": "2.11.0+cpu"
+  },
+  "fixture_id": "qwen3_8_hybrid_mini_v1",
+  "generator_sha256": "fea88c9dd92e1e5ffa12699be84b52293557e91234917191083f4bcc41c858ab",
+  "input": {
+    "text": "Seen Qwen",
+    "token_ids": [
+      83,
+      101,
+      101,
+      110,
+      32,
+      81,
+      119,
+      101,
+      110
+    ]
+  },
+  "maturity": "verified",
+  "outputs": {
+    "greedy_token_ids": [
+      170,
+      129,
+      34,
+      239
+    ],
+    "mtp_greedy_token_id": 166,
+    "mtp_input_token_id": 170
+  },
+  "schema": "seen-qwen-hybrid-mini-oracle-v1",
+  "sources": {
+    "modeling_source_sha256": "25c4912dc14dda47b14a1c24efe36ec055be4a2f150c64c9a29860aebe42aff8",
+    "qwen_mtp_commit": "22283d7a1b4eff75fb0d63fb2e862ade39df7b73",
+    "qwen_mtp_repository": "QwenLM/Confident-Decoding",
+    "qwen_mtp_source_sha256": "cf97664e82371425df14e412c9d351405d05ae8db3622fc817813ddda6858622",
+    "transformers_commit": "562cfd944ee1f20702cfb0f4404014ee27c24813"
+  }
+}
