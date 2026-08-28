@@ -1,0 +1,224 @@
+import math.math.{abs}
+import seen_qwen.model.cpu_reference.{CpuTensor, createCpuTensor,
+    cpuGatedRmsNorm, cpuLinear, cpuResidualAdd, cpuRmsNorm, cpuSilu,
+    cpuSwiGlu}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun near(actual: Float, expected: Float, tolerance: Float = 0.00001) r: Bool {
+    return abs(actual - expected) <= tolerance
+}
+
+fun requireValues(tensor: CpuTensor, expected: Array<Float>, message: String)
+    r: Void {
+    require(tensor.values.length() == expected.length(), message + " length")
+    var index = 0
+    while index < expected.length() {
+        require(near(tensor.values[index], expected[index]), message)
+        index = index + 1
+    }
+}
+
+fun shape1(first: UInt64) r: Array<UInt64> {
+    let shape = Array<UInt64>(); shape.push(first); return shape
+}
+
+fun shape2(first: UInt64, second: UInt64) r: Array<UInt64> {
+    let shape = Array<UInt64>(); shape.push(first); shape.push(second)
+    return shape
+}
+
+fun main() r: Int {
+    let inputShape = shape2(2 as UInt64, 4 as UInt64)
+    let inputValues = Array<Float>()
+    inputValues.push(1.0); inputValues.push(2.0)
+    inputValues.push(3.0); inputValues.push(4.0)
+    inputValues.push(-1.0); inputValues.push(0.5)
+    inputValues.push(-0.5); inputValues.push(2.0)
+    let inputResult = createCpuTensor(inputShape, inputValues, 64 as UInt64)
+    require(inputResult.isOkay(), "create checked owned input tensor")
+    let input = inputResult.unwrap()
+    inputValues[0] = 99.0; inputShape[0] = 99 as UInt64
+    require(input.values[0] == 1.0 and
+        input.shape[0] == (2 as UInt64), "copy caller storage into tensor ownership")
+
+    let weightShape = shape1(4 as UInt64)
+    let weightValues = Array<Float>()
+    weightValues.push(0.1); weightValues.push(-0.2)
+    weightValues.push(0.3); weightValues.push(0.0)
+    let weight = createCpuTensor(weightShape, weightValues, 8 as UInt64).unwrap()
+    let rmsResult = cpuRmsNorm(input, weight, 0.000001, 64 as UInt64)
+    require(rmsResult.isOkay(), "run offset-weight RMSNorm")
+    let rms = rmsResult.unwrap()
+    let rmsExpected = Array<Float>()
+    rmsExpected.push(0.401663213968277); rmsExpected.push(0.5842373967170715)
+    rmsExpected.push(1.4240787029266357); rmsExpected.push(1.4605934619903564)
+    rmsExpected.push(-0.9380828738212585); rmsExpected.push(0.34112104773521423)
+    rmsExpected.push(-0.5543216466903687); rmsExpected.push(1.705605149269104)
+    requireValues(rms, rmsExpected, "match pinned PyTorch FP32 RMSNorm oracle")
+
+    let gateShape = shape2(2 as UInt64, 4 as UInt64)
+    let gateValues = Array<Float>()
+    gateValues.push(0.25); gateValues.push(-0.5)
+    gateValues.push(1.0); gateValues.push(-1.0)
+    gateValues.push(2.0); gateValues.push(0.1)
+    gateValues.push(-0.2); gateValues.push(0.75)
+    let gate = createCpuTensor(gateShape, gateValues, 64 as UInt64).unwrap()
+    let gatedWeightShape = shape1(4 as UInt64)
+    let gatedWeightValues = Array<Float>()
+    gatedWeightValues.push(0.5); gatedWeightValues.push(0.75)
+    gatedWeightValues.push(1.0); gatedWeightValues.push(1.25)
+    let gatedWeight = createCpuTensor(gatedWeightShape, gatedWeightValues,
+        8 as UInt64).unwrap()
+    let gatedResult = cpuGatedRmsNorm(input, gate, gatedWeight,
+        0.000001, 64 as UInt64)
+    require(gatedResult.isOkay(), "run multiplicative gated RMSNorm")
+    let gated = gatedResult.unwrap()
+    let gatedExpected = Array<Float>()
+    gatedExpected.push(0.025659730657935143); gatedExpected.push(-0.10339377820491791)
+    gatedExpected.push(0.800834596157074); gatedExpected.push(-0.491017609834671)
+    gatedExpected.push(-0.7511459589004517); gatedExpected.push(0.01678888499736786)
+    gatedExpected.push(0.038390275090932846); gatedExpected.push(1.0860099792480469)
+    requireValues(gated, gatedExpected,
+        "match pinned PyTorch FP32 gated RMSNorm oracle")
+
+    let activationShape = shape2(1 as UInt64, 5 as UInt64)
+    let activationValues = Array<Float>()
+    activationValues.push(-2.0); activationValues.push(-1.0)
+    activationValues.push(0.0); activationValues.push(1.0)
+    activationValues.push(2.0)
+    let activation = createCpuTensor(activationShape, activationValues,
+        16 as UInt64).unwrap()
+    let silu = cpuSilu(activation, 16 as UInt64).unwrap()
+    let siluExpected = Array<Float>()
+    siluExpected.push(-0.23840583860874176); siluExpected.push(-0.2689414322376251)
+    siluExpected.push(0.0); siluExpected.push(0.7310585975646973)
+    siluExpected.push(1.7615940570831299)
+    requireValues(silu, siluExpected, "match pinned PyTorch FP32 SiLU oracle")
+
+    let upShape = shape2(1 as UInt64, 5 as UInt64)
+    let upValues = Array<Float>()
+    upValues.push(0.5); upValues.push(-1.0)
+    upValues.push(2.0); upValues.push(3.0)
+    upValues.push(-0.25)
+    let up = createCpuTensor(upShape, upValues, 16 as UInt64).unwrap()
+    let swiglu = cpuSwiGlu(activation, up, 16 as UInt64).unwrap()
+    let swigluExpected = Array<Float>()
+    swigluExpected.push(-0.11920291930437088)
+    swigluExpected.push(0.2689414322376251); swigluExpected.push(0.0)
+    swigluExpected.push(2.193175792694092)
+    swigluExpected.push(-0.44039851427078247)
+    requireValues(swiglu, swigluExpected,
+        "match pinned PyTorch FP32 SwiGLU oracle")
+
+    let linearInputShape = shape2(2 as UInt64, 3 as UInt64)
+    let linearInputValues = Array<Float>()
+    linearInputValues.push(1.0); linearInputValues.push(-2.0)
+    linearInputValues.push(0.5); linearInputValues.push(0.0)
+    linearInputValues.push(3.0); linearInputValues.push(-1.0)
+    let linearInput = createCpuTensor(linearInputShape, linearInputValues,
+        16 as UInt64).unwrap()
+    let linearWeightShape = shape2(2 as UInt64, 3 as UInt64)
+    let linearWeightValues = Array<Float>()
+    linearWeightValues.push(0.25); linearWeightValues.push(-0.5)
+    linearWeightValues.push(2.0); linearWeightValues.push(-1.0)
+    linearWeightValues.push(0.75); linearWeightValues.push(0.5)
+    let linearWeight = createCpuTensor(linearWeightShape, linearWeightValues,
+        16 as UInt64).unwrap()
+    let projectedResult = cpuLinear(linearInput, linearWeight, 16 as UInt64)
+    require(projectedResult.isOkay(), "run row-major bias-free linear operation")
+    let projected = projectedResult.unwrap()
+    require(projected.shape.length() == 2 and
+        projected.shape[0] == (2 as UInt64) and
+        projected.shape[1] == (2 as UInt64), "derive checked linear output shape")
+    let linearExpected = Array<Float>()
+    linearExpected.push(2.25); linearExpected.push(-2.25)
+    linearExpected.push(-3.5); linearExpected.push(1.75)
+    requireValues(projected, linearExpected,
+        "match pinned PyTorch FP32 linear oracle")
+    let residual = cpuResidualAdd(projected, projected, 16 as UInt64).unwrap()
+    require(near(residual.values[0], 4.5) and near(residual.values[3], 3.5),
+        "add residuals with Float32 semantics")
+
+    let zeroShape = shape2(1 as UInt64, 0 as UInt64)
+    let noValues = Array<Float>()
+    let zeroResult = createCpuTensor(zeroShape, noValues, 16 as UInt64)
+    require(zeroResult.isErr() and zeroResult.unwrapErr().code ==
+        "qwen.cpu.shape", "reject zero dimensions")
+    let mismatchShape = shape2(2 as UInt64, 2 as UInt64)
+    let mismatchValues = Array<Float>(); mismatchValues.push(1.0)
+    require(createCpuTensor(mismatchShape, mismatchValues, 16 as UInt64).isErr(),
+        "reject mismatched value counts")
+    let outOfRangeShape = shape1(1 as UInt64)
+    let outOfRangeValues = Array<Float>(); outOfRangeValues.push(1.0e300)
+    let outOfRange = createCpuTensor(outOfRangeShape, outOfRangeValues,
+        1 as UInt64)
+    require(outOfRange.isErr() and outOfRange.unwrapErr().code ==
+        "qwen.cpu.input", "reject values outside finite Float32 range")
+    let limitedShape = shape2(2 as UInt64, 3 as UInt64)
+    let limitedValues = Array<Float>()
+    var limitedIndex = 0
+    while limitedIndex < 6 {
+        limitedValues.push(limitedIndex as Float); limitedIndex = limitedIndex + 1
+    }
+    let limited = createCpuTensor(limitedShape, limitedValues, 5 as UInt64)
+    require(limited.isErr() and limited.unwrapErr().code == "qwen.cpu.limit" and
+        not limited.unwrapErr().retryable, "enforce caller-supplied element limit")
+    let overflowShape = shape2(0x7FFFFFFFFFFFFFFF as UInt64, 2 as UInt64)
+    let overflowValues = Array<Float>()
+    let overflow = createCpuTensor(overflowShape, overflowValues,
+        0x7FFFFFFFFFFFFFFF as UInt64)
+    require(overflow.isErr() and overflow.unwrapErr().code ==
+        "qwen.cpu.overflow", "reject checked UInt64 geometry overflow")
+    require(cpuRmsNorm(input, weight, 0.0, 64 as UInt64).isErr(),
+        "reject invalid normalization epsilon")
+    require(cpuLinear(linearInput, weight, 16 as UInt64).isErr(),
+        "reject incompatible linear geometry")
+    linearInput.shape[0] = 3 as UInt64
+    let forged = cpuLinear(linearInput, linearWeight, 16 as UInt64)
+    require(forged.isErr() and forged.unwrapErr().code ==
+        "qwen.cpu.invalid-state" and forged.unwrapErr().exitCode == 11,
+        "reject forged tensor geometry before execution")
+    linearInput.shape[0] = 2 as UInt64
+    let hugeShape = shape2(1 as UInt64, 2 as UInt64)
+    let hugeValues = Array<Float>()
+    hugeValues.push(3.0e38); hugeValues.push(3.0e38)
+    let huge = createCpuTensor(hugeShape, hugeValues, 4 as UInt64).unwrap()
+    let hugeWeightShape = shape1(2 as UInt64)
+    let hugeWeightValues = Array<Float>()
+    hugeWeightValues.push(0.0); hugeWeightValues.push(0.0)
+    let hugeWeight = createCpuTensor(hugeWeightShape, hugeWeightValues,
+        4 as UInt64).unwrap()
+    let numerical = cpuRmsNorm(huge, hugeWeight, 0.000001,
+        4 as UInt64)
+    require(numerical.isErr() and numerical.unwrapErr().code ==
+        "qwen.cpu.non-finite", "fail closed on Float32 accumulation overflow")
+
+    input.close(); input.close()
+    let closed = cpuSilu(input, 64 as UInt64)
+    require(closed.isErr() and closed.unwrapErr().code == "qwen.cpu.closed" and
+        closed.unwrapErr().exitCode == 11,
+        "make cleanup idempotent and reject use after close")
+    weight.close(); rms.close(); gate.close(); gatedWeight.close(); gated.close()
+    activation.close(); silu.close(); up.close(); swiglu.close()
+    linearInput.close(); linearWeight.close(); projected.close(); residual.close()
+    huge.close(); hugeWeight.close()
+    inputShape.free(); inputValues.free(); weightShape.free(); weightValues.free()
+    gateShape.free(); gateValues.free(); gatedWeightShape.free()
+    gatedWeightValues.free(); activationShape.free(); activationValues.free()
+    upShape.free(); upValues.free(); linearInputShape.free(); linearInputValues.free()
+    linearWeightShape.free(); linearWeightValues.free(); zeroShape.free()
+    noValues.free(); mismatchShape.free(); mismatchValues.free()
+    outOfRangeShape.free(); outOfRangeValues.free()
+    limitedShape.free(); limitedValues.free(); overflowShape.free()
+    overflowValues.free(); rmsExpected.free(); gatedExpected.free()
+    siluExpected.free(); swigluExpected.free(); linearExpected.free()
+    hugeShape.free(); hugeValues.free(); hugeWeightShape.free()
+    hugeWeightValues.free()
+    println("PASS: QWN-024A bounded Float32 geometry and CPU reference operations")
+    return 0
+}
+
+main()
