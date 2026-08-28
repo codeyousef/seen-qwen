@@ -60,10 +60,12 @@ class CiContractTests(unittest.TestCase):
 
     def test_inputs_match_dependency_and_oracle_locks(self) -> None:
         identities = (
-            "439edd029c39f0e53b1d9736a5f7ca6b7ef333ac461703162ed3a25748e121be",
-            "0a9b56f81fcaeab8f6f0e22e30d908832f843e112dacd6a6a67954106e881516",
-            "cb15b697946941ea18fc56f26a1dc9c5d97400fccb84797ca0a40dd7e524a700",
-            "3472e3b9e99234d51bdcf62aef985909cb0b6d574283ae5fcb76127c699c368d",
+            "4c0bd2720e635f92b1b99be971ceaaf3161a3051",
+            "7f151e716919172634f2e7c04fe12ecf5e29fb03",
+            "f5ea7afeba8776e6ce6cd8b02c0df4d52dbd0310fc8e9c903e38b1864b121647",
+            "bd6f10e86575b5269b659909b21842e2ea0819f225c4781fafd47fe715ed6b59",
+            "cadb3056ddb8420a1af5cda809ba671263eaeadd02a8591be33601d620b1c153",
+            "5bcb9870bf1dee4ba5f9b8360c9a7de5d1d811d4f71fc5947376d8dfb8cf0852",
             "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
             "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
             "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
@@ -95,8 +97,10 @@ class CiContractTests(unittest.TestCase):
             "qwn_022c_chat_template_test",
             "qwn_022d_sampling_test",
             "qwn_023a_hybrid_mini_contract_test",
+            "qwn_023b_hybrid_mini_assets_test",
             "test_sampling_profiles.py",
             "test_hybrid_mini_contract.py",
+            "test_hybrid_mini_assets.py",
             "test_qwen_tokenizer_oracles.py",
             "seen-pkg",
             "outside_objects_before",
