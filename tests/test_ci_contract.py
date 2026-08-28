@@ -98,6 +98,7 @@ class CiContractTests(unittest.TestCase):
             "qwn_022d_sampling_test",
             "qwn_023a_hybrid_mini_contract_test",
             "qwn_023b_hybrid_mini_assets_test",
+            "qwn_024a_cpu_reference_test",
             "test_sampling_profiles.py",
             "test_hybrid_mini_contract.py",
             "test_hybrid_mini_assets.py",

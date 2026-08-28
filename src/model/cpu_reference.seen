@@ -1,0 +1,452 @@
+///
+/// Bounded owned FP32 tensors and scalar CPU reference operations.
+///
+/// This is the correctness path for the frozen Qwen mini model, not an
+/// optimized backend. Every allocation is preceded by checked UInt64 geometry
+/// and an explicit caller-supplied element limit. Inputs are borrowed for the
+/// duration of an operation; results own their shape and values. close() is
+/// deterministic and idempotent. Values use Float storage because generic
+/// Array<Float32> reads currently lose Float32 arithmetic semantics (FEL-1545);
+/// f32() explicitly rounds every elementary operation to IEEE Float32.
+///
+/// Contract test: FEL-1405 / QWN-024A
+///
+
+import core.result.{Result}
+import inference.scalars.{checkedTensorElements}
+import math.math.{exp, isfinite, sqrt}
+
+pub class CpuReferenceError {
+    var code: String
+    var operation: String
+    var message: String
+    var exitCode: Int
+    var retryable: Bool
+}
+
+pub class CpuTensor {
+    var shape: Array<UInt64>
+    var values: Array<Float>
+    var closed: Bool
+
+    fun rank() r: Int {
+        if this.closed { return 0 }
+        return this.shape.length()
+    }
+
+    fun length() r: Int {
+        if this.closed { return 0 }
+        return this.values.length()
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.values.free()
+        this.shape.free()
+        this.closed = true
+    }
+}
+
+fun f32(value: Float) r: Float {
+    return (value as Float32) as Float
+}
+
+fun cpuReferenceError(code: String, operation: String, message: String,
+    exitCode: Int) r: CpuReferenceError {
+    return CpuReferenceError{ code: code, operation: operation,
+        message: message, exitCode: exitCode, retryable: false }
+}
+
+fun cpuInputError(operation: String, message: String)
+    r: Result<CpuTensor, CpuReferenceError> {
+    return Err<CpuTensor, CpuReferenceError>(cpuReferenceError(
+        "qwen.cpu.input", operation, message, 2))
+}
+
+fun cpuShapeError(operation: String, message: String)
+    r: Result<CpuTensor, CpuReferenceError> {
+    return Err<CpuTensor, CpuReferenceError>(cpuReferenceError(
+        "qwen.cpu.shape", operation, message, 2))
+}
+
+fun cpuNumericalError(operation: String)
+    r: Result<CpuTensor, CpuReferenceError> {
+    return Err<CpuTensor, CpuReferenceError>(cpuReferenceError(
+        "qwen.cpu.non-finite", operation,
+        "operation encountered a non-finite Float32 intermediate", 2))
+}
+
+fun copyShape(shape: Array<UInt64>) r: Array<UInt64> {
+    let copied = Array<UInt64>()
+    var index = 0
+    while index < shape.length() {
+        copied.push(shape[index])
+        index = index + 1
+    }
+    return copied
+}
+
+fun cpuShapeElements(shape: Array<UInt64>, elementLimit: UInt64,
+    operation: String) r: Result<UInt64, CpuReferenceError> {
+    if shape.length() == 0 or shape.length() > 8 {
+        return Err<UInt64, CpuReferenceError>(cpuReferenceError(
+            "qwen.cpu.shape", operation,
+            "tensor rank must be within 1 through 8", 2))
+    }
+    if elementLimit == (0 as UInt64) {
+        return Err<UInt64, CpuReferenceError>(cpuReferenceError(
+            "qwen.cpu.input", operation,
+            "element limit must be positive", 2))
+    }
+    var index = 0
+    while index < shape.length() {
+        if shape[index] == (0 as UInt64) {
+            return Err<UInt64, CpuReferenceError>(cpuReferenceError(
+                "qwen.cpu.shape", operation,
+                "tensor dimensions must be positive", 2))
+        }
+        index = index + 1
+    }
+    let elements = checkedTensorElements(shape)
+    if elements.isNone() {
+        return Err<UInt64, CpuReferenceError>(cpuReferenceError(
+            "qwen.cpu.overflow", operation,
+            "checked tensor geometry overflowed", 2))
+    }
+    if elements.unwrap() > elementLimit {
+        return Err<UInt64, CpuReferenceError>(cpuReferenceError(
+            "qwen.cpu.limit", operation,
+            "tensor exceeds the explicit element limit", 2))
+    }
+    return Ok<UInt64, CpuReferenceError>(elements.unwrap())
+}
+
+fun cpuValuesFinite(values: Array<Float>) r: Bool {
+    var index = 0
+    while index < values.length() {
+        if not isfinite(values[index]) { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun validateCpuTensor(tensor: CpuTensor, elementLimit: UInt64,
+    operation: String) r: Result<UInt64, CpuReferenceError> {
+    if tensor.closed {
+        return Err<UInt64, CpuReferenceError>(cpuReferenceError(
+            "qwen.cpu.closed", operation, "tensor is closed", 11))
+    }
+    let elements = cpuShapeElements(tensor.shape, elementLimit, operation)
+    if elements.isErr() {
+        return Err<UInt64, CpuReferenceError>(elements.unwrapErr())
+    }
+    if elements.unwrap() != (tensor.values.length() as UInt64) or
+        not cpuValuesFinite(tensor.values) {
+        return Err<UInt64, CpuReferenceError>(cpuReferenceError(
+            "qwen.cpu.invalid-state", operation,
+            "tensor storage no longer matches its validated geometry", 11))
+    }
+    return Ok<UInt64, CpuReferenceError>(elements.unwrap())
+}
+
+fun ownedCpuTensor(shape: Array<UInt64>, values: Array<Float>,
+    operation: String) r: Result<CpuTensor, CpuReferenceError> {
+    if not cpuValuesFinite(values) {
+        shape.free(); values.free()
+        return Err<CpuTensor, CpuReferenceError>(cpuReferenceError(
+            "qwen.cpu.non-finite", operation,
+            "operation produced a non-finite Float32 value", 2))
+    }
+    return Ok<CpuTensor, CpuReferenceError>(CpuTensor{
+        shape: shape, values: values, closed: false
+    })
+}
+
+pub fun createCpuTensor(shape: Array<UInt64>, values: Array<Float>,
+    elementLimit: UInt64) r: Result<CpuTensor, CpuReferenceError> {
+    let elements = cpuShapeElements(shape, elementLimit, "tensor.create")
+    if elements.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(elements.unwrapErr())
+    }
+    if elements.unwrap() != (values.length() as UInt64) {
+        return cpuShapeError("tensor.create",
+            "value count does not match checked tensor geometry")
+    }
+    if not cpuValuesFinite(values) {
+        return cpuInputError("tensor.create",
+            "input values must be finite Float32 numbers")
+    }
+    let ownedValues = Array<Float>()
+    var index = 0
+    while index < values.length() {
+        let rounded = f32(values[index])
+        if not isfinite(rounded) {
+            ownedValues.free()
+            return cpuInputError("tensor.create",
+                "input values must be representable as finite Float32 numbers")
+        }
+        ownedValues.push(rounded)
+        index = index + 1
+    }
+    return Ok<CpuTensor, CpuReferenceError>(CpuTensor{
+        shape: copyShape(shape), values: ownedValues, closed: false
+    })
+}
+
+fun cpuSameShape(left: CpuTensor, right: CpuTensor) r: Bool {
+    if left.closed or right.closed or
+        left.shape.length() != right.shape.length() { return false }
+    var index = 0
+    while index < left.shape.length() {
+        if left.shape[index] != right.shape[index] { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun cpuLastDimension(tensor: CpuTensor) r: UInt64 {
+    return tensor.shape[tensor.shape.length() - 1]
+}
+
+pub fun cpuRmsNorm(input: CpuTensor, weight: CpuTensor, epsilon: Float,
+    elementLimit: UInt64) r: Result<CpuTensor, CpuReferenceError> {
+    let inputValid = validateCpuTensor(input, elementLimit, "rms_norm")
+    if inputValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(inputValid.unwrapErr())
+    }
+    let weightValid = validateCpuTensor(weight, elementLimit, "rms_norm")
+    if weightValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(weightValid.unwrapErr())
+    }
+    let roundedEpsilon = f32(epsilon)
+    if roundedEpsilon <= 0.0 or not isfinite(roundedEpsilon) {
+        return cpuInputError("rms_norm", "epsilon must be finite and positive")
+    }
+    if weight.shape.length() != 1 or input.shape.length() < 1 or
+        weight.values.length() != (cpuLastDimension(input) as Int) {
+        return cpuShapeError("rms_norm",
+            "weight must be rank one and match the input's last dimension")
+    }
+    let width = weight.values.length()
+    let rows = input.values.length() / width
+    let output = Array<Float>()
+    var row = 0
+    while row < rows {
+        var sumSquares: Float = 0.0
+        var column = 0
+        while column < width {
+            let value = input.values[row * width + column]
+            let squared = f32(value * value)
+            if not isfinite(squared) {
+                output.free(); return cpuNumericalError("rms_norm")
+            }
+            sumSquares = f32(sumSquares + squared)
+            column = column + 1
+        }
+        if not isfinite(sumSquares) {
+            output.free(); return cpuNumericalError("rms_norm")
+        }
+        let mean = f32(sumSquares / f32(width as Float))
+        let adjusted = f32(mean + roundedEpsilon)
+        let root = f32(sqrt(adjusted))
+        let inverse = f32(1.0 / root)
+        column = 0
+        while column < width {
+            let normalized = f32(input.values[row * width + column] * inverse)
+            let scale = f32(1.0 + weight.values[column])
+            output.push(f32(normalized * scale))
+            column = column + 1
+        }
+        row = row + 1
+    }
+    return ownedCpuTensor(copyShape(input.shape), output, "rms_norm")
+}
+
+pub fun cpuGatedRmsNorm(input: CpuTensor, gate: CpuTensor,
+    weight: CpuTensor, epsilon: Float, elementLimit: UInt64)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let inputValid = validateCpuTensor(input, elementLimit,
+        "gated_rms_norm")
+    if inputValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(inputValid.unwrapErr())
+    }
+    let gateValid = validateCpuTensor(gate, elementLimit,
+        "gated_rms_norm")
+    if gateValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(gateValid.unwrapErr())
+    }
+    let weightValid = validateCpuTensor(weight, elementLimit,
+        "gated_rms_norm")
+    if weightValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(weightValid.unwrapErr())
+    }
+    let roundedEpsilon = f32(epsilon)
+    if roundedEpsilon <= 0.0 or not isfinite(roundedEpsilon) {
+        return cpuInputError("gated_rms_norm",
+            "epsilon must be finite and positive")
+    }
+    if not cpuSameShape(input, gate) or weight.shape.length() != 1 or
+        weight.values.length() != (cpuLastDimension(input) as Int) {
+        return cpuShapeError("gated_rms_norm",
+            "gate must match input and weight must match the last dimension")
+    }
+    let width = weight.values.length()
+    let rows = input.values.length() / width
+    let output = Array<Float>()
+    var row = 0
+    while row < rows {
+        var sumSquares: Float = 0.0
+        var column = 0
+        while column < width {
+            let value = input.values[row * width + column]
+            let squared = f32(value * value)
+            if not isfinite(squared) {
+                output.free(); return cpuNumericalError("gated_rms_norm")
+            }
+            sumSquares = f32(sumSquares + squared)
+            column = column + 1
+        }
+        if not isfinite(sumSquares) {
+            output.free(); return cpuNumericalError("gated_rms_norm")
+        }
+        let mean = f32(sumSquares / f32(width as Float))
+        let adjusted = f32(mean + roundedEpsilon)
+        let root = f32(sqrt(adjusted))
+        let inverse = f32(1.0 / root)
+        column = 0
+        while column < width {
+            let gateValue = gate.values[row * width + column]
+            let exponential = f32(exp(-gateValue))
+            let activated = f32(gateValue / f32(1.0 + exponential))
+            let normalized = f32(input.values[row * width + column] * inverse)
+            let scaled = f32(normalized * weight.values[column])
+            output.push(f32(scaled * activated))
+            column = column + 1
+        }
+        row = row + 1
+    }
+    return ownedCpuTensor(copyShape(input.shape), output,
+        "gated_rms_norm")
+}
+
+pub fun cpuSilu(input: CpuTensor, elementLimit: UInt64)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let valid = validateCpuTensor(input, elementLimit, "silu")
+    if valid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(valid.unwrapErr())
+    }
+    let output = Array<Float>()
+    var index = 0
+    while index < input.values.length() {
+        let value = input.values[index]
+        let exponential = f32(exp(-value))
+        output.push(f32(value / f32(1.0 + exponential)))
+        index = index + 1
+    }
+    return ownedCpuTensor(copyShape(input.shape), output, "silu")
+}
+
+pub fun cpuSwiGlu(gate: CpuTensor, up: CpuTensor, elementLimit: UInt64)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let gateValid = validateCpuTensor(gate, elementLimit, "swiglu")
+    if gateValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(gateValid.unwrapErr())
+    }
+    let upValid = validateCpuTensor(up, elementLimit, "swiglu")
+    if upValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(upValid.unwrapErr())
+    }
+    if not cpuSameShape(gate, up) {
+        return cpuShapeError("swiglu", "gate and up tensors must match")
+    }
+    let output = Array<Float>()
+    var index = 0
+    while index < gate.values.length() {
+        let value = gate.values[index]
+        let exponential = f32(exp(-value))
+        let activated = f32(value / f32(1.0 + exponential))
+        output.push(f32(activated * up.values[index]))
+        index = index + 1
+    }
+    return ownedCpuTensor(copyShape(gate.shape), output, "swiglu")
+}
+
+pub fun cpuResidualAdd(left: CpuTensor, right: CpuTensor,
+    elementLimit: UInt64) r: Result<CpuTensor, CpuReferenceError> {
+    let leftValid = validateCpuTensor(left, elementLimit, "residual_add")
+    if leftValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(leftValid.unwrapErr())
+    }
+    let rightValid = validateCpuTensor(right, elementLimit, "residual_add")
+    if rightValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(rightValid.unwrapErr())
+    }
+    if not cpuSameShape(left, right) {
+        return cpuShapeError("residual_add", "residual tensor shapes must match")
+    }
+    let output = Array<Float>()
+    var index = 0
+    while index < left.values.length() {
+        output.push(f32(left.values[index] + right.values[index]))
+        index = index + 1
+    }
+    return ownedCpuTensor(copyShape(left.shape), output, "residual_add")
+}
+
+pub fun cpuLinear(input: CpuTensor, weight: CpuTensor,
+    elementLimit: UInt64) r: Result<CpuTensor, CpuReferenceError> {
+    let inputValid = validateCpuTensor(input, elementLimit, "linear")
+    if inputValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(inputValid.unwrapErr())
+    }
+    let weightValid = validateCpuTensor(weight, elementLimit, "linear")
+    if weightValid.isErr() {
+        return Err<CpuTensor, CpuReferenceError>(weightValid.unwrapErr())
+    }
+    if input.shape.length() < 1 or weight.shape.length() != 2 {
+        return cpuShapeError("linear",
+            "input must have a last dimension and weight must be rank two")
+    }
+    let inputWidth = cpuLastDimension(input)
+    let outputWidth = weight.shape[0]
+    if weight.shape[1] != inputWidth {
+        return cpuShapeError("linear",
+            "weight input dimension does not match the input")
+    }
+    let rows = (input.values.length() as UInt64) / inputWidth
+    let outputShape = copyShape(input.shape)
+    outputShape[outputShape.length() - 1] = outputWidth
+    let outputElements = cpuShapeElements(outputShape, elementLimit, "linear")
+    if outputElements.isErr() {
+        outputShape.free()
+        return Err<CpuTensor, CpuReferenceError>(outputElements.unwrapErr())
+    }
+    let output = Array<Float>()
+    var row: UInt64 = 0 as UInt64
+    while row < rows {
+        var outputColumn: UInt64 = 0 as UInt64
+        while outputColumn < outputWidth {
+            var sum: Float = 0.0
+            var inputColumn: UInt64 = 0 as UInt64
+            while inputColumn < inputWidth {
+                let product = f32(
+                    input.values[(row * inputWidth + inputColumn) as Int] *
+                    weight.values[(outputColumn * inputWidth + inputColumn) as Int])
+                if not isfinite(product) {
+                    outputShape.free(); output.free()
+                    return cpuNumericalError("linear")
+                }
+                sum = f32(sum + product)
+                if not isfinite(sum) {
+                    outputShape.free(); output.free()
+                    return cpuNumericalError("linear")
+                }
+                inputColumn = inputColumn + (1 as UInt64)
+            }
+            output.push(sum)
+            outputColumn = outputColumn + (1 as UInt64)
+        }
+        row = row + (1 as UInt64)
+    }
+    return ownedCpuTensor(outputShape, output, "linear")
+}
