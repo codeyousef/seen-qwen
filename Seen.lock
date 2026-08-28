@@ -2,16 +2,19 @@ version = 2
 manifest_sha256 = "ab2963293ad288eb65f1719ecc91d6df9e3774d810bc77221b72fe82414ed3c0"
 
 # Audited Seen release toolchain identity (paths are intentionally excluded).
-# release_tag = "v0.15.0"
-# certified_commit = "dc741efafb859cd7c46bc920a220a22ae7a79de1"
-# tag_object = "eccadd785b8f5b2cda8932c820428d859214b8c9"
-# linux_x64_archive_sha256 = "439edd029c39f0e53b1d9736a5f7ca6b7ef333ac461703162ed3a25748e121be"
-# packaged_compiler_sha256 = "0a9b56f81fcaeab8f6f0e22e30d908832f843e112dacd6a6a67954106e881516"
-# packaged_package_client_sha256 = "cb15b697946941ea18fc56f26a1dc9c5d97400fccb84797ca0a40dd7e524a700"
-# compatibility_manifest_sha256 = "3472e3b9e99234d51bdcf62aef985909cb0b6d574283ae5fcb76127c699c368d"
+# release_tag = "v0.17.0"
+# certified_commit = "4c0bd2720e635f92b1b99be971ceaaf3161a3051"
+# tag_object = "7f151e716919172634f2e7c04fe12ecf5e29fb03"
+# release_manifest_sha256 = "d3f3689dd78ef06ff60cc721d8f095353b717791d084f6b3babe9a6a81805764"
+# release_source_digest = "6c91a3dad7694d50a3012651bb21408d2a06bdf9d330d37a787292c2e284f324"
+# release_checksums_sha256 = "2391ba191aae3384f083d990fc021e5d5274b342529cd987178d5bf9e0f3a65c"
+# linux_x64_archive_sha256 = "f5ea7afeba8776e6ce6cd8b02c0df4d52dbd0310fc8e9c903e38b1864b121647"
+# packaged_compiler_sha256 = "bd6f10e86575b5269b659909b21842e2ea0819f225c4781fafd47fe715ed6b59"
+# packaged_package_client_sha256 = "cadb3056ddb8420a1af5cda809ba671263eaeadd02a8591be33601d620b1c153"
+# compatibility_manifest_sha256 = "5bcb9870bf1dee4ba5f9b8360c9a7de5d1d811d4f71fc5947376d8dfb8cf0852"
 # ci_llvm_image = "docker.io/silkeh/clang@sha256:a370fe4e8ecd284143bbfde1185bef4c1b6b72f45af4823812b9afe84cd1a14d"
 # ci_llvm_version = "21.1.8"
-# compatibility = "seen-compatibility-manifest-v1; compiler=0.15.0; layout=seen-layout-abi-v2; object-cache=seen-object-cache-abi-v3; package-interface=seen-package-interface-v2; package-object-manifest=seen-package-object-manifest-v2; prebuilt-package=seen-prebuilt-package-v2; package-client=0.15.0/SEENPKG1; runtime=runtime-v2; stdlib=0.4.0/manifest-v1; llvm-min=19; target=linux-x86_64; cpu=x86-64"
+# compatibility = "seen-compatibility-manifest-v1; compiler=0.17.0; layout=seen-layout-abi-v2; object-cache=seen-object-cache-abi-v3; package-interface=seen-package-interface-v2; package-object-manifest=seen-package-object-manifest-v2; prebuilt-package=seen-prebuilt-package-v2; package-client=0.17.0/SEENPKG1; runtime=runtime-v3; stdlib=0.5.0/manifest-v1; llvm-min=19; target=linux-x86_64; cpu=x86-64"
 
 [root]
 name = "seen_qwen"

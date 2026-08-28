@@ -1,0 +1,84 @@
+import crypto.sha256.{sha256File}
+import formats.safetensors.{SafeTensorFile, SafeTensorPolicy}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun requireShape(shape: Array<UInt64>, first: UInt64, second: UInt64,
+    message: String) r: Void {
+    require(shape.length() == 2 and shape[0] == first and shape[1] == second,
+        message)
+}
+
+fun main() r: Int {
+    let modelPath = "tests/fixtures/qwen3_8_hybrid_mini/model.safetensors"
+    let digest = sha256File(modelPath, 65536)
+    require(digest.isOkay(), "hash the bounded mini-model fixture")
+    let digestText = digest.unwrap()
+    require(digestText ==
+        "16ecca9cb396099db0c92d835840264e7b45d12cd6221d7af5462ac8576c94a9",
+        "match the locked mini-model fixture hash")
+    seen_string_release_owned(digestText)
+
+    let policy = SafeTensorPolicy.modelWeights()
+    policy.maxHeaderBytes = 1048576 as UInt64
+    policy.maxTensors = 124 as UInt64
+    let minimal = SafeTensorFile.open(
+        ".seen/ci/output/qwn_023b_minimal.safetensors", policy)
+    require(minimal.isOkay(), "open a one-tensor valid Safetensors file")
+    let minimalFile = minimal.unwrap()
+    require(minimalFile.metadata.names.length() == 1,
+        "parse one-tensor Safetensors metadata")
+    require(minimalFile.close().isOkay(), "close one-tensor Safetensors file")
+    let opened = SafeTensorFile.open(modelPath, policy)
+    if opened.isErr() {
+        let error = opened.unwrapErr()
+        println("unexpected Safetensors error: " + error.code + " tensor=" +
+            error.tensor + " message=" + error.message)
+    }
+    require(opened.isOkay(), "open the generated fixture with Seen")
+    let file = opened.unwrap()
+    require(file.metadata.names.length() == 124,
+        "load exactly 124 canonical mini-model tensors")
+    let embedding = file.metadata.tensor(
+        "model.language_model.embed_tokens.weight")
+    require(embedding.isOkay() and embedding.unwrap().dtype == "F32",
+        "load the FP32 embedding tensor")
+    requireShape(embedding.unwrap().shape, 256 as UInt64, 48 as UInt64,
+        "load exact embedding geometry")
+    let gdn = file.metadata.tensor(
+        "model.language_model.layers.0.linear_attn.in_proj_qkv.weight")
+    require(gdn.isOkay(), "load a GDN projection")
+    requireShape(gdn.unwrap().shape, 80 as UInt64, 48 as UInt64,
+        "load exact GDN projection geometry")
+    let attention = file.metadata.tensor(
+        "model.language_model.layers.7.self_attn.o_proj.weight")
+    require(attention.isOkay(), "load a full-attention projection")
+    requireShape(attention.unwrap().shape, 48 as UInt64, 144 as UInt64,
+        "load exact full-attention geometry")
+    let mtp = file.metadata.tensor("mtp.fc.weight")
+    require(mtp.isOkay(), "load the MTP fusion projection")
+    requireShape(mtp.unwrap().shape, 48 as UInt64, 96 as UInt64,
+        "load exact MTP geometry")
+    require(file.metadata.tensor("model.visual.blocks.0.weight").isErr(),
+        "exclude all vision tensors")
+    require(file.close().isOkay(), "close the mapped fixture deterministically")
+
+    require(SafeTensorFile.open(
+        ".seen/ci/output/qwn_023b_truncated.safetensors", policy).isErr(),
+        "reject a truncated header")
+    require(SafeTensorFile.open(
+        ".seen/ci/output/qwn_023b_unsupported_dtype.safetensors", policy).isErr(),
+        "reject an unsupported dtype")
+    require(SafeTensorFile.open(".seen/ci/output/missing.safetensors", policy).isErr(),
+        "reject a missing fixture")
+    policy.allowPrefixes.free()
+    policy.denyPrefixes.free()
+    println("PASS: QWN-023B deterministic Safetensors and tokenizer fixture assets")
+    return 0
+}
+
+main()

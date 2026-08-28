@@ -1,0 +1,40 @@
+{
+  "assets": {
+    "merges.txt": {
+      "bytes": 14,
+      "sha256": "215a6aba00d27bcd42b8ad1dccc4b4d23f40decc150bdbf0d5ce6bb2410708df"
+    },
+    "model.safetensors": {
+      "bytes": 1466672,
+      "sha256": "16ecca9cb396099db0c92d835840264e7b45d12cd6221d7af5462ac8576c94a9"
+    },
+    "tokenizer_config.json": {
+      "bytes": 175,
+      "sha256": "17b53cbb51444a64f73a18201605cbae2321153fd7eefba3c66be25c6555baa6"
+    },
+    "vocab.json": {
+      "bytes": 2104,
+      "sha256": "6f5112365ce8a9d83ed809cfb7d7749f2283f05696848fe7d687f1049623bb11"
+    }
+  },
+  "contract_sha256": "f29839615771e344bf89329f2195e5921fc8ea371849249be55722ab1999dddf",
+  "fixture_id": "qwen3_8_hybrid_mini_v1",
+  "generator_sha256": "38211bda28d68cb42a2d45aac9024fc16473522d11ad7b4c34e2bdd785694dd9",
+  "safetensors": {
+    "dtype": "F32",
+    "payload_bytes": 1452192,
+    "tensor_count": 124
+  },
+  "schema": "seen-qwen-hybrid-mini-assets-v1",
+  "sources": {
+    "model_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "modeling_source_sha256": "25c4912dc14dda47b14a1c24efe36ec055be4a2f150c64c9a29860aebe42aff8",
+    "official_shard_01_header_sha256": "7bdeb03df566aa804dca2cb48e420908cb1864e5222858ad04918299883287e0",
+    "official_shard_18_header_sha256": "2e6b71178b57a98de637fa669dedfaf35cbed1388914ffc93238bddd169eab54",
+    "transformers_commit": "562cfd944ee1f20702cfb0f4404014ee27c24813"
+  },
+  "tokenizer": {
+    "merge_count": 0,
+    "vocabulary_size": 256
+  }
+}

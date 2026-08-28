@@ -16,7 +16,7 @@ import io.file.{readText}
 import json.strict.{StrictJsonLimits, parseStrictJson}
 import json.parser.{JsonParseResult, destroyJsonParseResult}
 import str.string.{StringBuilder, replaceAll, substringByCodepoints,
-    utf8CodepointLength, trim, startsWith, endsWith, split}
+    utf8CodepointLength, trim, startsWith, endsWith, split, indexOf}
 
 extern "C" fun seen_string_release_owned(value: String) r: Void
 
