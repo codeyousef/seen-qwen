@@ -1,0 +1,125 @@
+import crypto.sha256.{sha256File}
+import io.file.{readTextChecked}
+import json.parser.{destroyJsonParseResult}
+import json.strict.{StrictJsonLimits, parseStrictJson}
+import json.value.{JsonValue}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun requireString(root: JsonValue, name: String, expected: String) r: Void {
+    let value = root.get(name)
+    require(not value.isNone() and value.unwrap().isString() and
+        value.unwrap().getString() == expected, "match string field " + name)
+}
+
+fun requireShape(record: JsonValue, d0: Int, d1: Int, d2: Int,
+    message: String) r: Void {
+    let shape = record.get("shape")
+    require(not shape.isNone() and shape.unwrap().isArray() and
+        shape.unwrap().length() == 3, message + " rank")
+    let actual0 = shape.unwrap().getAt(0).unwrap().getNumber() as Int
+    let actual1 = shape.unwrap().getAt(1).unwrap().getNumber() as Int
+    let actual2 = shape.unwrap().getAt(2).unwrap().getNumber() as Int
+    require(actual0 == d0 and actual1 == d1 and actual2 == d2,
+        message + " dimensions")
+}
+
+fun requireSamples(record: JsonValue, message: String) r: Void {
+    let digest = record.get("sha256")
+    let indices = record.get("sample_indices")
+    let values = record.get("sample_values_f32")
+    require(not digest.isNone() and digest.unwrap().isString() and
+        digest.unwrap().getString().length() == 64, message + " digest")
+    require(not indices.isNone() and indices.unwrap().isArray() and
+        not values.isNone() and values.unwrap().isArray() and
+        indices.unwrap().length() == values.unwrap().length() and
+        indices.unwrap().length() > 0 and indices.unwrap().length() <= 48,
+        message + " bounded samples")
+    var index = 0; var previous = -1
+    while index < indices.unwrap().length() {
+        let sampleIndex = indices.unwrap().getAt(index)
+        let sampleValue = values.unwrap().getAt(index)
+        require(not sampleIndex.isNone() and sampleIndex.unwrap().isNumber() and
+            not sampleValue.isNone() and sampleValue.unwrap().isNumber(),
+            message + " numeric samples")
+        let current = sampleIndex.unwrap().getNumber() as Int
+        require(current > previous, message + " sorted unique sample indices")
+        previous = current; index = index + 1
+    }
+}
+
+fun main() r: Int {
+    let path = "tests/fixtures/qwn_025a_operator_layer_oracles.json"
+    let lockedHash = "a85770501619699d8af36f09f928272a0bcbcc036c58554d26993b52b13b50d6"
+    let hash = sha256File(path, 131072)
+    require(hash.isOkay() and hash.unwrap() == lockedHash,
+        "match content-addressed official operator/layer oracle")
+    let hashText = hash.unwrap(); seen_string_release_owned(hashText)
+    let read = readTextChecked(path)
+    require(read.success and read.content.length() <= 131072,
+        "read bounded official oracle")
+    let parsed = parseStrictJson(read.content, StrictJsonLimits{
+        maxInputBytes: 131072, maxDepth: 12, maxValues: 16384,
+        maxStringBytes: 512
+    })
+    require(parsed.isOkay(), "strictly parse official operator/layer oracle")
+    let document = parsed.unwrap(); let root = document.value.unwrap()
+    requireString(root, "schema", "seen-qwen-official-operator-layer-oracles-v1")
+    requireString(root, "classification", "verified-cpu-reference")
+    let source = root.get("source").unwrap()
+    requireString(source, "model_id", "Qwen/Qwen3.8-27B")
+    requireString(source, "model_revision",
+        "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0")
+    requireString(source, "transformers_commit",
+        "562cfd944ee1f20702cfb0f4404014ee27c24813")
+    requireString(source, "torch", "2.11.0+cpu")
+
+    let expectedLayers = Array<Int>(); expectedLayers.push(0)
+    expectedLayers.push(3); expectedLayers.push(31); expectedLayers.push(32)
+    expectedLayers.push(60); expectedLayers.push(63)
+    let layers = root.get("layers")
+    require(not layers.isNone() and layers.unwrap().isArray() and
+        layers.unwrap().length() == 6, "load six selected official layers")
+    var layerIndex = 0
+    while layerIndex < 6 {
+        let layer = layers.unwrap().getAt(layerIndex).unwrap()
+        let actualLayer = layer.get("layer").unwrap().getNumber() as Int
+        require(actualLayer == expectedLayers[layerIndex],
+            "preserve first/middle/last selection")
+        let operators = layer.get("operators").unwrap()
+        let output = operators.get("layer_output")
+        require(not output.isNone(), "require complete layer output evidence")
+        requireShape(output.unwrap(), 1, 2, 5120, "official layer output")
+        requireSamples(output.unwrap(), "official layer output")
+        let kind = layer.get("kind").unwrap().getString()
+        if kind == "linear_attention" {
+            let state = operators.get("recurrent_state")
+            require(not state.isNone(), "require GDN recurrent-state evidence")
+            let shape = state.unwrap().get("shape").unwrap()
+            let state0 = shape.getAt(0).unwrap().getNumber() as Int
+            let state1 = shape.getAt(1).unwrap().getNumber() as Int
+            let state2 = shape.getAt(2).unwrap().getNumber() as Int
+            let state3 = shape.getAt(3).unwrap().getNumber() as Int
+            require(shape.length() == 4 and state0 == 1 and state1 == 48 and
+                state2 == 128 and state3 == 128,
+                "match official GDN recurrent geometry")
+            requireSamples(state.unwrap(), "official GDN recurrent state")
+        } else {
+            require(kind == "full_attention" and
+                not operators.get("query_gate_projection").isNone(),
+                "require official full-attention operator evidence")
+        }
+        layerIndex = layerIndex + 1
+    }
+    destroyJsonParseResult(document, true)
+    seen_string_release_owned(read.content)
+    expectedLayers.free()
+    println("PASS: QWN-025A official first/middle/last operator and layer oracle corpus")
+    return 0
+}
+
+main()
