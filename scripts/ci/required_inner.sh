@@ -106,7 +106,8 @@ python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.
     tests/test_sampling_profiles.py tests/test_hybrid_mini_contract.py \
     tests/test_hybrid_mini_assets.py tests/test_hybrid_mini_oracle.py \
     tests/test_cpu_attention_oracle.py tests/test_cpu_gdn_oracle.py \
-    tests/test_cpu_head_oracle.py tests/test_cpu_engine_oracle.py
+    tests/test_cpu_head_oracle.py tests/test_cpu_engine_oracle.py \
+    tests/test_official_operator_layer_oracles.py
 "$SEEN_PACKAGE_CLIENT" audit --lock Seen.lock
 "$SEEN_COMPILER" check tests/qwn_023b_hybrid_mini_assets_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_023a_hybrid_mini_contract_test.seen --frozen
@@ -114,6 +115,7 @@ python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.
 "$SEEN_COMPILER" check tests/qwn_024b_cpu_attention_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_024c_cpu_gdn_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_024d_cpu_head_test.seen --frozen
+"$SEEN_COMPILER" check tests/qwn_025a_operator_layer_oracle_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022d_sampling_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022b_tokenizer_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022c_chat_template_test.seen --frozen
@@ -152,6 +154,11 @@ python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.
     --release --lto=thin --target-cpu=x86-64 --no-cache \
     --jobs 1 --opt-jobs 1 --no-fork --frozen
 "$OUTPUT_ROOT/qwn_024d_cpu_head_test"
+"$SEEN_COMPILER" compile tests/qwn_025a_operator_layer_oracle_test.seen \
+    "$OUTPUT_ROOT/qwn_025a_operator_layer_oracle_test" \
+    --release --lto=thin --target-cpu=x86-64 --no-cache \
+    --jobs 1 --opt-jobs 1 --no-fork --frozen
+"$OUTPUT_ROOT/qwn_025a_operator_layer_oracle_test"
 "$SEEN_COMPILER" compile tests/qwn_022c_chat_template_test.seen \
     "$OUTPUT_ROOT/qwn_022c_chat_template_test" \
     --release --lto=thin --target-cpu=x86-64 --no-cache \
