@@ -14,6 +14,7 @@ modules = [
     "src/model/cpu_attention.seen",
     "src/model/cpu_gdn.seen",
     "src/model/cpu_head.seen",
+    "src/model/cpu_engine.seen",
     "src/tokenizer/tokenizer.seen",
 ]
 
