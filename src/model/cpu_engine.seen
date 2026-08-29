@@ -1,0 +1,750 @@
+///
+/// Deterministic bounded CPU execution for the frozen Qwen hybrid mini model.
+///
+/// The reference engine deliberately recomputes the complete bounded sequence
+/// for each decode step. State is committed only after a successful forward
+/// pass and cancellation-epoch check, so failed or late work cannot mutate the
+/// visible token sequence. Contract test: FEL-1407 / QWN-024E.
+///
+
+import collections.byte_buffer.{f32ArrayFromLittleEndianBytes}
+import core.result.{Result}
+import crypto.sha256.{sha256File}
+import formats.safetensors.{SafeTensorFile, SafeTensorPolicy}
+import math.math.{exp, isfinite, ln, sqrt}
+import seen_qwen.model.cpu_attention.{appendCpuKvCache,
+    cpuApplyAttentionGate, cpuApplyPartialRotary, cpuGroupedQueryAttention,
+    createCpuKvCache}
+import seen_qwen.model.cpu_gdn.{cpuCausalDepthwiseConv,
+    cpuGdnGatedRmsNorm, cpuGdnRecurrent, createCpuCausalConvState,
+    createCpuGdnState}
+import seen_qwen.model.cpu_head.{cpuFfn, cpuGreedyToken, cpuProjectLogits}
+import seen_qwen.model.cpu_reference.{CpuReferenceError, CpuTensor,
+    cpuLinear, cpuReferenceError, cpuResidualAdd, cpuRmsNorm, createCpuTensor,
+    f32, ownedCpuTensor}
+
+extern "C" fun seen_string_clone_owned(value: String) r: String
+extern "C" fun seen_string_release_owned(value: String) r: Void
+extern "C" fun seen_string_view_bytes(data: *const UInt8,
+    length: Int64) r: String
+
+let CPU_MINI_VOCABULARY: UInt64 = 256 as UInt64
+let CPU_MINI_HIDDEN: UInt64 = 48 as UInt64
+let CPU_MINI_CONTEXT: UInt64 = 128 as UInt64
+let CPU_MINI_ELEMENTS: UInt64 = 131072 as UInt64
+
+class CpuWeightReader {
+    var file: SafeTensorFile
+
+    fun close() r: Void {
+        this.file.close()
+    }
+}
+
+pub class CpuMiniStep {
+    var okay: Bool
+    var errorCode: String
+    var exitCode: Int
+    var tokenId: Int
+    var logits: CpuTensor
+    var position: UInt64
+    var closed: Bool
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.logits.close(); this.closed = true
+    }
+}
+
+pub class CpuMiniEngine {
+    var modelPath: String
+    var tokens: Array<Int>
+    var promptLength: UInt64
+    var generated: UInt64
+    var maxGenerated: UInt64
+    var cancellationEpoch: UInt64
+    var cancelled: Bool
+    var prefilled: Bool
+    var valid: Bool
+    var errorCode: String
+    var exitCode: Int
+    var closed: Bool
+
+    static fun open(modelPath: String, modelSha256: String,
+        maxGenerated: UInt64) r: CpuMiniEngine {
+        if maxGenerated == (0 as UInt64) or maxGenerated > CPU_MINI_CONTEXT {
+            return invalidEngine(modelPath, maxGenerated, "qwen.cpu.limit", 2)
+        }
+        let digest = sha256File(modelPath, 1048576)
+        if digest.isErr() or digest.unwrap() != modelSha256 {
+            if digest.isOkay() { seen_string_release_owned(digest.unwrap()) }
+            return invalidEngine(modelPath, maxGenerated,
+                "qwen.cpu.model-hash", 2)
+        }
+        seen_string_release_owned(digest.unwrap())
+        return CpuMiniEngine{
+            modelPath: seen_string_clone_owned(modelPath), tokens: Array<Int>(),
+            promptLength: 0 as UInt64, generated: 0 as UInt64,
+            maxGenerated: maxGenerated, cancellationEpoch: 0 as UInt64,
+            cancelled: false, prefilled: false, valid: true,
+            errorCode: "", exitCode: 0, closed: false
+        }
+    }
+
+    fun length() r: UInt64 {
+        if this.closed { return 0 as UInt64 }
+        return this.tokens.length() as UInt64
+    }
+
+    fun prefill(prompt: Array<Int>) r: CpuMiniStep {
+        let result = cpuMiniPrefill(this, prompt)
+        if result.isErr() {
+            let error = result.unwrapErr(); this.errorCode = error.code
+            this.exitCode = error.exitCode
+            return failedStep(error.code, error.exitCode)
+        }
+        this.errorCode = ""; this.exitCode = 0; return result.unwrap()
+    }
+
+    fun decode() r: CpuMiniStep {
+        let result = cpuMiniDecode(this)
+        if result.isErr() {
+            let error = result.unwrapErr(); this.errorCode = error.code
+            this.exitCode = error.exitCode
+            return failedStep(error.code, error.exitCode)
+        }
+        this.errorCode = ""; this.exitCode = 0; return result.unwrap()
+    }
+
+    fun cancel() r: Bool {
+        if this.closed { this.errorCode = "qwen.cpu.closed"; this.exitCode = 11
+            return false }
+        if this.cancellationEpoch == (0xFFFFFFFFFFFFFFFF as UInt64) {
+            this.errorCode = "qwen.cpu.overflow"; this.exitCode = 11
+            return false
+        }
+        this.cancellationEpoch = this.cancellationEpoch + (1 as UInt64)
+        this.cancelled = true; this.errorCode = ""; this.exitCode = 0
+        return true
+    }
+
+    fun reset() r: Bool {
+        if this.closed { this.errorCode = "qwen.cpu.closed"; this.exitCode = 11
+            return false }
+        this.tokens.clear(); this.promptLength = 0 as UInt64
+        this.generated = 0 as UInt64; this.prefilled = false
+        this.cancelled = false; this.errorCode = ""; this.exitCode = 0
+        return true
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.tokens.free(); seen_string_release_owned(this.modelPath)
+        this.promptLength = 0 as UInt64; this.generated = 0 as UInt64
+        this.prefilled = false; this.cancelled = true; this.closed = true
+    }
+}
+
+fun engineError(code: String, operation: String, message: String,
+    exitCode: Int = 2) r: CpuReferenceError {
+    return cpuReferenceError(code, operation, message, exitCode)
+}
+
+fun invalidEngine(modelPath: String, maxGenerated: UInt64, code: String,
+    exitCode: Int) r: CpuMiniEngine {
+    return CpuMiniEngine{
+        modelPath: seen_string_clone_owned(modelPath), tokens: Array<Int>(),
+        promptLength: 0 as UInt64, generated: 0 as UInt64,
+        maxGenerated: maxGenerated, cancellationEpoch: 0 as UInt64,
+        cancelled: false, prefilled: false, valid: false,
+        errorCode: code, exitCode: exitCode, closed: false
+    }
+}
+
+fun failedStep(code: String, exitCode: Int) r: CpuMiniStep {
+    return CpuMiniStep{
+        okay: false, errorCode: code, exitCode: exitCode, tokenId: -1,
+        logits: CpuTensor{ shape: Array<UInt64>(), values: Array<Float>(),
+            closed: true },
+        position: 0 as UInt64, closed: true
+    }
+}
+
+fun engineShape2(first: UInt64, second: UInt64) r: Array<UInt64> {
+    let shape = Array<UInt64>(); shape.push(first); shape.push(second); return shape
+}
+
+fun engineShape3(first: UInt64, second: UInt64, third: UInt64)
+    r: Array<UInt64> {
+    let shape = Array<UInt64>()
+    shape.push(first); shape.push(second); shape.push(third); return shape
+}
+
+fun engineTensor(shape: Array<UInt64>, values: Array<Float>, operation: String)
+    r: Result<CpuTensor, CpuReferenceError> {
+    return ownedCpuTensor(shape, values, operation)
+}
+
+fun loadF32Tensor(reader: CpuWeightReader, name: String)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let metadata = reader.file.metadata.tensor(name)
+    if metadata.isErr() { return Err<CpuTensor, CpuReferenceError>(engineError(
+        "qwen.cpu.weight", "engine.load", "required tensor is missing")) }
+    let geometry = metadata.unwrap()
+    if geometry.dtype != "F32" or geometry.elementBytes != (4 as UInt64) or
+        geometry.elementCount > CPU_MINI_ELEMENTS or
+        geometry.elementCount > (0x7FFFFFFF as UInt64) {
+        return Err<CpuTensor, CpuReferenceError>(engineError(
+            "qwen.cpu.weight", "engine.load",
+            "required tensor has unsupported dtype or geometry"))
+    }
+    let mapped = reader.file.tensorWindow(name)
+    if mapped.isErr() { return Err<CpuTensor, CpuReferenceError>(engineError(
+        "qwen.cpu.weight", "engine.load", "required tensor cannot be mapped")) }
+    let window = mapped.unwrap()
+    let view = seen_string_view_bytes(window.data, geometry.dataLength as Int64)
+    let bytes = Array<Int>(); var byteIndex = 0
+    while byteIndex < (geometry.dataLength as Int) {
+        bytes.push(view.byteAt(byteIndex)); byteIndex = byteIndex + 1
+    }
+    let values = f32ArrayFromLittleEndianBytes(bytes, 0,
+        geometry.elementCount as Int)
+    bytes.free(); let closedWindow = window.close()
+    if values.length() != (geometry.elementCount as Int) {
+        values.free(); return Err<CpuTensor, CpuReferenceError>(engineError(
+            "qwen.cpu.weight", "engine.load", "tensor byte decoding failed"))
+    }
+    let result = createCpuTensor(geometry.shape, values, CPU_MINI_ELEMENTS)
+    values.free(); return result
+}
+
+fun linearNamed(file: CpuWeightReader, input: CpuTensor, name: String)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let weight = loadF32Tensor(file, name)
+    if weight.isErr() { return Err<CpuTensor, CpuReferenceError>(weight.unwrapErr()) }
+    let output = cpuLinear(input, weight.unwrap(), CPU_MINI_ELEMENTS)
+    weight.unwrap().close(); return output
+}
+
+fun normNamed(file: CpuWeightReader, input: CpuTensor, name: String)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let weight = loadF32Tensor(file, name)
+    if weight.isErr() { return Err<CpuTensor, CpuReferenceError>(weight.unwrapErr()) }
+    let output = cpuRmsNorm(input, weight.unwrap(), 0.000001,
+        CPU_MINI_ELEMENTS)
+    weight.unwrap().close(); return output
+}
+
+fun ffnNamed(file: CpuWeightReader, input: CpuTensor, prefix: String)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let gate = loadF32Tensor(file, prefix + ".gate_proj.weight")
+    if gate.isErr() { return Err<CpuTensor, CpuReferenceError>(gate.unwrapErr()) }
+    let up = loadF32Tensor(file, prefix + ".up_proj.weight")
+    if up.isErr() { gate.unwrap().close(); return Err<CpuTensor, CpuReferenceError>(up.unwrapErr()) }
+    let down = loadF32Tensor(file, prefix + ".down_proj.weight")
+    if down.isErr() {
+        gate.unwrap().close(); up.unwrap().close()
+        return Err<CpuTensor, CpuReferenceError>(down.unwrapErr())
+    }
+    let output = cpuFfn(input, gate.unwrap(), up.unwrap(), down.unwrap(),
+        CPU_MINI_ELEMENTS)
+    gate.unwrap().close(); up.unwrap().close(); down.unwrap().close()
+    return output
+}
+
+fun reshapeCopy(input: CpuTensor, shape: Array<UInt64>, operation: String)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let values = Array<Float>(); var index = 0
+    while index < input.values.length() {
+        values.push(input.values[index]); index = index + 1
+    }
+    return createCpuTensor(shape, values, CPU_MINI_ELEMENTS)
+}
+
+fun embeddingRows(file: CpuWeightReader, tokenIds: Array<Int>)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let table = loadF32Tensor(file, "model.language_model.embed_tokens.weight")
+    if table.isErr() { return Err<CpuTensor, CpuReferenceError>(table.unwrapErr()) }
+    let values = Array<Float>(); var tokenIndex = 0
+    while tokenIndex < tokenIds.length() {
+        let token = tokenIds[tokenIndex]
+        if token < 0 or token >= (CPU_MINI_VOCABULARY as Int) {
+            values.free(); table.unwrap().close()
+            return Err<CpuTensor, CpuReferenceError>(engineError(
+                "qwen.cpu.token", "engine.embedding",
+                "token ID exceeds the frozen vocabulary"))
+        }
+        var column: UInt64 = 0 as UInt64
+        while column < CPU_MINI_HIDDEN {
+            values.push(table.unwrap().values[(token as UInt64 *
+                CPU_MINI_HIDDEN + column) as Int])
+            column = column + (1 as UInt64)
+        }
+        tokenIndex = tokenIndex + 1
+    }
+    table.unwrap().close()
+    return engineTensor(engineShape2(tokenIds.length() as UInt64,
+        CPU_MINI_HIDDEN), values, "engine.embedding")
+}
+
+fun splitAttentionProjection(projected: CpuTensor, selectGate: Bool)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let tokens = projected.shape[0]; let values = Array<Float>()
+    var token: UInt64 = 0 as UInt64
+    while token < tokens {
+        var head: UInt64 = 0 as UInt64
+        while head < (6 as UInt64) {
+            let offset: UInt64 = if selectGate { 24 as UInt64 } else { 0 as UInt64 }
+            var dimension: UInt64 = 0 as UInt64
+            while dimension < (24 as UInt64) {
+                values.push(projected.values[(token * (288 as UInt64) +
+                    head * (48 as UInt64) + offset + dimension) as Int])
+                dimension = dimension + (1 as UInt64)
+            }
+            head = head + (1 as UInt64)
+        }
+        token = token + (1 as UInt64)
+    }
+    return engineTensor(engineShape3(tokens, 6 as UInt64, 24 as UInt64),
+        values, "engine.attention.split")
+}
+
+fun fullAttention(file: CpuWeightReader, input: CpuTensor, prefix: String,
+    positionOffset: UInt64) r: Result<CpuTensor, CpuReferenceError> {
+    let projected = linearNamed(file, input, prefix + ".q_proj.weight")
+    if projected.isErr() { return Err<CpuTensor, CpuReferenceError>(projected.unwrapErr()) }
+    let queryRaw = splitAttentionProjection(projected.unwrap(), false)
+    let gate = splitAttentionProjection(projected.unwrap(), true)
+    projected.unwrap().close()
+    if queryRaw.isErr() { return Err<CpuTensor, CpuReferenceError>(queryRaw.unwrapErr()) }
+    if gate.isErr() { queryRaw.unwrap().close(); return Err<CpuTensor, CpuReferenceError>(gate.unwrapErr()) }
+    let query = normNamed(file, queryRaw.unwrap(), prefix + ".q_norm.weight")
+    queryRaw.unwrap().close()
+    if query.isErr() { gate.unwrap().close(); return Err<CpuTensor, CpuReferenceError>(query.unwrapErr()) }
+    let keyFlat = linearNamed(file, input, prefix + ".k_proj.weight")
+    let valueFlat = linearNamed(file, input, prefix + ".v_proj.weight")
+    if keyFlat.isErr() or valueFlat.isErr() {
+        query.unwrap().close(); gate.unwrap().close()
+        if keyFlat.isOkay() { keyFlat.unwrap().close() }
+        if valueFlat.isOkay() { valueFlat.unwrap().close() }
+        return Err<CpuTensor, CpuReferenceError>(if keyFlat.isErr() {
+            keyFlat.unwrapErr() } else { valueFlat.unwrapErr() })
+    }
+    let kvShape = engineShape3(input.shape[0], 1 as UInt64, 24 as UInt64)
+    let keyRaw = reshapeCopy(keyFlat.unwrap(), kvShape, "engine.attention.key")
+    kvShape.free(); keyFlat.unwrap().close()
+    let valueShape = engineShape3(input.shape[0], 1 as UInt64, 24 as UInt64)
+    let value = reshapeCopy(valueFlat.unwrap(), valueShape, "engine.attention.value")
+    valueShape.free(); valueFlat.unwrap().close()
+    if keyRaw.isErr() or value.isErr() {
+        query.unwrap().close(); gate.unwrap().close()
+        if keyRaw.isOkay() { keyRaw.unwrap().close() }
+        if value.isOkay() { value.unwrap().close() }
+        return Err<CpuTensor, CpuReferenceError>(if keyRaw.isErr() {
+            keyRaw.unwrapErr() } else { value.unwrapErr() })
+    }
+    let key = normNamed(file, keyRaw.unwrap(), prefix + ".k_norm.weight")
+    keyRaw.unwrap().close()
+    if key.isErr() {
+        query.unwrap().close(); gate.unwrap().close(); value.unwrap().close()
+        return Err<CpuTensor, CpuReferenceError>(key.unwrapErr())
+    }
+    let rotated = cpuApplyPartialRotary(query.unwrap(), key.unwrap(),
+        positionOffset, 6 as UInt64, 10000000.0, CPU_MINI_CONTEXT,
+        CPU_MINI_ELEMENTS)
+    query.unwrap().close(); key.unwrap().close()
+    if rotated.isErr() {
+        gate.unwrap().close(); value.unwrap().close()
+        return Err<CpuTensor, CpuReferenceError>(rotated.unwrapErr())
+    }
+    let cache = createCpuKvCache(positionOffset + input.shape[0],
+        1 as UInt64, 24 as UInt64, CPU_MINI_ELEMENTS)
+    if cache.isErr() {
+        rotated.unwrap().close(); gate.unwrap().close(); value.unwrap().close()
+        return Err<CpuTensor, CpuReferenceError>(cache.unwrapErr())
+    }
+    let appended = appendCpuKvCache(cache.unwrap(), rotated.unwrap().key,
+        value.unwrap(), 0 as UInt64, CPU_MINI_ELEMENTS)
+    if appended.isErr() {
+        cache.unwrap().close(); rotated.unwrap().close(); gate.unwrap().close()
+        value.unwrap().close(); return Err<CpuTensor, CpuReferenceError>(appended.unwrapErr())
+    }
+    let attended = cpuGroupedQueryAttention(rotated.unwrap().query,
+        cache.unwrap(), positionOffset, CPU_MINI_ELEMENTS)
+    cache.unwrap().close(); rotated.unwrap().close(); value.unwrap().close()
+    if attended.isErr() {
+        gate.unwrap().close(); return Err<CpuTensor, CpuReferenceError>(attended.unwrapErr())
+    }
+    let gated = cpuApplyAttentionGate(attended.unwrap().attended,
+        gate.unwrap(), CPU_MINI_ELEMENTS)
+    attended.unwrap().close(); gate.unwrap().close()
+    if gated.isErr() { return Err<CpuTensor, CpuReferenceError>(gated.unwrapErr()) }
+    let flattenedShape = engineShape2(input.shape[0], 144 as UInt64)
+    let flattened = reshapeCopy(gated.unwrap(), flattenedShape,
+        "engine.attention.flatten")
+    flattenedShape.free(); gated.unwrap().close()
+    if flattened.isErr() { return Err<CpuTensor, CpuReferenceError>(flattened.unwrapErr()) }
+    let output = linearNamed(file, flattened.unwrap(), prefix + ".o_proj.weight")
+    flattened.unwrap().close(); return output
+}
+
+fun splitGdnConvolution(convolution: CpuTensor, offset: UInt64,
+    heads: UInt64, width: UInt64) r: Result<CpuTensor, CpuReferenceError> {
+    let values = Array<Float>(); var token: UInt64 = 0 as UInt64
+    while token < convolution.shape[0] {
+        var index: UInt64 = 0 as UInt64
+        while index < heads * width {
+            values.push(convolution.values[(token * (80 as UInt64) + offset + index) as Int])
+            index = index + (1 as UInt64)
+        }
+        token = token + (1 as UInt64)
+    }
+    return engineTensor(engineShape3(convolution.shape[0], heads, width),
+        values, "engine.gdn.split")
+}
+
+fun repeatAndNormalizeGdn(input: CpuTensor, scaleQuery: Bool)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let values = Array<Float>(); var token: UInt64 = 0 as UInt64
+    while token < input.shape[0] {
+        var head: UInt64 = 0 as UInt64
+        while head < (6 as UInt64) {
+            let sourceHead = head / (3 as UInt64); var sum: Float = 0.0
+            var dimension: UInt64 = 0 as UInt64
+            while dimension < (8 as UInt64) {
+                let value = input.values[((token * (2 as UInt64) + sourceHead) *
+                    (8 as UInt64) + dimension) as Int]
+                sum = f32(sum + f32(value * value)); dimension = dimension + (1 as UInt64)
+            }
+            let inverse = f32(1.0 / f32(sqrt(f32(sum + 0.000001))))
+            dimension = 0 as UInt64
+            while dimension < (8 as UInt64) {
+                let value = input.values[((token * (2 as UInt64) + sourceHead) *
+                    (8 as UInt64) + dimension) as Int]
+                let normalized = f32(value * inverse)
+                values.push(if scaleQuery {
+                    f32(normalized * f32(1.0 / sqrt(8.0)))
+                } else { normalized })
+                dimension = dimension + (1 as UInt64)
+            }
+            head = head + (1 as UInt64)
+        }
+        token = token + (1 as UInt64)
+    }
+    return engineTensor(engineShape3(input.shape[0], 6 as UInt64, 8 as UInt64),
+        values, "engine.gdn.normalize")
+}
+
+fun sigmoidTensor(input: CpuTensor) r: Result<CpuTensor, CpuReferenceError> {
+    let values = Array<Float>(); var index = 0
+    while index < input.values.length() {
+        values.push(f32(1.0 / f32(1.0 + f32(exp(f32(-input.values[index]))))))
+        index = index + 1
+    }
+    return engineTensor(engineShape2(input.shape[0], input.shape[1]), values,
+        "engine.gdn.sigmoid")
+}
+
+fun decayTensor(projected: CpuTensor, aLog: CpuTensor, bias: CpuTensor)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let values = Array<Float>(); var token: UInt64 = 0 as UInt64
+    while token < projected.shape[0] {
+        var head: UInt64 = 0 as UInt64
+        while head < (6 as UInt64) {
+            let x = f32(projected.values[(token * (6 as UInt64) + head) as Int] +
+                bias.values[head as Int])
+            let softplus = f32(ln(f32(1.0 + f32(exp(x)))))
+            values.push(f32(f32(-f32(exp(aLog.values[head as Int]))) * softplus))
+            head = head + (1 as UInt64)
+        }
+        token = token + (1 as UInt64)
+    }
+    return engineTensor(engineShape2(projected.shape[0], 6 as UInt64), values,
+        "engine.gdn.decay")
+}
+
+fun gdnAttention(file: CpuWeightReader, input: CpuTensor, prefix: String)
+    r: Result<CpuTensor, CpuReferenceError> {
+    let mixed = linearNamed(file, input, prefix + ".in_proj_qkv.weight")
+    if mixed.isErr() { return Err<CpuTensor, CpuReferenceError>(mixed.unwrapErr()) }
+    let convWeightRaw = loadF32Tensor(file, prefix + ".conv1d.weight")
+    if convWeightRaw.isErr() { mixed.unwrap().close(); return Err<CpuTensor, CpuReferenceError>(convWeightRaw.unwrapErr()) }
+    let convShape = engineShape2(80 as UInt64, 4 as UInt64)
+    let convWeight = reshapeCopy(convWeightRaw.unwrap(), convShape,
+        "engine.gdn.conv_weight")
+    convShape.free(); convWeightRaw.unwrap().close()
+    if convWeight.isErr() { mixed.unwrap().close(); return Err<CpuTensor, CpuReferenceError>(convWeight.unwrapErr()) }
+    let convState = createCpuCausalConvState(80 as UInt64, 4 as UInt64,
+        CPU_MINI_ELEMENTS)
+    if convState.isErr() {
+        mixed.unwrap().close(); convWeight.unwrap().close()
+        return Err<CpuTensor, CpuReferenceError>(convState.unwrapErr())
+    }
+    let convolution = cpuCausalDepthwiseConv(mixed.unwrap(), convWeight.unwrap(),
+        convState.unwrap(), 0 as UInt64, CPU_MINI_ELEMENTS)
+    mixed.unwrap().close(); convWeight.unwrap().close(); convState.unwrap().close()
+    if convolution.isErr() { return Err<CpuTensor, CpuReferenceError>(convolution.unwrapErr()) }
+    let queryTwo = splitGdnConvolution(convolution.unwrap(), 0 as UInt64,
+        2 as UInt64, 8 as UInt64)
+    let keyTwo = splitGdnConvolution(convolution.unwrap(), 16 as UInt64,
+        2 as UInt64, 8 as UInt64)
+    let value = splitGdnConvolution(convolution.unwrap(), 32 as UInt64,
+        6 as UInt64, 8 as UInt64)
+    convolution.unwrap().close()
+    if queryTwo.isErr() or keyTwo.isErr() or value.isErr() {
+        if queryTwo.isOkay() { queryTwo.unwrap().close() }
+        if keyTwo.isOkay() { keyTwo.unwrap().close() }
+        if value.isOkay() { value.unwrap().close() }
+        return Err<CpuTensor, CpuReferenceError>(if queryTwo.isErr() {
+            queryTwo.unwrapErr() } else if keyTwo.isErr() {
+            keyTwo.unwrapErr() } else { value.unwrapErr() })
+    }
+    let query = repeatAndNormalizeGdn(queryTwo.unwrap(), true)
+    let key = repeatAndNormalizeGdn(keyTwo.unwrap(), false)
+    queryTwo.unwrap().close(); keyTwo.unwrap().close()
+    if query.isErr() or key.isErr() {
+        value.unwrap().close()
+        if query.isOkay() { query.unwrap().close() }
+        if key.isOkay() { key.unwrap().close() }
+        return Err<CpuTensor, CpuReferenceError>(if query.isErr() {
+            query.unwrapErr() } else { key.unwrapErr() })
+    }
+    let betaProjected = linearNamed(file, input, prefix + ".in_proj_b.weight")
+    let decayProjected = linearNamed(file, input, prefix + ".in_proj_a.weight")
+    let aLog = loadF32Tensor(file, prefix + ".A_log")
+    let bias = loadF32Tensor(file, prefix + ".dt_bias")
+    if betaProjected.isErr() or decayProjected.isErr() or aLog.isErr() or bias.isErr() {
+        query.unwrap().close(); key.unwrap().close(); value.unwrap().close()
+        if betaProjected.isOkay() { betaProjected.unwrap().close() }
+        if decayProjected.isOkay() { decayProjected.unwrap().close() }
+        if aLog.isOkay() { aLog.unwrap().close() }
+        if bias.isOkay() { bias.unwrap().close() }
+        return Err<CpuTensor, CpuReferenceError>(engineError(
+            "qwen.cpu.weight", "engine.gdn", "GDN scalar weight loading failed"))
+    }
+    let beta = sigmoidTensor(betaProjected.unwrap())
+    let decay = decayTensor(decayProjected.unwrap(), aLog.unwrap(), bias.unwrap())
+    betaProjected.unwrap().close(); decayProjected.unwrap().close()
+    aLog.unwrap().close(); bias.unwrap().close()
+    if beta.isErr() or decay.isErr() {
+        query.unwrap().close(); key.unwrap().close(); value.unwrap().close()
+        if beta.isOkay() { beta.unwrap().close() }
+        if decay.isOkay() { decay.unwrap().close() }
+        return Err<CpuTensor, CpuReferenceError>(if beta.isErr() {
+            beta.unwrapErr() } else { decay.unwrapErr() })
+    }
+    let state = createCpuGdnState(6 as UInt64, 8 as UInt64, 8 as UInt64,
+        CPU_MINI_ELEMENTS)
+    if state.isErr() {
+        query.unwrap().close(); key.unwrap().close(); value.unwrap().close()
+        beta.unwrap().close(); decay.unwrap().close()
+        return Err<CpuTensor, CpuReferenceError>(state.unwrapErr())
+    }
+    let core = cpuGdnRecurrent(query.unwrap(), key.unwrap(), value.unwrap(),
+        beta.unwrap(), decay.unwrap(), state.unwrap(), 0 as UInt64,
+        CPU_MINI_ELEMENTS)
+    query.unwrap().close(); key.unwrap().close(); value.unwrap().close()
+    beta.unwrap().close(); decay.unwrap().close(); state.unwrap().close()
+    if core.isErr() { return Err<CpuTensor, CpuReferenceError>(core.unwrapErr()) }
+    let gateFlat = linearNamed(file, input, prefix + ".in_proj_z.weight")
+    let normWeight = loadF32Tensor(file, prefix + ".norm.weight")
+    if gateFlat.isErr() or normWeight.isErr() {
+        core.unwrap().close()
+        if gateFlat.isOkay() { gateFlat.unwrap().close() }
+        if normWeight.isOkay() { normWeight.unwrap().close() }
+        return Err<CpuTensor, CpuReferenceError>(engineError(
+            "qwen.cpu.weight", "engine.gdn", "GDN gate weight loading failed"))
+    }
+    let gateShape = engineShape3(input.shape[0], 6 as UInt64, 8 as UInt64)
+    let gate = reshapeCopy(gateFlat.unwrap(), gateShape, "engine.gdn.gate")
+    gateShape.free(); gateFlat.unwrap().close()
+    if gate.isErr() {
+        core.unwrap().close(); normWeight.unwrap().close()
+        return Err<CpuTensor, CpuReferenceError>(gate.unwrapErr())
+    }
+    let normalized = cpuGdnGatedRmsNorm(core.unwrap(), gate.unwrap(),
+        normWeight.unwrap().values, 0.000001, CPU_MINI_ELEMENTS)
+    core.unwrap().close(); gate.unwrap().close(); normWeight.unwrap().close()
+    if normalized.isErr() { return Err<CpuTensor, CpuReferenceError>(normalized.unwrapErr()) }
+    let flatShape = engineShape2(input.shape[0], CPU_MINI_HIDDEN)
+    let flattened = reshapeCopy(normalized.unwrap(), flatShape, "engine.gdn.flatten")
+    flatShape.free(); normalized.unwrap().close()
+    if flattened.isErr() { return Err<CpuTensor, CpuReferenceError>(flattened.unwrapErr()) }
+    let output = linearNamed(file, flattened.unwrap(), prefix + ".out_proj.weight")
+    flattened.unwrap().close(); return output
+}
+
+fun decoderLayer(file: CpuWeightReader, hidden: CpuTensor, layerPrefix: String,
+    mixerPrefix: String, full: Bool) r: Result<CpuTensor, CpuReferenceError> {
+    let mixerInput = normNamed(file, hidden,
+        layerPrefix + ".input_layernorm.weight")
+    if mixerInput.isErr() { return Err<CpuTensor, CpuReferenceError>(mixerInput.unwrapErr()) }
+    let mixer = if full {
+        fullAttention(file, mixerInput.unwrap(), mixerPrefix, 0 as UInt64)
+    } else {
+        gdnAttention(file, mixerInput.unwrap(), mixerPrefix)
+    }
+    mixerInput.unwrap().close()
+    if mixer.isErr() { return Err<CpuTensor, CpuReferenceError>(mixer.unwrapErr()) }
+    let postMixer = cpuResidualAdd(hidden, mixer.unwrap(), CPU_MINI_ELEMENTS)
+    mixer.unwrap().close()
+    if postMixer.isErr() { return Err<CpuTensor, CpuReferenceError>(postMixer.unwrapErr()) }
+    let mlpInput = normNamed(file, postMixer.unwrap(),
+        layerPrefix + ".post_attention_layernorm.weight")
+    if mlpInput.isErr() {
+        postMixer.unwrap().close(); return Err<CpuTensor, CpuReferenceError>(mlpInput.unwrapErr())
+    }
+    let mlp = ffnNamed(file, mlpInput.unwrap(), layerPrefix + ".mlp")
+    mlpInput.unwrap().close()
+    if mlp.isErr() {
+        postMixer.unwrap().close(); return Err<CpuTensor, CpuReferenceError>(mlp.unwrapErr())
+    }
+    let output = cpuResidualAdd(postMixer.unwrap(), mlp.unwrap(), CPU_MINI_ELEMENTS)
+    postMixer.unwrap().close(); mlp.unwrap().close(); return output
+}
+
+fun cpuMiniForward(modelPath: String, tokenIds: Array<Int>)
+    r: Result<CpuTensor, CpuReferenceError> {
+    if tokenIds.length() == 0 or tokenIds.length() > (CPU_MINI_CONTEXT as Int) {
+        return Err<CpuTensor, CpuReferenceError>(engineError(
+            "qwen.cpu.context", "engine.forward",
+            "token sequence must fit the frozen positive context bound"))
+    }
+    let policy = SafeTensorPolicy.modelWeights()
+    policy.maxHeaderBytes = 1048576 as UInt64; policy.maxTensors = 124 as UInt64
+    let opened = SafeTensorFile.open(modelPath, policy)
+    policy.allowPrefixes.free(); policy.denyPrefixes.free()
+    if opened.isErr() { return Err<CpuTensor, CpuReferenceError>(engineError(
+        "qwen.cpu.model", "engine.forward", "frozen model cannot be opened")) }
+    let file = CpuWeightReader{ file: opened.unwrap() }
+    var hiddenResult = embeddingRows(file, tokenIds)
+    let layerPrefixes = Array<String>(); let mixerPrefixes = Array<String>()
+    layerPrefixes.push("model.language_model.layers.0")
+    layerPrefixes.push("model.language_model.layers.1")
+    layerPrefixes.push("model.language_model.layers.2")
+    layerPrefixes.push("model.language_model.layers.3")
+    layerPrefixes.push("model.language_model.layers.4")
+    layerPrefixes.push("model.language_model.layers.5")
+    layerPrefixes.push("model.language_model.layers.6")
+    layerPrefixes.push("model.language_model.layers.7")
+    mixerPrefixes.push("model.language_model.layers.0.linear_attn")
+    mixerPrefixes.push("model.language_model.layers.1.linear_attn")
+    mixerPrefixes.push("model.language_model.layers.2.linear_attn")
+    mixerPrefixes.push("model.language_model.layers.3.self_attn")
+    mixerPrefixes.push("model.language_model.layers.4.linear_attn")
+    mixerPrefixes.push("model.language_model.layers.5.linear_attn")
+    mixerPrefixes.push("model.language_model.layers.6.linear_attn")
+    mixerPrefixes.push("model.language_model.layers.7.self_attn")
+    var layer = 0
+    while layer < 8 and hiddenResult.isOkay() {
+        let previous = hiddenResult.unwrap()
+        hiddenResult = decoderLayer(file, previous, layerPrefixes[layer],
+            mixerPrefixes[layer], layer == 3 or layer == 7)
+        previous.close(); layer = layer + 1
+    }
+    layerPrefixes.free(); mixerPrefixes.free()
+    if hiddenResult.isErr() {
+        let closeFailedFile = file.close()
+        return Err<CpuTensor, CpuReferenceError>(hiddenResult.unwrapErr())
+    }
+    let normalized = normNamed(file, hiddenResult.unwrap(),
+        "model.language_model.norm.weight")
+    hiddenResult.unwrap().close()
+    if normalized.isErr() {
+        let closeNormFile = file.close()
+        return Err<CpuTensor, CpuReferenceError>(normalized.unwrapErr())
+    }
+    let lmHead = loadF32Tensor(file, "lm_head.weight")
+    if lmHead.isErr() {
+        normalized.unwrap().close(); let closeHeadFile = file.close()
+        return Err<CpuTensor, CpuReferenceError>(lmHead.unwrapErr())
+    }
+    let logits = cpuProjectLogits(normalized.unwrap(), lmHead.unwrap(),
+        CPU_MINI_ELEMENTS)
+    normalized.unwrap().close(); lmHead.unwrap().close()
+    let closeFile = file.close(); return logits
+}
+
+fun validateEngineTransition(engine: CpuMiniEngine, operation: String)
+    r: Result<Bool, CpuReferenceError> {
+    if engine.closed { return Err<Bool, CpuReferenceError>(engineError(
+        "qwen.cpu.closed", operation, "engine is closed", 11)) }
+    if engine.cancelled { return Err<Bool, CpuReferenceError>(engineError(
+        "qwen.cpu.cancelled", operation, "engine operation was cancelled", 12)) }
+    if engine.tokens.length() > (CPU_MINI_CONTEXT as Int) or
+        engine.generated > engine.maxGenerated {
+        return Err<Bool, CpuReferenceError>(engineError(
+            "qwen.cpu.invalid-state", operation,
+            "engine state exceeds its validated bounds", 11))
+    }
+    return Ok<Bool, CpuReferenceError>(true)
+}
+
+pub fun cpuMiniPrefill(engine: CpuMiniEngine, prompt: Array<Int>)
+    r: Result<CpuMiniStep, CpuReferenceError> {
+    let valid = validateEngineTransition(engine, "engine.prefill")
+    if valid.isErr() { return Err<CpuMiniStep, CpuReferenceError>(valid.unwrapErr()) }
+    if engine.prefilled or prompt.length() == 0 or
+        prompt.length() + 1 > (CPU_MINI_CONTEXT as Int) {
+        return Err<CpuMiniStep, CpuReferenceError>(engineError(
+            "qwen.cpu.state", "engine.prefill",
+            "prefill requires a fresh engine and a bounded non-empty prompt"))
+    }
+    let epoch = engine.cancellationEpoch
+    let logits = cpuMiniForward(engine.modelPath, prompt)
+    if logits.isErr() { return Err<CpuMiniStep, CpuReferenceError>(logits.unwrapErr()) }
+    let token = cpuGreedyToken(logits.unwrap(), CPU_MINI_VOCABULARY,
+        CPU_MINI_ELEMENTS)
+    if token.isErr() {
+        logits.unwrap().close(); return Err<CpuMiniStep, CpuReferenceError>(token.unwrapErr())
+    }
+    if engine.cancelled or engine.cancellationEpoch != epoch {
+        logits.unwrap().close(); return Err<CpuMiniStep, CpuReferenceError>(engineError(
+            "qwen.cpu.cancelled", "engine.prefill",
+            "cancelled prefill cannot commit state", 12))
+    }
+    var index = 0
+    while index < prompt.length() { engine.tokens.push(prompt[index]); index = index + 1 }
+    engine.tokens.push(token.unwrap()); engine.promptLength = prompt.length() as UInt64
+    engine.generated = 1 as UInt64; engine.prefilled = true
+    return Ok<CpuMiniStep, CpuReferenceError>(CpuMiniStep{
+        okay: true, errorCode: "", exitCode: 0,
+        tokenId: token.unwrap(), logits: logits.unwrap(),
+        position: prompt.length() as UInt64, closed: false
+    })
+}
+
+pub fun cpuMiniDecode(engine: CpuMiniEngine)
+    r: Result<CpuMiniStep, CpuReferenceError> {
+    let valid = validateEngineTransition(engine, "engine.decode")
+    if valid.isErr() { return Err<CpuMiniStep, CpuReferenceError>(valid.unwrapErr()) }
+    if not engine.prefilled {
+        return Err<CpuMiniStep, CpuReferenceError>(engineError(
+            "qwen.cpu.state", "engine.decode", "decode requires successful prefill"))
+    }
+    if engine.generated >= engine.maxGenerated or
+        engine.tokens.length() >= (CPU_MINI_CONTEXT as Int) {
+        return Err<CpuMiniStep, CpuReferenceError>(engineError(
+            "qwen.cpu.limit", "engine.decode", "decode bound is exhausted"))
+    }
+    let epoch = engine.cancellationEpoch
+    let logits = cpuMiniForward(engine.modelPath, engine.tokens)
+    if logits.isErr() { return Err<CpuMiniStep, CpuReferenceError>(logits.unwrapErr()) }
+    let token = cpuGreedyToken(logits.unwrap(), CPU_MINI_VOCABULARY,
+        CPU_MINI_ELEMENTS)
+    if token.isErr() {
+        logits.unwrap().close(); return Err<CpuMiniStep, CpuReferenceError>(token.unwrapErr())
+    }
+    if engine.cancelled or engine.cancellationEpoch != epoch {
+        logits.unwrap().close(); return Err<CpuMiniStep, CpuReferenceError>(engineError(
+            "qwen.cpu.cancelled", "engine.decode",
+            "cancelled decode cannot commit state", 12))
+    }
+    let position = engine.tokens.length() as UInt64
+    engine.tokens.push(token.unwrap()); engine.generated = engine.generated + (1 as UInt64)
+    return Ok<CpuMiniStep, CpuReferenceError>(CpuMiniStep{
+        okay: true, errorCode: "", exitCode: 0,
+        tokenId: token.unwrap(), logits: logits.unwrap(), position: position,
+        closed: false
+    })
+}

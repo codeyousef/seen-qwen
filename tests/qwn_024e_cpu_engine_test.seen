@@ -1,0 +1,142 @@
+import crypto.sha256.{sha256File}
+import io.file.{readTextChecked}
+import json.parser.{destroyJsonParseResult}
+import json.strict.{StrictJsonLimits, parseStrictJson}
+import json.value.{JsonValue}
+import math.math.{abs}
+import seen_qwen.model.cpu_engine.{CpuMiniEngine}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun jsonInts(root: JsonValue, name: String, count: Int) r: Array<Int> {
+    let field = root.get(name)
+    require(not field.isNone() and field.unwrap().isArray() and
+        field.unwrap().length() == count, "load exact integer oracle " + name)
+    let values = Array<Int>(); var index = 0
+    while index < count {
+        let value = field.unwrap().getAt(index)
+        require(not value.isNone() and value.unwrap().isNumber(),
+            "require numeric integer oracle")
+        values.push(value.unwrap().getNumber() as Int); index = index + 1
+    }
+    return values
+}
+
+fun jsonLogits(root: JsonValue, step: Int) r: Array<Float> {
+    let rows = root.get("decode_logits")
+    require(not rows.isNone() and rows.unwrap().isArray() and
+        rows.unwrap().length() == 4, "load four exact decode logit rows")
+    let row = rows.unwrap().getAt(step)
+    require(not row.isNone() and row.unwrap().isArray() and
+        row.unwrap().length() == 256, "load exact vocabulary logits")
+    let values = Array<Float>(); var index = 0
+    while index < 256 {
+        let value = row.unwrap().getAt(index)
+        require(not value.isNone() and value.unwrap().isNumber(),
+            "require numeric decode logit")
+        values.push(value.unwrap().getNumber()); index = index + 1
+    }
+    return values
+}
+
+fun requireLogits(actual: Array<Float>, expected: Array<Float>,
+    message: String) r: Void {
+    require(actual.length() >= 256, message + " length")
+    let start = actual.length() - 256; var index = 0
+    while index < 256 {
+        require(abs(actual[start + index] - expected[index]) <= 0.00003,
+            message + " index={index} actual={actual[start + index]} expected={expected[index]}")
+        index = index + 1
+    }
+}
+
+fun main() r: Int {
+    let oraclePath = "tests/fixtures/qwn_024e_cpu_engine_oracle.json"
+    let oracleHash = sha256File(oraclePath, 65536)
+    require(oracleHash.isOkay() and oracleHash.unwrap() ==
+        "350bc70fb4c7dc010643cfd0c44f93fb60cb75cacfcddda08bc02eff26906857",
+        "match content-addressed CPU engine oracle")
+    let hashText = oracleHash.unwrap(); seen_string_release_owned(hashText)
+    let read = readTextChecked(oraclePath)
+    require(read.success, "read bounded CPU engine oracle")
+    let parsed = parseStrictJson(read.content, StrictJsonLimits{
+        maxInputBytes: 65536, maxDepth: 8, maxValues: 2048, maxStringBytes: 256
+    })
+    require(parsed.isOkay(), "strictly parse CPU engine oracle")
+    let document = parsed.unwrap(); let root = document.value.unwrap()
+    let prompt = jsonInts(root, "prompt_ids", 9)
+    let tokens = jsonInts(root, "greedy_token_ids", 4)
+    let expected0 = jsonLogits(root, 0); let expected1 = jsonLogits(root, 1)
+    let expected2 = jsonLogits(root, 2); let expected3 = jsonLogits(root, 3)
+    destroyJsonParseResult(document, true); seen_string_release_owned(read.content)
+
+    let modelPath = "tests/fixtures/qwen3_8_hybrid_mini/model.safetensors"
+    let modelHash = "16ecca9cb396099db0c92d835840264e7b45d12cd6221d7af5462ac8576c94a9"
+    let engine = CpuMiniEngine.open(modelPath, modelHash, 4 as UInt64)
+    require(engine.valid, "create content-locked bounded CPU engine")
+    require(not engine.decode().okay and engine.errorCode == "qwen.cpu.state",
+        "reject decode before prefill")
+    let first = engine.prefill(prompt)
+    require(first.okay and first.tokenId == tokens[0],
+        "execute deterministic CPU prefill")
+    requireLogits(first.logits.values, expected0,
+        "match every prefill logit")
+    let second = engine.decode()
+    require(second.okay and second.tokenId == tokens[1],
+        "execute first deterministic decode")
+    requireLogits(second.logits.values, expected1,
+        "match every first-decode logit")
+    let third = engine.decode()
+    require(third.okay and third.tokenId == tokens[2],
+        "execute second deterministic decode")
+    requireLogits(third.logits.values, expected2,
+        "match every second-decode logit")
+    let fourth = engine.decode()
+    require(fourth.okay and fourth.tokenId == tokens[3],
+        "execute third deterministic decode")
+    requireLogits(fourth.logits.values, expected3,
+        "match every third-decode logit")
+    require(not engine.decode().okay and engine.errorCode == "qwen.cpu.limit",
+        "enforce generation bound")
+    require(engine.length() == (13 as UInt64), "commit only successful tokens")
+
+    first.close(); second.close(); third.close(); fourth.close()
+    require(engine.reset() and engine.length() == (0 as UInt64) and
+        not engine.prefilled and engine.generated == (0 as UInt64),
+        "reset engine state deterministically")
+    require(engine.cancel(), "cancel a fresh engine")
+    let cancelled = engine.prefill(prompt)
+    require(not cancelled.okay and cancelled.errorCode ==
+        "qwen.cpu.cancelled" and engine.length() == (0 as UInt64),
+        "cancelled prefill cannot mutate state")
+    require(engine.reset(), "reset cancellation deterministically")
+    let repeated = engine.prefill(prompt)
+    require(repeated.okay and repeated.tokenId == tokens[0],
+        "repeat exact prefill after reset")
+    requireLogits(repeated.logits.values, expected0,
+        "match prefill logits after reset")
+    repeated.close(); engine.close(); engine.close()
+    require(not engine.decode().okay and engine.errorCode == "qwen.cpu.closed",
+        "reject use after close")
+
+    let wrongHash = CpuMiniEngine.open(modelPath,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        4 as UInt64)
+    require(not wrongHash.valid and wrongHash.errorCode ==
+        "qwen.cpu.model-hash", "reject altered model identity")
+    wrongHash.close()
+    let empty = Array<Int>()
+    let fresh = CpuMiniEngine.open(modelPath, modelHash, 4 as UInt64)
+    require(not fresh.prefill(empty).okay and fresh.errorCode ==
+        "qwen.cpu.state", "reject empty prompt")
+    fresh.close(); empty.free(); prompt.free(); tokens.free()
+    expected0.free(); expected1.free(); expected2.free(); expected3.free()
+    println("PASS: QWN-024E deterministic CPU mini-model prefill, decode, reset, and cancellation")
+    return 0
+}
+
+main()
