@@ -1,0 +1,110 @@
+import crypto.sha256.{sha256File}
+import io.file.{readTextChecked}
+import json.parser.{destroyJsonParseResult}
+import json.strict.{StrictJsonLimits, parseStrictJson}
+import json.value.{JsonValue}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun requireString(root: JsonValue, name: String, expected: String) r: Void {
+    let value = root.get(name)
+    require(not value.isNone() and value.unwrap().isString() and
+        value.unwrap().getString() == expected, "match string field " + name)
+}
+
+fun main() r: Int {
+    let path = "tests/fixtures/qwn_025b_full_model_oracles.json"
+    let lockedHash = "42ba8e0b9d5adec7c5ce1708bfc60d7b9911c126af9e6703b35efd108fedc921"
+    let hash = sha256File(path, 262144)
+    require(hash.isOkay() and hash.unwrap() == lockedHash,
+        "match content-addressed full-model oracle manifest")
+    let hashText = hash.unwrap(); seen_string_release_owned(hashText)
+    let read = readTextChecked(path)
+    require(read.success and read.content.length() <= 262144,
+        "read bounded full-model oracle manifest")
+    let parsed = parseStrictJson(read.content, StrictJsonLimits{
+        maxInputBytes: 262144, maxDepth: 12, maxValues: 16384,
+        maxStringBytes: 512
+    })
+    require(parsed.isOkay(), "strictly parse full-model oracle manifest")
+    let document = parsed.unwrap(); let root = document.value.unwrap()
+    requireString(root, "schema", "seen-qwen-full-model-oracles-v1")
+    requireString(root, "classification", "verified-cpu-reference")
+    let source = root.get("source").unwrap()
+    requireString(source, "model_id", "Qwen/Qwen3.8-27B")
+    requireString(source, "model_revision",
+        "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0")
+    requireString(source, "transformers_commit",
+        "562cfd944ee1f20702cfb0f4404014ee27c24813")
+    requireString(source, "torch", "2.11.0+cpu")
+
+    let logits = root.get("logits").unwrap()
+    let shape = logits.get("shape_per_prompt").unwrap()
+    require(logits.get("sha256").unwrap().getString().length() == 64,
+        "require content-addressed BF16 logits")
+    let tensorCount = logits.get("tensor_count").unwrap().getNumber() as Int
+    require(tensorCount == 8,
+        "require eight complete BF16 logit vectors")
+    require(shape.length() == 1,
+        "require one-dimensional BF16 logit vectors")
+    let vocabularySize = shape.getAt(0).unwrap().getNumber() as Int
+    require(vocabularySize == 248320,
+        "require the complete Qwen vocabulary dimension")
+    let tolerance = root.get("tolerance_contract").unwrap()
+    let cosineMinimum = tolerance.get("higher_precision_mean_logit_cosine_min").unwrap().getNumber()
+    require(cosineMinimum == 0.9995,
+        "match mean-logit cosine tolerance")
+    let overlapMinimum = tolerance.get("higher_precision_top5_set_overlap_min").unwrap().getNumber()
+    require(overlapMinimum == 0.99,
+        "match top-five overlap tolerance")
+    let greedySteps = tolerance.get("greedy_compare_steps").unwrap().getNumber() as Int
+    require(greedySteps == 128,
+        "match greedy comparison length")
+    require(tolerance.get("capture_first_divergence").unwrap().getBool(),
+        "require first-divergence capture")
+    require(not tolerance.get("nan_inf_allowed").unwrap().getBool(),
+        "reject NaN and infinity")
+
+    let prompts = root.get("prompts").unwrap()
+    require(prompts.length() == 8, "require all eight prompt categories")
+    var promptIndex = 0
+    while promptIndex < prompts.length() {
+        let prompt = prompts.getAt(promptIndex).unwrap()
+        let inputIds = prompt.get("input_token_ids").unwrap()
+        let top5 = prompt.get("initial_top5_token_ids").unwrap()
+        let inputCount = prompt.get("input_token_count").unwrap().getNumber() as Int
+        require(inputCount > 0 and inputCount <= 256 and inputIds.length() == inputCount,
+            "bound full-model prompt token IDs")
+        require(top5.length() == 5 and
+            prompt.get("rendered_utf8_sha256").unwrap().getString().length() == 64,
+            "require rendered hash and top-five evidence")
+        let role = prompt.get("greedy_sequence_role").unwrap().getString()
+        if role == "128-step" {
+            let generated = prompt.get("greedy_token_ids").unwrap()
+            let selected = prompt.get("greedy_selected_logits_f32").unwrap()
+            require(generated.length() == 128 and selected.length() == 128 and
+                prompt.get("greedy_decoded_utf8_sha256").unwrap().getString().length() == 64,
+                "require complete greedy sequence evidence")
+            var tokenIndex = 0
+            while tokenIndex < generated.length() {
+                let token = generated.getAt(tokenIndex).unwrap().getNumber() as Int
+                require(token >= 0 and token < 248320, "bound greedy token ID")
+                tokenIndex = tokenIndex + 1
+            }
+        } else {
+            require(role == "logits-only" and prompt.get("greedy_token_ids").isNone(),
+                "limit greedy sequences to their declared prompt pair")
+        }
+        promptIndex = promptIndex + 1
+    }
+    destroyJsonParseResult(document, true)
+    seen_string_release_owned(read.content)
+    println("PASS: QWN-025B full-model logits, greedy sequences, and tolerance contract")
+    return 0
+}
+
+main()
