@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://seenlang.dev/schemas/qwen-sqw-manifest-v1.json",
+  "title": "Seen Qwen SQW v1.0 Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "format_version",
+    "model_lock_sha256",
+    "source_lock_sha256",
+    "conversion_policy_sha256",
+    "tensor_contract",
+    "catalog_sha256",
+    "directory_sha256",
+    "payload_order",
+    "compatibility",
+    "tensors"
+  ],
+  "properties": {
+    "schema": {"const": "seen-qwen-sqw-manifest-v1"},
+    "format_version": {"const": "1.0"},
+    "model_lock_sha256": {"$ref": "#/$defs/sha256"},
+    "source_lock_sha256": {"$ref": "#/$defs/sha256"},
+    "conversion_policy_sha256": {"$ref": "#/$defs/sha256"},
+    "tensor_contract": {"const": "seen-qwen38-text-v1"},
+    "catalog_sha256": {"$ref": "#/$defs/sha256"},
+    "directory_sha256": {"$ref": "#/$defs/sha256"},
+    "payload_order": {"const": "canonical_utf8_tensor_name"},
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required_features", "reader_major", "reader_minor"],
+      "properties": {
+        "required_features": {"type": "array", "maxItems": 0},
+        "reader_major": {"const": 1},
+        "reader_minor": {"const": 0}
+      }
+    },
+    "tensors": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2048,
+      "items": {"$ref": "#/$defs/tensor"}
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "u64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,18})$"
+    },
+    "optional_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["offset", "length"],
+      "properties": {
+        "offset": {"$ref": "#/$defs/u64"},
+        "length": {"$ref": "#/$defs/u64"}
+      }
+    },
+    "tensor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "semantic_role",
+        "source_dtype",
+        "runtime_codec",
+        "rank",
+        "shape",
+        "logical_elements",
+        "data",
+        "scale",
+        "zero",
+        "metadata",
+        "row_elements",
+        "group_elements",
+        "required_alignment",
+        "source_sha256",
+        "converted_sha256"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(lm_head\\.weight|model\\.language_model\\..+|mtp\\..+)$"
+        },
+        "semantic_role": {
+          "enum": [
+            "embedding",
+            "lm_head",
+            "attention_q",
+            "attention_k",
+            "attention_v",
+            "attention_o",
+            "gdn_projection",
+            "gdn_state_parameter",
+            "mlp_gate",
+            "mlp_up",
+            "mlp_down",
+            "norm",
+            "bias_scalar",
+            "mtp"
+          ]
+        },
+        "source_dtype": {
+          "enum": [
+            "BOOL", "I8", "U8", "I16", "U16", "F16", "BF16",
+            "I32", "U32", "F32", "I64", "U64", "F64"
+          ]
+        },
+        "runtime_codec": {
+          "enum": ["BF16", "F16", "F32", "Q8_SYM_G64", "Q4_SYM_G64"]
+        },
+        "rank": {"type": "integer", "minimum": 1, "maximum": 8},
+        "shape": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {"$ref": "#/$defs/u64"}
+        },
+        "logical_elements": {"$ref": "#/$defs/u64"},
+        "data": {"$ref": "#/$defs/optional_range"},
+        "scale": {"$ref": "#/$defs/optional_range"},
+        "zero": {"$ref": "#/$defs/optional_range"},
+        "metadata": {"$ref": "#/$defs/optional_range"},
+        "row_elements": {"$ref": "#/$defs/u64"},
+        "group_elements": {"type": "integer", "minimum": 0, "maximum": 64},
+        "required_alignment": {
+          "enum": [
+            1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048,
+            4096, 8192, 16384, 32768, 65536, 131072, 262144,
+            524288, 1048576, 2097152
+          ]
+        },
+        "source_sha256": {"$ref": "#/$defs/sha256"},
+        "converted_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

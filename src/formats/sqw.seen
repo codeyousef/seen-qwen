@@ -1,0 +1,770 @@
+///
+/// SQW v1.0 binary contract primitives.
+///
+/// This module deliberately validates bounded byte arrays. The mapped-file
+/// owner and zero-copy tensor views belong to QWN-030B; atomic persistence
+/// belongs to QWN-030C.
+///
+
+import core.result.{Result}
+
+let SQW_HEADER_BYTES: Int = 256
+let SQW_DIRECTORY_ENTRY_BYTES: Int = 256
+let SQW_FOOTER_HEADER_BYTES: Int = 64
+let SQW_FOOTER_ENTRY_BYTES: Int = 64
+let SQW_FORMAT_MAJOR: Int = 1
+let SQW_FORMAT_MINOR: Int = 0
+let SQW_ENDIAN_MARKER: UInt32 = 0x01020304 as UInt32
+let SQW_FLAG_WHOLE_FILE_SHA256: UInt32 = 1 as UInt32
+let SQW_MAX_TENSORS: UInt32 = 2048 as UInt32
+let SQW_MAX_NAME_BYTES: UInt32 = 1024 as UInt32
+let SQW_MAX_ALIGNMENT: UInt32 = 2097152 as UInt32
+
+let SQW_ROLE_EMBEDDING: UInt16 = 1 as UInt16
+let SQW_ROLE_LM_HEAD: UInt16 = 2 as UInt16
+let SQW_ROLE_ATTENTION_Q: UInt16 = 3 as UInt16
+let SQW_ROLE_ATTENTION_K: UInt16 = 4 as UInt16
+let SQW_ROLE_ATTENTION_V: UInt16 = 5 as UInt16
+let SQW_ROLE_ATTENTION_O: UInt16 = 6 as UInt16
+let SQW_ROLE_GDN_PROJECTION: UInt16 = 7 as UInt16
+let SQW_ROLE_GDN_STATE_PARAMETER: UInt16 = 8 as UInt16
+let SQW_ROLE_MLP_GATE: UInt16 = 9 as UInt16
+let SQW_ROLE_MLP_UP: UInt16 = 10 as UInt16
+let SQW_ROLE_MLP_DOWN: UInt16 = 11 as UInt16
+let SQW_ROLE_NORM: UInt16 = 12 as UInt16
+let SQW_ROLE_BIAS_SCALAR: UInt16 = 13 as UInt16
+let SQW_ROLE_MTP: UInt16 = 14 as UInt16
+
+let SQW_DTYPE_BOOL: UInt16 = 1 as UInt16
+let SQW_DTYPE_I8: UInt16 = 2 as UInt16
+let SQW_DTYPE_U8: UInt16 = 3 as UInt16
+let SQW_DTYPE_I16: UInt16 = 4 as UInt16
+let SQW_DTYPE_U16: UInt16 = 5 as UInt16
+let SQW_DTYPE_F16: UInt16 = 6 as UInt16
+let SQW_DTYPE_BF16: UInt16 = 7 as UInt16
+let SQW_DTYPE_I32: UInt16 = 8 as UInt16
+let SQW_DTYPE_U32: UInt16 = 9 as UInt16
+let SQW_DTYPE_F32: UInt16 = 10 as UInt16
+let SQW_DTYPE_I64: UInt16 = 11 as UInt16
+let SQW_DTYPE_U64: UInt16 = 12 as UInt16
+let SQW_DTYPE_F64: UInt16 = 13 as UInt16
+
+let SQW_CODEC_BF16: UInt16 = 1 as UInt16
+let SQW_CODEC_F16: UInt16 = 2 as UInt16
+let SQW_CODEC_F32: UInt16 = 3 as UInt16
+let SQW_CODEC_Q8_SYM_G64: UInt16 = 4 as UInt16
+let SQW_CODEC_Q4_SYM_G64: UInt16 = 5 as UInt16
+
+let SQW_SECTION_MANIFEST: UInt32 = 1 as UInt32
+let SQW_SECTION_DIRECTORY: UInt32 = 2 as UInt32
+let SQW_SECTION_NAMES: UInt32 = 3 as UInt32
+let SQW_SECTION_PAYLOAD: UInt32 = 4 as UInt32
+let SQW_SECTION_EVIDENCE: UInt32 = 5 as UInt32
+
+pub class SqwError {
+    var code: String
+    var field: String
+    var message: String
+}
+
+pub class SqwHeader {
+    var flags: UInt32
+    var manifestOffset: UInt64
+    var manifestLength: UInt64
+    var directoryOffset: UInt64
+    var tensorCount: UInt32
+    var namesOffset: UInt64
+    var namesLength: UInt64
+    var payloadOffset: UInt64
+    var payloadLength: UInt64
+    var evidenceOffset: UInt64
+    var evidenceLength: UInt64
+    var footerOffset: UInt64
+    var footerLength: UInt64
+    var wholeFileDigestOffset: UInt64
+}
+
+pub class SqwDirectoryEntry {
+    var nameOffset: UInt64
+    var nameLength: UInt32
+    var semanticRole: UInt16
+    var sourceDtype: UInt16
+    var runtimeCodec: UInt16
+    var rank: UInt16
+    var shape: Array<UInt64>
+    var logicalElements: UInt64
+    var dataOffset: UInt64
+    var dataLength: UInt64
+    var scaleOffset: UInt64
+    var scaleLength: UInt64
+    var zeroOffset: UInt64
+    var zeroLength: UInt64
+    var metadataOffset: UInt64
+    var metadataLength: UInt64
+    var rowElements: UInt64
+    var groupElements: UInt32
+    var requiredAlignment: UInt32
+    var closed: Bool
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.shape.free()
+        this.closed = true
+    }
+}
+
+pub class SqwFooterHeader {
+    var entryCount: UInt32
+}
+
+pub class SqwFooterEntry {
+    var sectionId: UInt32
+    var offset: UInt64
+    var length: UInt64
+}
+
+fun sqwError(code: String, field: String, message: String) r: SqwError {
+    return SqwError{ code: code, field: field, message: message }
+}
+
+fun sqwRangeAvailable(bytes: Array<Int>, offset: Int, length: Int) r: Bool {
+    if offset < 0 or length < 0 or offset > bytes.length() { return false }
+    return length <= bytes.length() - offset
+}
+
+fun sqwReadU16(bytes: Array<Int>, offset: Int) r: UInt16 {
+    return ((bytes[offset] & 255) |
+        ((bytes[offset + 1] & 255) << 8)) as UInt16
+}
+
+fun sqwReadU32(bytes: Array<Int>, offset: Int) r: UInt32 {
+    var value: UInt32 = 0 as UInt32
+    var index = 0
+    while index < 4 {
+        value = value | (((bytes[offset + index] & 255) as UInt32) <<
+            ((index * 8) as UInt32))
+        index = index + 1
+    }
+    return value
+}
+
+fun sqwReadU64(bytes: Array<Int>, offset: Int) r: UInt64 {
+    var value: UInt64 = 0 as UInt64
+    var index = 0
+    while index < 8 {
+        value = value | (((bytes[offset + index] & 255) as UInt64) <<
+            ((index * 8) as UInt64))
+        index = index + 1
+    }
+    return value
+}
+
+fun sqwBytesZero(bytes: Array<Int>, offset: Int, length: Int) r: Bool {
+    if not sqwRangeAvailable(bytes, offset, length) { return false }
+    var index = 0
+    while index < length {
+        if (bytes[offset + index] & 255) != 0 { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun sqwBytesEqualAscii(bytes: Array<Int>, offset: Int, text: String) r: Bool {
+    if not sqwRangeAvailable(bytes, offset, text.length()) { return false }
+    var index = 0
+    while index < text.length() {
+        if (bytes[offset + index] & 255) != text.byteAt(index) { return false }
+        index = index + 1
+    }
+    return true
+}
+
+pub fun sqwCheckedAdd(left: UInt64, right: UInt64)
+    r: Result<UInt64, SqwError> {
+    let maximum = 0x7FFFFFFFFFFFFFFF as UInt64
+    if (left & (0x8000000000000000 as UInt64)) != (0 as UInt64) or
+        (right & (0x8000000000000000 as UInt64)) != (0 as UInt64) {
+        return Err<UInt64, SqwError>(sqwError("sqw.overflow", "addition",
+            "value exceeds the SQW v1.0 signed-safe geometry bound"))
+    }
+    if right > maximum - left {
+        return Err<UInt64, SqwError>(sqwError("sqw.overflow", "addition",
+            "checked 64-bit addition exceeds the SQW v1.0 bound"))
+    }
+    return Ok<UInt64, SqwError>(left + right)
+}
+
+pub fun sqwCheckedMultiply(left: UInt64, right: UInt64)
+    r: Result<UInt64, SqwError> {
+    let maximum = 0x7FFFFFFFFFFFFFFF as UInt64
+    if (left & (0x8000000000000000 as UInt64)) != (0 as UInt64) or
+        (right & (0x8000000000000000 as UInt64)) != (0 as UInt64) {
+        return Err<UInt64, SqwError>(sqwError("sqw.overflow", "multiplication",
+            "value exceeds the SQW v1.0 signed-safe geometry bound"))
+    }
+    if left != (0 as UInt64) and right > maximum / left {
+        return Err<UInt64, SqwError>(sqwError("sqw.overflow", "multiplication",
+            "checked 64-bit multiplication exceeds the SQW v1.0 bound"))
+    }
+    return Ok<UInt64, SqwError>(left * right)
+}
+
+pub fun sqwCheckedAlign(value: UInt64, alignment: UInt64)
+    r: Result<UInt64, SqwError> {
+    if alignment == (0 as UInt64) or
+        (alignment & (alignment - (1 as UInt64))) != (0 as UInt64) {
+        return Err<UInt64, SqwError>(sqwError("sqw.alignment", "alignment",
+            "alignment must be a non-zero power of two"))
+    }
+    let added = sqwCheckedAdd(value, alignment - (1 as UInt64))
+    if added.isErr() { return added }
+    return Ok<UInt64, SqwError>(added.unwrap() & (~(alignment - (1 as UInt64))))
+}
+
+pub fun parseSqwUnsignedDecimal(text: String)
+    r: Result<UInt64, SqwError> {
+    if text.length() == 0 or text.length() > 19 or
+        (text.length() > 1 and text.byteAt(0) == 48) {
+        return Err<UInt64, SqwError>(sqwError("sqw.uint64", "decimal",
+            "unsigned integer is not canonical decimal"))
+    }
+    let maximum = 0x7FFFFFFFFFFFFFFF as UInt64
+    var value: UInt64 = 0 as UInt64
+    var index = 0
+    while index < text.length() {
+        let byte = text.byteAt(index)
+        if byte < 48 or byte > 57 {
+            return Err<UInt64, SqwError>(sqwError("sqw.uint64", "decimal",
+                "unsigned integer contains a non-decimal byte"))
+        }
+        let digit = (byte - 48) as UInt64
+        if value > (maximum - digit) / (10 as UInt64) {
+            return Err<UInt64, SqwError>(sqwError("sqw.uint64", "decimal",
+                "unsigned integer exceeds the SQW v1.0 geometry bound"))
+        }
+        value = value * (10 as UInt64) + digit
+        index = index + 1
+    }
+    return Ok<UInt64, SqwError>(value)
+}
+
+fun sqwRangeEnd(offset: UInt64, length: UInt64, field: String)
+    r: Result<UInt64, SqwError> {
+    let result = sqwCheckedAdd(offset, length)
+    if result.isErr() {
+        return Err<UInt64, SqwError>(sqwError("sqw.range_overflow", field,
+            "offset and length overflow"))
+    }
+    return result
+}
+
+fun sqwSectionOrdered(offset: UInt64, length: UInt64, minimum: UInt64,
+    fileBytes: UInt64, field: String) r: Result<UInt64, SqwError> {
+    if offset < minimum {
+        return Err<UInt64, SqwError>(sqwError("sqw.section_order", field,
+            "section begins before the preceding section"))
+    }
+    let end = sqwRangeEnd(offset, length, field)
+    if end.isErr() { return end }
+    if end.unwrap() > fileBytes {
+        return Err<UInt64, SqwError>(sqwError("sqw.truncated", field,
+            "section extends past the file"))
+    }
+    return end
+}
+
+fun sqwAligned(value: UInt64, alignment: UInt64) r: Bool {
+    return (value & (alignment - (1 as UInt64))) == (0 as UInt64)
+}
+
+pub fun parseSqwHeader(bytes: Array<Int>, fileBytes: UInt64)
+    r: Result<SqwHeader, SqwError> {
+    if (fileBytes & (0x8000000000000000 as UInt64)) != (0 as UInt64) {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.file_extent", "file",
+            "file size exceeds the SQW v1.0 signed-safe geometry bound"))
+    }
+    if bytes.length() != SQW_HEADER_BYTES or fileBytes <
+        (SQW_HEADER_BYTES as UInt64) {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.truncated", "header",
+            "SQW header must contain exactly 256 bytes"))
+    }
+    if not sqwBytesEqualAscii(bytes, 0, "SQW1") {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.magic", "magic",
+            "SQW magic must be SQW1"))
+    }
+    if sqwReadU32(bytes, 4) != SQW_ENDIAN_MARKER {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.endian", "endian",
+            "SQW endian marker is unsupported"))
+    }
+    if sqwReadU16(bytes, 8) != (SQW_FORMAT_MAJOR as UInt16) or
+        sqwReadU16(bytes, 10) != (SQW_FORMAT_MINOR as UInt16) {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.version", "version",
+            "SQW reader accepts exactly version 1.0"))
+    }
+    if sqwReadU32(bytes, 12) != (SQW_HEADER_BYTES as UInt32) {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.header_bytes",
+            "header_bytes", "SQW fixed header size mismatch"))
+    }
+    let flags = sqwReadU32(bytes, 16)
+    if flags != SQW_FLAG_WHOLE_FILE_SHA256 {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.flags", "flags",
+            "unknown or missing SQW v1.0 feature flags"))
+    }
+    if not sqwBytesZero(bytes, 20, 4) or not sqwBytesZero(bytes, 192, 64) {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.reserved", "header",
+            "reserved SQW header bytes must be zero"))
+    }
+    if sqwBytesZero(bytes, 128, 32) or sqwBytesZero(bytes, 160, 32) {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.identity", "header",
+            "model-lock and conversion-policy digests must be non-zero"))
+    }
+    if sqwReadU32(bytes, 48) != (SQW_DIRECTORY_ENTRY_BYTES as UInt32) {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.directory_entry_bytes",
+            "directory", "SQW v1.0 directory entries are 256 bytes"))
+    }
+    let tensorCount = sqwReadU32(bytes, 52)
+    if tensorCount == (0 as UInt32) or tensorCount > SQW_MAX_TENSORS {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.tensor_count",
+            "directory", "tensor count is outside the v1.0 bound"))
+    }
+    let header = SqwHeader{
+        flags: flags,
+        manifestOffset: sqwReadU64(bytes, 24),
+        manifestLength: sqwReadU64(bytes, 32),
+        directoryOffset: sqwReadU64(bytes, 40),
+        tensorCount: tensorCount,
+        namesOffset: sqwReadU64(bytes, 56),
+        namesLength: sqwReadU64(bytes, 64),
+        payloadOffset: sqwReadU64(bytes, 72),
+        payloadLength: sqwReadU64(bytes, 80),
+        evidenceOffset: sqwReadU64(bytes, 88),
+        evidenceLength: sqwReadU64(bytes, 96),
+        footerOffset: sqwReadU64(bytes, 104),
+        footerLength: sqwReadU64(bytes, 112),
+        wholeFileDigestOffset: sqwReadU64(bytes, 120),
+    }
+    if header.manifestOffset != (SQW_HEADER_BYTES as UInt64) or
+        header.manifestLength == (0 as UInt64) or
+        header.manifestLength > (16777216 as UInt64) {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.manifest_range",
+            "manifest", "manifest placement or size is invalid"))
+    }
+    let manifestEnd = sqwSectionOrdered(header.manifestOffset,
+        header.manifestLength, SQW_HEADER_BYTES as UInt64, fileBytes,
+        "manifest")
+    if manifestEnd.isErr() { return Err<SqwHeader, SqwError>(manifestEnd.unwrapErr()) }
+    if not sqwAligned(header.directoryOffset, 64 as UInt64) {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.alignment", "directory",
+            "directory offset must be 64-byte aligned"))
+    }
+    let directoryBytes = sqwCheckedMultiply(tensorCount as UInt64,
+        SQW_DIRECTORY_ENTRY_BYTES as UInt64)
+    if directoryBytes.isErr() {
+        return Err<SqwHeader, SqwError>(directoryBytes.unwrapErr())
+    }
+    let directoryEnd = sqwSectionOrdered(header.directoryOffset,
+        directoryBytes.unwrap(), manifestEnd.unwrap(), fileBytes, "directory")
+    if directoryEnd.isErr() { return Err<SqwHeader, SqwError>(directoryEnd.unwrapErr()) }
+    if not sqwAligned(header.namesOffset, 64 as UInt64) or
+        header.namesLength == (0 as UInt64) or
+        header.namesLength > (16777216 as UInt64) {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.names_range", "names",
+            "name table placement or size is invalid"))
+    }
+    let namesEnd = sqwSectionOrdered(header.namesOffset, header.namesLength,
+        directoryEnd.unwrap(), fileBytes, "names")
+    if namesEnd.isErr() { return Err<SqwHeader, SqwError>(namesEnd.unwrapErr()) }
+    if not sqwAligned(header.payloadOffset, 4096 as UInt64) or
+        header.payloadLength == (0 as UInt64) {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.payload_range", "payload",
+            "payload placement or size is invalid"))
+    }
+    let payloadEnd = sqwSectionOrdered(header.payloadOffset,
+        header.payloadLength, namesEnd.unwrap(), fileBytes, "payload")
+    if payloadEnd.isErr() { return Err<SqwHeader, SqwError>(payloadEnd.unwrapErr()) }
+    var footerMinimum = payloadEnd.unwrap()
+    var footerEntries: UInt64 = 4 as UInt64
+    if header.evidenceLength == (0 as UInt64) {
+        if header.evidenceOffset != (0 as UInt64) {
+            return Err<SqwHeader, SqwError>(sqwError("sqw.evidence_range",
+                "evidence", "absent evidence must use zero offset and length"))
+        }
+    } else {
+        if header.evidenceLength > (67108864 as UInt64) {
+            return Err<SqwHeader, SqwError>(sqwError("sqw.evidence_range",
+                "evidence", "evidence section exceeds the v1.0 bound"))
+        }
+        let evidenceEnd = sqwSectionOrdered(header.evidenceOffset,
+            header.evidenceLength, footerMinimum, fileBytes, "evidence")
+        if evidenceEnd.isErr() {
+            return Err<SqwHeader, SqwError>(evidenceEnd.unwrapErr())
+        }
+        footerMinimum = evidenceEnd.unwrap()
+        footerEntries = 5 as UInt64
+    }
+    if not sqwAligned(header.footerOffset, 64 as UInt64) {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.alignment", "footer",
+            "footer offset must be 64-byte aligned"))
+    }
+    let footerEntryBytes = sqwCheckedMultiply(footerEntries,
+        SQW_FOOTER_ENTRY_BYTES as UInt64)
+    if footerEntryBytes.isErr() {
+        return Err<SqwHeader, SqwError>(footerEntryBytes.unwrapErr())
+    }
+    let expectedFooter = sqwCheckedAdd(SQW_FOOTER_HEADER_BYTES as UInt64,
+        footerEntryBytes.unwrap())
+    if expectedFooter.isErr() or header.footerLength != expectedFooter.unwrap() {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.footer_length", "footer",
+            "footer checksum table length is not canonical"))
+    }
+    let footerEnd = sqwSectionOrdered(header.footerOffset,
+        header.footerLength, footerMinimum, fileBytes, "footer")
+    if footerEnd.isErr() { return Err<SqwHeader, SqwError>(footerEnd.unwrapErr()) }
+    if footerEnd.unwrap() != fileBytes or header.wholeFileDigestOffset !=
+        header.footerOffset + (16 as UInt64) {
+        return Err<SqwHeader, SqwError>(sqwError("sqw.file_extent", "footer",
+            "footer must end at EOF and identify its whole-file digest slot"))
+    }
+    return Ok<SqwHeader, SqwError>(header)
+}
+
+fun sqwRoleKnown(value: UInt16) r: Bool {
+    return value >= SQW_ROLE_EMBEDDING and value <= SQW_ROLE_MTP
+}
+
+fun sqwDtypeKnown(value: UInt16) r: Bool {
+    return value >= SQW_DTYPE_BOOL and value <= SQW_DTYPE_F64
+}
+
+fun sqwCodecKnown(value: UInt16) r: Bool {
+    return value >= SQW_CODEC_BF16 and value <= SQW_CODEC_Q4_SYM_G64
+}
+
+fun sqwPowerOfTwo(value: UInt32) r: Bool {
+    if value == (0 as UInt32) { return false }
+    return (value & (value - (1 as UInt32))) == (0 as UInt32)
+}
+
+fun sqwComponentInsidePayload(offset: UInt64, length: UInt64,
+    header: SqwHeader, field: String) r: Result<Bool, SqwError> {
+    if length == (0 as UInt64) {
+        if offset != (0 as UInt64) {
+            return Err<Bool, SqwError>(sqwError("sqw.component_range", field,
+                "absent component must use zero offset and length"))
+        }
+        return Ok<Bool, SqwError>(true)
+    }
+    if offset < header.payloadOffset {
+        return Err<Bool, SqwError>(sqwError("sqw.component_range", field,
+            "tensor component begins before payload section"))
+    }
+    let componentEnd = sqwRangeEnd(offset, length, field)
+    let payloadEnd = sqwRangeEnd(header.payloadOffset, header.payloadLength,
+        "payload")
+    if componentEnd.isErr() { return Err<Bool, SqwError>(componentEnd.unwrapErr()) }
+    if payloadEnd.isErr() { return Err<Bool, SqwError>(payloadEnd.unwrapErr()) }
+    if componentEnd.unwrap() > payloadEnd.unwrap() {
+        return Err<Bool, SqwError>(sqwError("sqw.component_range", field,
+            "tensor component extends past payload section"))
+    }
+    return Ok<Bool, SqwError>(true)
+}
+
+fun sqwComponentsCanonical(dataOffset: UInt64, dataLength: UInt64,
+    scaleOffset: UInt64, scaleLength: UInt64, zeroOffset: UInt64,
+    zeroLength: UInt64, metadataOffset: UInt64, metadataLength: UInt64)
+    r: Result<Bool, SqwError> {
+    let dataEnd = sqwRangeEnd(dataOffset, dataLength, "data")
+    if dataEnd.isErr() { return Err<Bool, SqwError>(dataEnd.unwrapErr()) }
+    var cursor = dataEnd.unwrap()
+    if scaleLength > (0 as UInt64) {
+        if scaleOffset < cursor {
+            return Err<Bool, SqwError>(sqwError("sqw.component_overlap", "scale",
+                "scale component overlaps or precedes tensor data"))
+        }
+        let scaleEnd = sqwRangeEnd(scaleOffset, scaleLength, "scale")
+        if scaleEnd.isErr() { return Err<Bool, SqwError>(scaleEnd.unwrapErr()) }
+        cursor = scaleEnd.unwrap()
+    }
+    if zeroLength > (0 as UInt64) {
+        if zeroOffset < cursor {
+            return Err<Bool, SqwError>(sqwError("sqw.component_overlap", "zero",
+                "zero component overlaps or precedes earlier components"))
+        }
+        let zeroEnd = sqwRangeEnd(zeroOffset, zeroLength, "zero")
+        if zeroEnd.isErr() { return Err<Bool, SqwError>(zeroEnd.unwrapErr()) }
+        cursor = zeroEnd.unwrap()
+    }
+    if metadataLength > (0 as UInt64) {
+        if metadataOffset < cursor {
+            return Err<Bool, SqwError>(sqwError("sqw.component_overlap",
+                "metadata", "metadata overlaps or precedes earlier components"))
+        }
+        let metadataEnd = sqwRangeEnd(metadataOffset, metadataLength, "metadata")
+        if metadataEnd.isErr() {
+            return Err<Bool, SqwError>(metadataEnd.unwrapErr())
+        }
+    }
+    return Ok<Bool, SqwError>(true)
+}
+
+pub fun parseSqwDirectoryEntry(bytes: Array<Int>, header: SqwHeader)
+    r: Result<SqwDirectoryEntry, SqwError> {
+    if bytes.length() != SQW_DIRECTORY_ENTRY_BYTES {
+        return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.directory_entry",
+            "directory", "directory entry must contain exactly 256 bytes"))
+    }
+    if not sqwBytesZero(bytes, 240, 16) or sqwReadU32(bytes, 20) !=
+        (0 as UInt32) {
+        return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.reserved",
+            "directory", "directory flags and reserved bytes must be zero"))
+    }
+    let nameOffset = sqwReadU64(bytes, 0)
+    let nameLength = sqwReadU32(bytes, 8)
+    if nameLength == (0 as UInt32) or nameLength > SQW_MAX_NAME_BYTES or
+        nameOffset > header.namesLength or
+        (nameLength as UInt64) > header.namesLength - nameOffset {
+        return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.name_range",
+            "name", "tensor name range is outside the bounded name table"))
+    }
+    let role = sqwReadU16(bytes, 12)
+    let dtype = sqwReadU16(bytes, 14)
+    let codec = sqwReadU16(bytes, 16)
+    let rank = sqwReadU16(bytes, 18)
+    if not sqwRoleKnown(role) or not sqwDtypeKnown(dtype) or
+        not sqwCodecKnown(codec) {
+        return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.id", "directory",
+            "semantic role, source dtype, or runtime codec is unsupported"))
+    }
+    if rank == (0 as UInt16) or rank > (8 as UInt16) {
+        return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.rank", "shape",
+            "tensor rank must be between one and eight"))
+    }
+    let shape = Array<UInt64>()
+    var logical: UInt64 = 1 as UInt64
+    var dimensionIndex = 0
+    while dimensionIndex < 8 {
+        let dimension = sqwReadU64(bytes, 24 + dimensionIndex * 8)
+        if dimensionIndex < (rank as Int) {
+            if dimension == (0 as UInt64) {
+                shape.free()
+                return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.shape",
+                    "shape", "active tensor dimensions must be non-zero"))
+            }
+            let product = sqwCheckedMultiply(logical, dimension)
+            if product.isErr() {
+                shape.free()
+                return Err<SqwDirectoryEntry, SqwError>(product.unwrapErr())
+            }
+            logical = product.unwrap(); shape.push(dimension)
+        } else if dimension != (0 as UInt64) {
+            shape.free()
+            return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.shape",
+                "shape", "unused shape dimensions must be zero"))
+        }
+        dimensionIndex = dimensionIndex + 1
+    }
+    if logical != sqwReadU64(bytes, 88) {
+        shape.free()
+        return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.element_count",
+            "logical_elements", "shape product differs from logical count"))
+    }
+    let alignment = sqwReadU32(bytes, 172)
+    if not sqwPowerOfTwo(alignment) or alignment > SQW_MAX_ALIGNMENT {
+        shape.free()
+        return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.alignment",
+            "alignment", "tensor alignment is outside the v1.0 contract"))
+    }
+    let dataOffset = sqwReadU64(bytes, 96)
+    let dataLength = sqwReadU64(bytes, 104)
+    let scaleOffset = sqwReadU64(bytes, 112)
+    let scaleLength = sqwReadU64(bytes, 120)
+    let zeroOffset = sqwReadU64(bytes, 128)
+    let zeroLength = sqwReadU64(bytes, 136)
+    let metadataOffset = sqwReadU64(bytes, 144)
+    let metadataLength = sqwReadU64(bytes, 152)
+    let dataRange = sqwComponentInsidePayload(dataOffset, dataLength, header,
+        "data")
+    if dataRange.isErr() {
+        shape.free()
+        return Err<SqwDirectoryEntry, SqwError>(dataRange.unwrapErr())
+    }
+    let scaleRange = sqwComponentInsidePayload(scaleOffset, scaleLength, header,
+        "scale")
+    if scaleRange.isErr() {
+        shape.free()
+        return Err<SqwDirectoryEntry, SqwError>(scaleRange.unwrapErr())
+    }
+    let zeroRange = sqwComponentInsidePayload(zeroOffset, zeroLength, header,
+        "zero")
+    if zeroRange.isErr() {
+        shape.free()
+        return Err<SqwDirectoryEntry, SqwError>(zeroRange.unwrapErr())
+    }
+    let metadataRange = sqwComponentInsidePayload(metadataOffset,
+        metadataLength, header, "metadata")
+    if metadataRange.isErr() {
+        shape.free()
+        return Err<SqwDirectoryEntry, SqwError>(metadataRange.unwrapErr())
+    }
+    let componentOrder = sqwComponentsCanonical(dataOffset, dataLength,
+        scaleOffset, scaleLength, zeroOffset, zeroLength, metadataOffset,
+        metadataLength)
+    if componentOrder.isErr() {
+        shape.free()
+        return Err<SqwDirectoryEntry, SqwError>(componentOrder.unwrapErr())
+    }
+    if dataLength == (0 as UInt64) or
+        not sqwAligned(dataOffset, alignment as UInt64) {
+        shape.free()
+        return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.data", "data",
+            "tensor data must be non-empty and correctly aligned"))
+    }
+    if sqwBytesZero(bytes, 176, 32) or sqwBytesZero(bytes, 208, 32) {
+        shape.free()
+        return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.digest",
+            "directory", "source and converted tensor digests must be non-zero"))
+    }
+    let rowElements = sqwReadU64(bytes, 160)
+    let groupElements = sqwReadU32(bytes, 168)
+    if rowElements == (0 as UInt64) or logical % rowElements != (0 as UInt64) {
+        shape.free()
+        return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.row_geometry",
+            "row_elements", "row geometry must divide logical elements"))
+    }
+    if codec <= SQW_CODEC_F32 {
+        if groupElements != (0 as UInt32) or scaleLength != (0 as UInt64) or
+            zeroLength != (0 as UInt64) or metadataLength != (0 as UInt64) {
+            shape.free()
+            return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.codec_geometry",
+                "codec", "plain codecs cannot carry quantization components"))
+        }
+        var codecBytes: UInt64 = 2 as UInt64
+        if codec == SQW_CODEC_F32 { codecBytes = 4 as UInt64 }
+        let expected = sqwCheckedMultiply(logical, codecBytes)
+        if expected.isErr() or dataLength != expected.unwrap() {
+            shape.free()
+            return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.codec_geometry",
+                "data_length", "plain codec payload size is not canonical"))
+        }
+    } else {
+        if groupElements != (64 as UInt32) or zeroLength != (0 as UInt64) or
+            metadataLength != (0 as UInt64) {
+            shape.free()
+            return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.codec_geometry",
+                "codec", "reference quantized codecs require symmetric groups of 64"))
+        }
+        let rows = logical / rowElements
+        let groupNumerator = sqwCheckedAdd(rowElements, 63 as UInt64)
+        if groupNumerator.isErr() {
+            shape.free()
+            return Err<SqwDirectoryEntry, SqwError>(groupNumerator.unwrapErr())
+        }
+        let groupsPerRow = groupNumerator.unwrap() / (64 as UInt64)
+        let scaleCount = sqwCheckedMultiply(rows, groupsPerRow)
+        if scaleCount.isErr() {
+            shape.free()
+            return Err<SqwDirectoryEntry, SqwError>(scaleCount.unwrapErr())
+        }
+        let expectedScales = sqwCheckedMultiply(scaleCount.unwrap(), 2 as UInt64)
+        if expectedScales.isErr() or scaleLength != expectedScales.unwrap() {
+            shape.free()
+            return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.codec_geometry",
+                "scale_length", "quantized FP16 scale size is not canonical"))
+        }
+        var bytesPerRow = rowElements
+        if codec == SQW_CODEC_Q4_SYM_G64 {
+            let nibbleNumerator = sqwCheckedAdd(rowElements, 1 as UInt64)
+            if nibbleNumerator.isErr() {
+                shape.free()
+                return Err<SqwDirectoryEntry, SqwError>(nibbleNumerator.unwrapErr())
+            }
+            bytesPerRow = nibbleNumerator.unwrap() / (2 as UInt64)
+        }
+        let expectedData = sqwCheckedMultiply(rows, bytesPerRow)
+        if expectedData.isErr() or dataLength != expectedData.unwrap() {
+            shape.free()
+            return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.codec_geometry",
+                "data_length", "quantized payload size is not canonical"))
+        }
+    }
+    return Ok<SqwDirectoryEntry, SqwError>(SqwDirectoryEntry{
+        nameOffset: nameOffset, nameLength: nameLength,
+        semanticRole: role, sourceDtype: dtype, runtimeCodec: codec,
+        rank: rank, shape: shape, logicalElements: logical,
+        dataOffset: dataOffset, dataLength: dataLength,
+        scaleOffset: scaleOffset, scaleLength: scaleLength,
+        zeroOffset: zeroOffset, zeroLength: zeroLength,
+        metadataOffset: metadataOffset, metadataLength: metadataLength,
+        rowElements: rowElements, groupElements: groupElements,
+        requiredAlignment: alignment, closed: false,
+    })
+}
+
+pub fun parseSqwFooterHeader(bytes: Array<Int>, header: SqwHeader)
+    r: Result<SqwFooterHeader, SqwError> {
+    if bytes.length() != SQW_FOOTER_HEADER_BYTES {
+        return Err<SqwFooterHeader, SqwError>(sqwError("sqw.footer_header",
+            "footer", "footer header must contain exactly 64 bytes"))
+    }
+    if not sqwBytesEqualAscii(bytes, 0, "SQWF") or
+        sqwReadU16(bytes, 4) != (1 as UInt16) or
+        sqwReadU16(bytes, 6) != (SQW_FOOTER_HEADER_BYTES as UInt16) or
+        sqwReadU16(bytes, 8) != (SQW_FOOTER_ENTRY_BYTES as UInt16) or
+        sqwReadU16(bytes, 10) != (1 as UInt16) {
+        return Err<SqwFooterHeader, SqwError>(sqwError("sqw.footer_contract",
+            "footer", "footer magic, version, size, or hash algorithm mismatch"))
+    }
+    let entryCount = sqwReadU32(bytes, 12)
+    var expected = 4 as UInt32
+    if header.evidenceLength > (0 as UInt64) { expected = 5 as UInt32 }
+    if entryCount != expected {
+        return Err<SqwFooterHeader, SqwError>(sqwError("sqw.footer_count",
+            "footer", "footer section count does not match header sections"))
+    }
+    if sqwBytesZero(bytes, 16, 32) or not sqwBytesZero(bytes, 48, 16) {
+        return Err<SqwFooterHeader, SqwError>(sqwError("sqw.footer_digest",
+            "footer", "whole-file digest must be present and reserved bytes zero"))
+    }
+    return Ok<SqwFooterHeader, SqwError>(SqwFooterHeader{
+        entryCount: entryCount
+    })
+}
+
+pub fun parseSqwFooterEntry(bytes: Array<Int>, expectedSection: UInt32,
+    header: SqwHeader) r: Result<SqwFooterEntry, SqwError> {
+    if bytes.length() != SQW_FOOTER_ENTRY_BYTES {
+        return Err<SqwFooterEntry, SqwError>(sqwError("sqw.footer_entry",
+            "footer", "footer entry must contain exactly 64 bytes"))
+    }
+    let sectionId = sqwReadU32(bytes, 0)
+    if expectedSection < SQW_SECTION_MANIFEST or
+        expectedSection > SQW_SECTION_EVIDENCE or sectionId != expectedSection or
+        sqwReadU32(bytes, 4) != (0 as UInt32) or
+        not sqwBytesZero(bytes, 56, 8) or sqwBytesZero(bytes, 24, 32) {
+        return Err<SqwFooterEntry, SqwError>(sqwError("sqw.footer_entry",
+            "footer", "footer section identity, flags, digest, or reserved bytes mismatch"))
+    }
+    let offset = sqwReadU64(bytes, 8)
+    let length = sqwReadU64(bytes, 16)
+    var requiredOffset = header.manifestOffset
+    var requiredLength = header.manifestLength
+    if sectionId == SQW_SECTION_DIRECTORY {
+        requiredOffset = header.directoryOffset
+        requiredLength = (header.tensorCount as UInt64) *
+            (SQW_DIRECTORY_ENTRY_BYTES as UInt64)
+    } else if sectionId == SQW_SECTION_NAMES {
+        requiredOffset = header.namesOffset; requiredLength = header.namesLength
+    } else if sectionId == SQW_SECTION_PAYLOAD {
+        requiredOffset = header.payloadOffset; requiredLength = header.payloadLength
+    } else if sectionId == SQW_SECTION_EVIDENCE {
+        requiredOffset = header.evidenceOffset; requiredLength = header.evidenceLength
+    }
+    if offset != requiredOffset or length != requiredLength {
+        return Err<SqwFooterEntry, SqwError>(sqwError("sqw.footer_range",
+            "footer", "footer checksum range disagrees with fixed header"))
+    }
+    return Ok<SqwFooterEntry, SqwError>(SqwFooterEntry{
+        sectionId: sectionId, offset: offset, length: length
+    })
+}
