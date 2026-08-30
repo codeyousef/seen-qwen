@@ -1,0 +1,382 @@
+///
+/// Deterministic finite BF16 and IEEE binary16 reference codecs.
+///
+/// Inputs are rounded to IEEE binary32 before conversion. Both encoders use
+/// round-to-nearest, ties-to-even. Signed zero and finite subnormals are
+/// preserved; NaN, infinity, and conversion overflow fail closed. Encoded
+/// buffers own their UInt16 payload and close deterministically/idempotently.
+///
+/// Contract test: FEL-1419 / QWN-031A
+///
+
+import core.result.{Result}
+import inference.scalars.{BFloat16, Float16}
+import math.math.{abs, copysign, isfinite}
+
+pub class ReferenceCodecError {
+    var code: String
+    var operation: String
+    var message: String
+    var exitCode: Int
+    var retryable: Bool
+}
+
+/// Pointer-safe scalar result payload. Seen 0.18.1 cannot lower a generic
+/// Result<Float, E> payload correctly (SeenLang FEL-1550).
+pub class ReferenceFloatValue {
+    var value: Float
+}
+
+/// Pointer-safe fixed-width bit result payload. Seen 0.18.1 also mis-lowers
+/// Result<UInt32, E> construction under the generic scalar ABI (FEL-1550).
+class ReferenceBits32 {
+    var bits: UInt32
+}
+
+pub class Reference16Buffer {
+    var codec: String
+    var words: Array<UInt16>
+    var closed: Bool
+
+    fun length() r: Int {
+        if this.closed { return 0 }
+        return this.words.length()
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.words.free()
+        this.closed = true
+    }
+}
+
+fun codecError(code: String, operation: String, message: String,
+    exitCode: Int) r: ReferenceCodecError {
+    return ReferenceCodecError{ code: code, operation: operation,
+        message: message, exitCode: exitCode, retryable: false }
+}
+
+fun float32Bits(value: Float32) r: UInt32 {
+    let widened = value as Float
+    var sign: UInt32 = 0 as UInt32
+    if copysign(1.0, widened) < 0.0 {
+        sign = 0x80000000 as UInt32
+    }
+    let magnitude = abs(widened)
+    if magnitude == 0.0 { return sign }
+    var normalized = magnitude
+    var exponent = 0
+    while normalized >= 2.0 {
+        normalized = normalized / 2.0
+        exponent = exponent + 1
+    }
+    while normalized < 1.0 {
+        normalized = normalized * 2.0
+        exponent = exponent - 1
+    }
+    let significandInt = (normalized * 8388608.0) as Int
+    let significand = significandInt as UInt32
+    if exponent >= -126 {
+        let exponentBits = ((exponent + 127) as UInt32) << (23 as UInt32)
+        return sign | exponentBits | (significand - (0x800000 as UInt32))
+    }
+    let shift = (-126 - exponent) as UInt32
+    return sign | (significand >> shift)
+}
+
+fun finiteFloat32Bits(value: Float, operation: String)
+    r: Result<ReferenceBits32, ReferenceCodecError> {
+    if not isfinite(value) {
+        return Err<ReferenceBits32, ReferenceCodecError>(codecError(
+            "qwen.codec.input", operation,
+            "source value must be finite", 2))
+    }
+    let rounded = value as Float32
+    if not isfinite(rounded as Float) {
+        return Err<ReferenceBits32, ReferenceCodecError>(codecError(
+            "qwen.codec.range", operation,
+            "source value is outside finite binary32 range", 2))
+    }
+    let bits = float32Bits(rounded)
+    if ((bits >> (23 as UInt32)) & (0xFF as UInt32)) ==
+        (0xFF as UInt32) {
+        return Err<ReferenceBits32, ReferenceCodecError>(codecError(
+            "qwen.codec.range", operation,
+            "source value is outside finite binary32 range", 2))
+    }
+    return Ok<ReferenceBits32, ReferenceCodecError>(ReferenceBits32{
+        bits: bits
+    })
+}
+
+pub fun encodeBFloat16(value: Float)
+    r: Result<BFloat16, ReferenceCodecError> {
+    let source = finiteFloat32Bits(value, "bf16.encode")
+    if source.isErr() {
+        return Err<BFloat16, ReferenceCodecError>(source.unwrapErr())
+    }
+    let bits = source.unwrap().bits
+    let retainedLeastBit = (bits >> (16 as UInt32)) & (1 as UInt32)
+    let rounded = bits + (0x7FFF as UInt32) + retainedLeastBit
+    let encoded = (rounded >> (16 as UInt32)) as UInt16
+    if (encoded & (0x7F80 as UInt16)) == (0x7F80 as UInt16) {
+        return Err<BFloat16, ReferenceCodecError>(codecError(
+            "qwen.codec.range", "bf16.encode",
+            "finite source overflows BF16", 2))
+    }
+    return Ok<BFloat16, ReferenceCodecError>(BFloat16{ bits: encoded })
+}
+
+pub fun decodeBFloat16(value: BFloat16)
+    r: Result<ReferenceFloatValue, ReferenceCodecError> {
+    if (value.bits & (0x7F80 as UInt16)) == (0x7F80 as UInt16) {
+        return Err<ReferenceFloatValue, ReferenceCodecError>(codecError(
+            "qwen.codec.input", "bf16.decode",
+            "encoded BF16 value must be finite", 2))
+    }
+    let exponent = ((value.bits as Int) >> 7) & 0xFF
+    let mantissa = (value.bits as Int) & 0x7F
+    var decoded = mantissa as Float
+    var power = -133
+    if exponent != 0 {
+        decoded = (128 + mantissa) as Float
+        power = exponent - 134
+    }
+    while power > 0 {
+        decoded = decoded * 2.0
+        power = power - 1
+    }
+    while power < 0 {
+        decoded = decoded / 2.0
+        power = power + 1
+    }
+    if (value.bits & (0x8000 as UInt16)) != (0 as UInt16) {
+        decoded = -decoded
+    }
+    return Ok<ReferenceFloatValue, ReferenceCodecError>(ReferenceFloatValue{
+        value: decoded
+    })
+}
+
+fun roundRightEven(value: UInt32, shift: Int) r: UInt32 {
+    let shiftWidth = shift as UInt32
+    let truncated = value >> shiftWidth
+    let mask = ((1 as UInt32) << shiftWidth) - (1 as UInt32)
+    let remainder = value & mask
+    let halfway = (1 as UInt32) << ((shift - 1) as UInt32)
+    if remainder > halfway or
+        (remainder == halfway and
+         (truncated & (1 as UInt32)) == (1 as UInt32)) {
+        return truncated + (1 as UInt32)
+    }
+    return truncated
+}
+
+pub fun encodeFloat16(value: Float)
+    r: Result<Float16, ReferenceCodecError> {
+    let source = finiteFloat32Bits(value, "f16.encode")
+    if source.isErr() {
+        return Err<Float16, ReferenceCodecError>(source.unwrapErr())
+    }
+    let bits = source.unwrap().bits
+    let sign = ((bits >> (16 as UInt32)) & (0x8000 as UInt32))
+    let exponent = ((bits >> (23 as UInt32)) & (0xFF as UInt32)) as Int
+    let mantissa = bits & (0x7FFFFF as UInt32)
+    let unbiased = exponent - 127
+
+    if unbiased > 15 {
+        return Err<Float16, ReferenceCodecError>(codecError(
+            "qwen.codec.range", "f16.encode",
+            "finite source overflows F16", 2))
+    }
+    if unbiased >= -14 {
+        var halfExponent = unbiased + 15
+        var halfMantissa = roundRightEven(mantissa, 13)
+        if halfMantissa == (0x400 as UInt32) {
+            halfMantissa = 0 as UInt32
+            halfExponent = halfExponent + 1
+        }
+        if halfExponent >= 31 {
+            return Err<Float16, ReferenceCodecError>(codecError(
+                "qwen.codec.range", "f16.encode",
+                "finite source overflows F16", 2))
+        }
+        let encoded = sign | ((halfExponent as UInt32) << (10 as UInt32)) |
+            halfMantissa
+        return Ok<Float16, ReferenceCodecError>(Float16{
+            bits: encoded as UInt16
+        })
+    }
+    if unbiased < -25 {
+        return Ok<Float16, ReferenceCodecError>(Float16{
+            bits: sign as UInt16
+        })
+    }
+    let significand = (0x800000 as UInt32) | mantissa
+    let subnormal = roundRightEven(significand, -unbiased - 1)
+    return Ok<Float16, ReferenceCodecError>(Float16{
+        bits: (sign | subnormal) as UInt16
+    })
+}
+
+pub fun decodeFloat16(value: Float16)
+    r: Result<ReferenceFloatValue, ReferenceCodecError> {
+    let exponent = ((value.bits as Int) >> 10) & 0x1F
+    let mantissa = (value.bits as Int) & 0x3FF
+    if exponent == 0x1F {
+        return Err<ReferenceFloatValue, ReferenceCodecError>(codecError(
+            "qwen.codec.input", "f16.decode",
+            "encoded F16 value must be finite", 2))
+    }
+    var decoded = mantissa as Float
+    var power = -24
+    if exponent != 0 {
+        decoded = (1024 + mantissa) as Float
+        power = exponent - 25
+    }
+    while power > 0 {
+        decoded = decoded * 2.0
+        power = power - 1
+    }
+    while power < 0 {
+        decoded = decoded / 2.0
+        power = power + 1
+    }
+    if (value.bits & (0x8000 as UInt16)) != (0 as UInt16) {
+        decoded = -decoded
+    }
+    return Ok<ReferenceFloatValue, ReferenceCodecError>(ReferenceFloatValue{
+        value: decoded
+    })
+}
+
+fun validateEncodeLimit(values: Array<Float>, elementLimit: UInt64,
+    operation: String) r: Result<UInt64, ReferenceCodecError> {
+    if elementLimit == (0 as UInt64) {
+        return Err<UInt64, ReferenceCodecError>(codecError(
+            "qwen.codec.input", operation,
+            "element limit must be positive", 2))
+    }
+    let length = values.length() as UInt64
+    if length > elementLimit {
+        return Err<UInt64, ReferenceCodecError>(codecError(
+            "qwen.codec.limit", operation,
+            "input exceeds the explicit element limit", 2))
+    }
+    return Ok<UInt64, ReferenceCodecError>(length)
+}
+
+fun validateDecodeBuffer(buffer: Reference16Buffer, codec: String,
+    elementLimit: UInt64, operation: String)
+    r: Result<UInt64, ReferenceCodecError> {
+    if buffer.closed {
+        return Err<UInt64, ReferenceCodecError>(codecError(
+            "qwen.codec.closed", operation,
+            "encoded buffer is closed", 11))
+    }
+    if buffer.codec != codec {
+        return Err<UInt64, ReferenceCodecError>(codecError(
+            "qwen.codec.mismatch", operation,
+            "encoded buffer codec does not match decoder", 3))
+    }
+    if elementLimit == (0 as UInt64) {
+        return Err<UInt64, ReferenceCodecError>(codecError(
+            "qwen.codec.input", operation,
+            "element limit must be positive", 2))
+    }
+    let length = buffer.words.length() as UInt64
+    if length > elementLimit {
+        return Err<UInt64, ReferenceCodecError>(codecError(
+            "qwen.codec.limit", operation,
+            "encoded buffer exceeds the explicit element limit", 2))
+    }
+    return Ok<UInt64, ReferenceCodecError>(length)
+}
+
+pub fun encodeBFloat16Buffer(values: Array<Float>, elementLimit: UInt64)
+    r: Result<Reference16Buffer, ReferenceCodecError> {
+    let valid = validateEncodeLimit(values, elementLimit, "bf16.encode-buffer")
+    if valid.isErr() {
+        return Err<Reference16Buffer, ReferenceCodecError>(valid.unwrapErr())
+    }
+    let words = Array<UInt16>()
+    var index = 0
+    while index < values.length() {
+        let encoded = encodeBFloat16(values[index])
+        if encoded.isErr() {
+            words.free()
+            return Err<Reference16Buffer, ReferenceCodecError>(
+                encoded.unwrapErr())
+        }
+        words.push(encoded.unwrap().bits)
+        index = index + 1
+    }
+    return Ok<Reference16Buffer, ReferenceCodecError>(Reference16Buffer{
+        codec: "BF16", words: words, closed: false
+    })
+}
+
+pub fun encodeFloat16Buffer(values: Array<Float>, elementLimit: UInt64)
+    r: Result<Reference16Buffer, ReferenceCodecError> {
+    let valid = validateEncodeLimit(values, elementLimit, "f16.encode-buffer")
+    if valid.isErr() {
+        return Err<Reference16Buffer, ReferenceCodecError>(valid.unwrapErr())
+    }
+    let words = Array<UInt16>()
+    var index = 0
+    while index < values.length() {
+        let encoded = encodeFloat16(values[index])
+        if encoded.isErr() {
+            words.free()
+            return Err<Reference16Buffer, ReferenceCodecError>(
+                encoded.unwrapErr())
+        }
+        words.push(encoded.unwrap().bits)
+        index = index + 1
+    }
+    return Ok<Reference16Buffer, ReferenceCodecError>(Reference16Buffer{
+        codec: "F16", words: words, closed: false
+    })
+}
+
+pub fun decodeBFloat16Buffer(buffer: Reference16Buffer,
+    elementLimit: UInt64) r: Result<Array<Float>, ReferenceCodecError> {
+    let valid = validateDecodeBuffer(buffer, "BF16", elementLimit,
+        "bf16.decode-buffer")
+    if valid.isErr() {
+        return Err<Array<Float>, ReferenceCodecError>(valid.unwrapErr())
+    }
+    let values = Array<Float>()
+    var index = 0
+    while index < buffer.words.length() {
+        let decoded = decodeBFloat16(BFloat16{ bits: buffer.words[index] })
+        if decoded.isErr() {
+            values.free()
+            return Err<Array<Float>, ReferenceCodecError>(decoded.unwrapErr())
+        }
+        values.push(decoded.unwrap().value)
+        index = index + 1
+    }
+    return Ok<Array<Float>, ReferenceCodecError>(values)
+}
+
+pub fun decodeFloat16Buffer(buffer: Reference16Buffer,
+    elementLimit: UInt64) r: Result<Array<Float>, ReferenceCodecError> {
+    let valid = validateDecodeBuffer(buffer, "F16", elementLimit,
+        "f16.decode-buffer")
+    if valid.isErr() {
+        return Err<Array<Float>, ReferenceCodecError>(valid.unwrapErr())
+    }
+    let values = Array<Float>()
+    var index = 0
+    while index < buffer.words.length() {
+        let decoded = decodeFloat16(Float16{ bits: buffer.words[index] })
+        if decoded.isErr() {
+            values.free()
+            return Err<Array<Float>, ReferenceCodecError>(decoded.unwrapErr())
+        }
+        values.push(decoded.unwrap().value)
+        index = index + 1
+    }
+    return Ok<Array<Float>, ReferenceCodecError>(values)
+}
