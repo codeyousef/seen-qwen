@@ -1,0 +1,136 @@
+import inference.scalars.{BFloat16, Float16}
+import math.math.{abs}
+import seen_qwen.quant.reference_codec.{decodeBFloat16,
+    decodeBFloat16Buffer, decodeFloat16,
+    decodeFloat16Buffer, encodeBFloat16, encodeBFloat16Buffer,
+    encodeFloat16, encodeFloat16Buffer}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun near(actual: Float, expected: Float, tolerance: Float) r: Bool {
+    return abs(actual - expected) <= tolerance
+}
+
+fun main() r: Int {
+    require(encodeBFloat16(0.0).unwrap().bits == (0x0000 as UInt16) and
+        encodeBFloat16(-0.0).unwrap().bits == (0x8000 as UInt16) and
+        encodeBFloat16(1.0).unwrap().bits == (0x3F80 as UInt16) and
+        encodeBFloat16(-2.5).unwrap().bits == (0xC020 as UInt16),
+        "encode exact BF16 ordinary and signed-zero vectors")
+    require(encodeBFloat16(1.00390625).unwrap().bits == (0x3F80 as UInt16) and
+        encodeBFloat16(1.01171875).unwrap().bits == (0x3F82 as UInt16),
+        "round BF16 halfway values to an even retained bit")
+    let bf16Subnormal = decodeBFloat16(BFloat16{ bits: 0x0001 as UInt16 })
+    require(bf16Subnormal.isOkay(),
+        "decode the smallest finite BF16 subnormal")
+    let bf16SubnormalValue = bf16Subnormal.unwrap().value
+    require(bf16SubnormalValue > 0.0,
+        "decode the smallest finite BF16 subnormal")
+    require(decodeBFloat16(BFloat16{ bits: 0x7F80 as UInt16 }).isErr() and
+        decodeBFloat16(BFloat16{ bits: 0x7FC1 as UInt16 }).isErr(),
+        "reject BF16 infinity and NaN payloads")
+
+    require(encodeFloat16(0.0).unwrap().bits == (0x0000 as UInt16) and
+        encodeFloat16(-0.0).unwrap().bits == (0x8000 as UInt16) and
+        encodeFloat16(1.0).unwrap().bits == (0x3C00 as UInt16) and
+        encodeFloat16(-2.5).unwrap().bits == (0xC100 as UInt16),
+        "encode exact F16 ordinary and signed-zero vectors")
+    require(encodeFloat16(1.00048828125).unwrap().bits ==
+        (0x3C00 as UInt16) and
+        encodeFloat16(1.00146484375).unwrap().bits ==
+        (0x3C02 as UInt16),
+        "round F16 halfway values to an even retained bit")
+    require(encodeFloat16(65504.0).unwrap().bits == (0x7BFF as UInt16) and
+        encodeFloat16(0.00006103515625).unwrap().bits ==
+        (0x0400 as UInt16) and
+        encodeFloat16(0.000000059604644775390625).unwrap().bits ==
+        (0x0001 as UInt16) and
+        encodeFloat16(0.0000000298023223876953125).unwrap().bits ==
+        (0x0000 as UInt16),
+        "encode F16 finite, normal, subnormal, and underflow boundaries")
+    let f16Subnormal = decodeFloat16(Float16{ bits: 0x0001 as UInt16 })
+    require(f16Subnormal.isOkay(),
+        "decode the smallest finite F16 subnormal")
+    let f16SubnormalValue = f16Subnormal.unwrap().value
+    require(near(f16SubnormalValue, 0.000000059604644775390625,
+        0.000000000000001),
+        "decode the smallest finite F16 subnormal")
+    require(encodeFloat16(65520.0).isErr() and
+        encodeFloat16(1.0e300).isErr(),
+        "reject finite-to-infinity and binary32 input overflow")
+    require(decodeFloat16(Float16{ bits: 0x7C00 as UInt16 }).isErr() and
+        decodeFloat16(Float16{ bits: 0x7E01 as UInt16 }).isErr(),
+        "reject F16 infinity and NaN payloads")
+
+    var raw = 0
+    while raw <= 0xFFFF {
+        let raw16 = raw as UInt16
+        if (raw16 & (0x7F80 as UInt16)) != (0x7F80 as UInt16) {
+            let decoded = decodeBFloat16(BFloat16{ bits: raw16 })
+            require(decoded.isOkay() and
+                encodeBFloat16(decoded.unwrap().value).unwrap().bits == raw16,
+                "round-trip every finite BF16 payload exactly")
+        }
+        if (raw16 & (0x7C00 as UInt16)) != (0x7C00 as UInt16) {
+            let decoded = decodeFloat16(Float16{ bits: raw16 })
+            require(decoded.isOkay(),
+                "decode every finite F16 payload")
+            let reencoded = encodeFloat16(decoded.unwrap().value)
+            require(reencoded.isOkay(),
+                "re-encode every finite F16 payload")
+            require(reencoded.unwrap().bits == raw16,
+                "round-trip every finite F16 payload exactly")
+        }
+        raw = raw + 1
+    }
+
+    let values = Array<Float>()
+    values.push(1.0); values.push(-2.5); values.push(0.00006103515625)
+    let bf16Result = encodeBFloat16Buffer(values, 3 as UInt64)
+    let f16Result = encodeFloat16Buffer(values, 3 as UInt64)
+    require(bf16Result.isOkay() and f16Result.isOkay(),
+        "encode bounded owned BF16 and F16 buffers")
+    let bf16 = bf16Result.unwrap()
+    let f16 = f16Result.unwrap()
+    values[0] = 9.0
+    require(bf16.words[0] == (0x3F80 as UInt16) and
+        f16.words[0] == (0x3C00 as UInt16),
+        "encoded buffers own payloads independently of source storage")
+    let decodedBf16 = decodeBFloat16Buffer(bf16, 3 as UInt64)
+    let decodedF16 = decodeFloat16Buffer(f16, 3 as UInt64)
+    require(decodedBf16.isOkay() and decodedF16.isOkay() and
+        decodedBf16.unwrap().length() == 3 and
+        decodedF16.unwrap().length() == 3,
+        "decode complete bounded buffers")
+    require(decodeFloat16Buffer(bf16, 3 as UInt64).isErr() and
+        decodeBFloat16Buffer(f16, 3 as UInt64).isErr(),
+        "reject explicit codec mismatch without fallback")
+    let encodeLimited = encodeBFloat16Buffer(values, 2 as UInt64)
+    let decodeLimited = decodeFloat16Buffer(f16, 2 as UInt64)
+    require(encodeLimited.isErr() and encodeLimited.unwrapErr().code ==
+        "qwen.codec.limit" and
+        encodeFloat16Buffer(values, 0 as UInt64).unwrapErr().code ==
+        "qwen.codec.input" and decodeLimited.isErr() and
+        decodeLimited.unwrapErr().code == "qwen.codec.limit",
+        "enforce caller-supplied positive element limits")
+    f16.words[1] = 0x7E01 as UInt16
+    let corrupted = decodeFloat16Buffer(f16, 3 as UInt64)
+    require(corrupted.isErr() and corrupted.unwrapErr().code ==
+        "qwen.codec.input" and not corrupted.unwrapErr().retryable,
+        "reject hostile non-finite payload before returning decoded storage")
+    decodedBf16.unwrap().free(); decodedF16.unwrap().free()
+    bf16.close(); bf16.close()
+    let closed = decodeBFloat16Buffer(bf16, 3 as UInt64)
+    require(closed.isErr() and closed.unwrapErr().code ==
+        "qwen.codec.closed" and closed.unwrapErr().exitCode == 11 and
+        not closed.unwrapErr().retryable,
+        "make cleanup idempotent and reject use after close")
+    f16.close(); values.free()
+
+    println("PASS: QWN-031A deterministic finite BF16 and F16 reference codecs")
+    return 0
+}
+
+main()
