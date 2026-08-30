@@ -107,6 +107,7 @@ class CiContractTests(unittest.TestCase):
             "qwn_025a_operator_layer_oracle_test",
             "qwn_025b_full_model_oracle_test",
             "qwn_030a_sqw_contract_test",
+            "qwn_031a_reference_codec_test",
             "test_sampling_profiles.py",
             "test_hybrid_mini_contract.py",
             "test_hybrid_mini_assets.py",
