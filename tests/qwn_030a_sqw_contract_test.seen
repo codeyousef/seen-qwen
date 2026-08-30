@@ -1,0 +1,203 @@
+import seen_qwen.formats.sqw.{SQW_CODEC_BF16, SQW_DIRECTORY_ENTRY_BYTES,
+    SQW_ENDIAN_MARKER, SQW_FLAG_WHOLE_FILE_SHA256, SQW_FORMAT_MAJOR,
+    SQW_FORMAT_MINOR, SQW_HEADER_BYTES, SQW_ROLE_EMBEDDING,
+    SQW_DTYPE_BF16, parseSqwDirectoryEntry, parseSqwHeader,
+    parseSqwFooterEntry, parseSqwFooterHeader, sqwCheckedAdd,
+    sqwCheckedAlign, sqwCheckedMultiply, parseSqwUnsignedDecimal}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun zeroBytes(length: Int) r: Array<Int> {
+    let result = Array<Int>()
+    var index = 0
+    while index < length { result.push(0); index = index + 1 }
+    return result
+}
+
+fun writeU16(bytes: Array<Int>, offset: Int, value: UInt16) r: Void {
+    var index = 0
+    while index < 2 {
+        bytes[offset + index] = ((value >> ((index * 8) as UInt16)) &
+            (255 as UInt16)) as Int
+        index = index + 1
+    }
+}
+
+fun writeU32(bytes: Array<Int>, offset: Int, value: UInt32) r: Void {
+    var index = 0
+    while index < 4 {
+        bytes[offset + index] = ((value >> ((index * 8) as UInt32)) &
+            (255 as UInt32)) as Int
+        index = index + 1
+    }
+}
+
+fun writeU64(bytes: Array<Int>, offset: Int, value: UInt64) r: Void {
+    var index = 0
+    while index < 8 {
+        bytes[offset + index] = ((value >> ((index * 8) as UInt64)) &
+            (255 as UInt64)) as Int
+        index = index + 1
+    }
+}
+
+fun writeAscii(bytes: Array<Int>, offset: Int, value: String) r: Void {
+    var index = 0
+    while index < value.length() {
+        bytes[offset + index] = value.byteAt(index); index = index + 1
+    }
+}
+
+fun validHeader() r: Array<Int> {
+    let bytes = zeroBytes(SQW_HEADER_BYTES)
+    writeAscii(bytes, 0, "SQW1")
+    writeU32(bytes, 4, SQW_ENDIAN_MARKER)
+    writeU16(bytes, 8, SQW_FORMAT_MAJOR as UInt16)
+    writeU16(bytes, 10, SQW_FORMAT_MINOR as UInt16)
+    writeU32(bytes, 12, SQW_HEADER_BYTES as UInt32)
+    writeU32(bytes, 16, SQW_FLAG_WHOLE_FILE_SHA256)
+    writeU64(bytes, 24, 256 as UInt64)
+    writeU64(bytes, 32, 64 as UInt64)
+    writeU64(bytes, 40, 320 as UInt64)
+    writeU32(bytes, 48, SQW_DIRECTORY_ENTRY_BYTES as UInt32)
+    writeU32(bytes, 52, 1 as UInt32)
+    writeU64(bytes, 56, 576 as UInt64)
+    writeU64(bytes, 64, 16 as UInt64)
+    writeU64(bytes, 72, 4096 as UInt64)
+    writeU64(bytes, 80, 16 as UInt64)
+    writeU64(bytes, 104, 4160 as UInt64)
+    writeU64(bytes, 112, 320 as UInt64)
+    writeU64(bytes, 120, 4176 as UInt64)
+    bytes[128] = 1; bytes[160] = 2
+    return bytes
+}
+
+fun validDirectoryEntry() r: Array<Int> {
+    let bytes = zeroBytes(SQW_DIRECTORY_ENTRY_BYTES)
+    writeU64(bytes, 0, 0 as UInt64)
+    writeU32(bytes, 8, 16 as UInt32)
+    writeU16(bytes, 12, SQW_ROLE_EMBEDDING)
+    writeU16(bytes, 14, SQW_DTYPE_BF16)
+    writeU16(bytes, 16, SQW_CODEC_BF16)
+    writeU16(bytes, 18, 2 as UInt16)
+    writeU64(bytes, 24, 2 as UInt64)
+    writeU64(bytes, 32, 4 as UInt64)
+    writeU64(bytes, 88, 8 as UInt64)
+    writeU64(bytes, 96, 4096 as UInt64)
+    writeU64(bytes, 104, 16 as UInt64)
+    writeU64(bytes, 160, 4 as UInt64)
+    writeU32(bytes, 168, 0 as UInt32)
+    writeU32(bytes, 172, 64 as UInt32)
+    bytes[176] = 3; bytes[208] = 4
+    return bytes
+}
+
+fun validFooterHeader() r: Array<Int> {
+    let bytes = zeroBytes(64)
+    writeAscii(bytes, 0, "SQWF")
+    writeU16(bytes, 4, 1 as UInt16)
+    writeU16(bytes, 6, 64 as UInt16)
+    writeU16(bytes, 8, 64 as UInt16)
+    writeU16(bytes, 10, 1 as UInt16)
+    writeU32(bytes, 12, 4 as UInt32)
+    bytes[16] = 5
+    return bytes
+}
+
+fun validManifestFooterEntry() r: Array<Int> {
+    let bytes = zeroBytes(64)
+    writeU32(bytes, 0, 1 as UInt32)
+    writeU64(bytes, 8, 256 as UInt64)
+    writeU64(bytes, 16, 64 as UInt64)
+    bytes[24] = 6
+    return bytes
+}
+
+fun main() r: Int {
+    let headerBytes = validHeader()
+    let parsedHeader = parseSqwHeader(headerBytes, 4480 as UInt64)
+    require(parsedHeader.isOkay(), "accept canonical SQW v1.0 header")
+    let header = parsedHeader.unwrap()
+    require(header.tensorCount == (1 as UInt32) and
+        header.payloadOffset == (4096 as UInt64) and
+        header.wholeFileDigestOffset == (4176 as UInt64),
+        "decode fixed-width little-endian header fields")
+
+    let entryBytes = validDirectoryEntry()
+    let parsedEntry = parseSqwDirectoryEntry(entryBytes, header)
+    require(parsedEntry.isOkay(), "accept canonical BF16 directory entry")
+    let entry = parsedEntry.unwrap()
+    require(entry.shape.length() == 2 and
+        entry.shape[0] == (2 as UInt64) and
+        entry.shape[1] == (4 as UInt64) and
+        entry.logicalElements == (8 as UInt64),
+        "decode bounded shape and element geometry")
+    entry.close(); entry.close()
+
+    let footerBytes = validFooterHeader()
+    require(parseSqwFooterHeader(footerBytes, header).isOkay(),
+        "accept canonical footer header")
+    let footerEntryBytes = validManifestFooterEntry()
+    require(parseSqwFooterEntry(footerEntryBytes, 1 as UInt32,
+        header).isOkay(), "accept exact manifest checksum range")
+    footerEntryBytes[4] = 1
+    require(parseSqwFooterEntry(footerEntryBytes, 1 as UInt32,
+        header).isErr(), "reject footer entry flags")
+
+    headerBytes[0] = 0
+    let wrongMagic = parseSqwHeader(headerBytes, 4480 as UInt64)
+    require(wrongMagic.isErr() and wrongMagic.unwrapErr().code == "sqw.magic",
+        "reject wrong magic with stable diagnostic")
+    headerBytes[0] = 83
+    writeU16(headerBytes, 10, 1 as UInt16)
+    require(parseSqwHeader(headerBytes, 4480 as UInt64).isErr(),
+        "reject unsupported minor versions")
+    writeU16(headerBytes, 10, 0 as UInt16)
+    writeU64(headerBytes, 80, 0xFFFFFFFFFFFFFFFF as UInt64)
+    require(parseSqwHeader(headerBytes, 4480 as UInt64).isErr(),
+        "reject overflowing section extents")
+
+    let validAgain = validHeader()
+    let headerAgain = parseSqwHeader(validAgain, 4480 as UInt64).unwrap()
+    entryBytes[18] = 9
+    require(parseSqwDirectoryEntry(entryBytes, headerAgain).isErr(),
+        "reject rank outside one through eight")
+    entryBytes[18] = 2
+    writeU64(entryBytes, 88, 9 as UInt64)
+    require(parseSqwDirectoryEntry(entryBytes, headerAgain).isErr(),
+        "reject shape-product mismatch")
+    writeU64(entryBytes, 88, 8 as UInt64)
+    writeU32(entryBytes, 172, 3 as UInt32)
+    require(parseSqwDirectoryEntry(entryBytes, headerAgain).isErr(),
+        "reject non-power-of-two alignment")
+    writeU32(entryBytes, 172, 64 as UInt32)
+    entryBytes[240] = 1
+    require(parseSqwDirectoryEntry(entryBytes, headerAgain).isErr(),
+        "reject non-zero reserved directory bytes")
+
+    require(sqwCheckedAdd(0x7FFFFFFFFFFFFFFF as UInt64,
+        1 as UInt64).isErr(), "reject UInt64 addition overflow")
+    require(sqwCheckedMultiply(0x7FFFFFFFFFFFFFFF as UInt64,
+        2 as UInt64).isErr(), "reject UInt64 multiplication overflow")
+    require(sqwCheckedAdd(0x8000000000000000 as UInt64,
+        0 as UInt64).isErr(), "reject geometry with the high bit set")
+    require(sqwCheckedAlign(4097 as UInt64, 4096 as UInt64).unwrap() ==
+        (8192 as UInt64), "align with checked UInt64 arithmetic")
+    require(sqwCheckedAlign(1 as UInt64, 3 as UInt64).isErr(),
+        "reject invalid alignment")
+    require(parseSqwUnsignedDecimal("9223372036854775807").unwrap() ==
+        (0x7FFFFFFFFFFFFFFF as UInt64), "parse canonical geometry maximum")
+    require(parseSqwUnsignedDecimal("9223372036854775808").isErr() and
+        parseSqwUnsignedDecimal("01").isErr() and
+        parseSqwUnsignedDecimal("-1").isErr(),
+        "reject overflow and non-canonical unsigned decimal strings")
+
+    headerBytes.free(); entryBytes.free(); validAgain.free()
+    footerBytes.free(); footerEntryBytes.free()
+    println("PASS: QWN-030A frozen SQW v1.0 binary and compatibility contract")
+    return 0
+}
+
+main()
