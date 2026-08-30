@@ -1,0 +1,26 @@
+schema = "seen-qwen-tolerances-v1"
+
+[fp32_cpu]
+atol_max = 0.00001
+rtol_max = 0.00001
+allow_nan_inf = false
+
+[bf16_reference_full_model]
+mean_logit_cosine_min = 0.9995
+top5_set_overlap_min = 0.99
+greedy_compare_steps = 128
+capture_first_divergence = true
+allow_nan_inf = false
+
+[quantized_full_model_default]
+mean_logit_cosine_min = 0.995
+top5_set_overlap_min = 0.98
+quality_regression_max = 0.01
+allow_nan_inf = false
+
+[quantized_full_model_exception]
+mean_logit_cosine_min = 0.99
+top5_set_overlap_min = 0.95
+requires_named_profile = true
+requires_owner_approval = true
+allow_nan_inf = false
