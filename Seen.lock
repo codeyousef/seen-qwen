@@ -1,21 +1,20 @@
 version = 2
-manifest_sha256 = "cbf1bcd5c1d9f4aac7ec1d48d066b88cbec6845cc70d0ce12efea3478340984c"
+manifest_sha256 = "c3270cfb6861c9152bbcbbff5d0494252478a6d80dbc073a9c7fe410c72cffef"
 
 # Audited Seen release toolchain identity (paths are intentionally excluded).
-# release_tag = "v0.18.1"
-# certified_commit = "77f823a58f1084b84d1af6b78a3a48c23499f37a"
-# tag_object = "8375d0c931a406ba5a53ee61d9956f39bc420a9d"
-# release_manifest_sha256 = "2be1be6b7e775b7d6cbcc96ae23f08cdb7f850ed72f44e0cbef0542166bba2fc"
-# release_source_digest = "2c0c5d9f86fb59457aaa991afe0c30b3cccf6b9ac1c5f02339f4b77edbc8c40d"
-# release_checksums_sha256 = "b4eb7b3bc668c526751a3e44e34ef50c0920421f524de1a2c0aa64387a117185"
-# linux_x64_archive_sha256 = "3b25d7e693bba340de502558aaeed55b0ad61ebe2284b14f3c95d7349a81cfdf"
-# packaged_compiler_sha256 = "276320b7495786838708c3d350b849b10d065abc640cca315f632050199d9a30"
-# signed_compiler_component_sha256 = "c6f1947e855a644ce43156448d8f5fd68f21804b85616aa1d13fe34473999b5e"
-# packaged_package_client_sha256 = "eb1b592ff6132bad9027dcf7f13057c886accfa2c03ceeb26047fe7e2c163845"
-# compatibility_manifest_sha256 = "52bbc506c0fbf30b8eb868e3323db3ccafac50f194705ff7f9680b73c794bf9c"
+# release_tag = "v0.19.2"
+# certified_commit = "336baa3ac728bf0887deaf119f405313527409d9"
+# tag_object = "9f3b3514509f98524bc15af1a1bfe1bc13e28b35"
+# release_manifest_sha256 = "5c10cc61d3578becbe270c1fc9480f3d8605822ee9898f1ee3ea630a51a087e3"
+# release_source_digest = "87a388555b5fbdb236d916efa69f87734c9615fa4849914a054cd0b12d92a13b"
+# linux_x64_archive_sha256 = "e830da3fb246fd03e64d203dd7291e0b38390b211bbc794a9793b80fa6b901aa"
+# packaged_compiler_sha256 = "e7dc3fab02292a7c04303e5d1574d7f87bfcbe72b6827364c2f3588192134d95"
+# compiler_build_id = "5c05b97f921349ef603908cabf0531e09c071acb"
+# packaged_package_client_sha256 = "8de71225c7600093df230129fbd71d9ec2f8b5b5a59fe9b4ec59305e977cbc4f"
+# compatibility_manifest_sha256 = "f5fe5bebb9a6d533f65f0726026b6a2e2e7b82d8ef0ed7be9c21899edd9ad313"
 # ci_llvm_image = "docker.io/silkeh/clang@sha256:a370fe4e8ecd284143bbfde1185bef4c1b6b72f45af4823812b9afe84cd1a14d"
 # ci_llvm_version = "21.1.8"
-# compatibility = "seen-compatibility-manifest-v1; compiler=0.18.1; layout=seen-layout-abi-v2; object-cache=seen-object-cache-abi-v3; package-interface=seen-package-interface-v2; package-object-manifest=seen-package-object-manifest-v2; prebuilt-package=seen-prebuilt-package-v2; package-client=0.18.1/SEENPKG1; runtime=runtime-v3; stdlib=0.5.0/manifest-v1; llvm-min=19; target=linux-x86_64; cpu=x86-64; determinism=installed-archive+signed-evidence"
+# compatibility = "seen-compatibility-manifest-v1; compiler=0.19.2; layout=seen-layout-abi-v2; object-cache=seen-object-cache-abi-v3; package-interface=seen-package-interface-v2; package-object-manifest=seen-package-object-manifest-v2; prebuilt-package=seen-prebuilt-package-v2; package-client=0.19.2/SEENPKG1; runtime=runtime-v3; stdlib=0.5.0/manifest-v1; llvm-min=19; target=linux-x86_64; cpu=x86-64; determinism=installed-archive+signed-evidence"
 
 [root]
 name = "seen_qwen"

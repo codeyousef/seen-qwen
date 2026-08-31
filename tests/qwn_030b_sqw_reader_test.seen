@@ -1,0 +1,355 @@
+import seen_qwen.formats.sqw.{SQW_CODEC_BF16, SQW_CODEC_Q8_SYM_G64,
+    SQW_CODEC_Q4_SYM_G64}
+import seen_qwen.formats.sqw_reader.{SQW_COMPONENT_DATA,
+    SQW_COMPONENT_METADATA, SQW_COMPONENT_SCALE, SQW_COMPONENT_ZERO,
+    SqwReader, SqwReaderPolicy, SqwTensorView}
+
+let FIXTURE_ROOT: String = ".seen/ci/output/qwn_030b"
+let VALID_PATH: String = ".seen/ci/output/qwn_030b/valid.sqw"
+let Q4_VALID_PATH: String =
+    ".seen/ci/output/qwn_030b/q4_odd_row_valid.sqw"
+let Q4_NONZERO_TAIL_PATH: String =
+    ".seen/ci/output/qwn_030b/q4_odd_row_nonzero_tail.sqw"
+let EVIDENCE_VALID_PATH: String =
+    ".seen/ci/output/qwn_030b/evidence_valid.sqw"
+let EVIDENCE_CORRUPT_PATH: String =
+    ".seen/ci/output/qwn_030b/evidence_corrupt.sqw"
+
+let MODEL_LOCK_SHA256: String =
+    "824dff67e12a89b9666ef2e6a4bb096a90237bc17a9b035f17d4bc9d1087a3e7"
+let SOURCE_LOCK_SHA256: String =
+    "f88fed54ff10c432246c97e4a3e8a38808031a641e97bb445d0e746e4a04a26e"
+let CONVERSION_POLICY_SHA256: String =
+    "bc16cb12cf28751f6177dbe6f68111910fc93168f8be3d2fdd08235a1af8dd67"
+let CATALOG_SHA256: String =
+    "8b1cae64c27775fb611e9580ad544c02cfd4e85d5538b404f5c0ce9b0a3af019"
+let VALID_WHOLE_SHA256: String =
+    "6d885b6c8839b72b4da1f54cc99e96b9cccc2e7a744b0d9609444cca2939b5fd"
+let Q4_VALID_WHOLE_SHA256: String =
+    "196efce6afd2d5aa0d42b746c42c1fff0cf01d317ba409fb3278d95ecfb17efb"
+let Q4_NONZERO_TAIL_WHOLE_SHA256: String =
+    "5f4019bb2c59b6e83e23f4bdb58fe3ba0fdfea78028b265acdb08f0baedf9ac1"
+let EVIDENCE_VALID_WHOLE_SHA256: String =
+    "31f30e57a9223b47c8615a5a6b37f36a7c4850d5903e0c0f7c92beaeef214472"
+let EVIDENCE_CORRUPT_WHOLE_SHA256: String =
+    "a150df4f62ed8c194dcbf5dd229e047eb83482f2ccfb4c212db46bb2817f92d8"
+
+let FIRST_NAME: String = "lm_head.weight"
+let LAST_NAME: String = "model.language_model.embed_tokens.weight"
+let Q4_NAME: String = "mtp.odd_q4.weight"
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun fixturePath(name: String) r: String {
+    return FIXTURE_ROOT + "/" + name
+}
+
+fun fixturePolicy(wholeSha256: String, maxOpenWindows: Int)
+    r: SqwReaderPolicy {
+    return SqwReaderPolicy.exact(MODEL_LOCK_SHA256, SOURCE_LOCK_SHA256,
+        CONVERSION_POLICY_SHA256, CATALOG_SHA256, wholeSha256,
+        2 as UInt32, maxOpenWindows)
+}
+
+fun q4FixturePolicy(wholeSha256: String, maxOpenWindows: Int)
+    r: SqwReaderPolicy {
+    return SqwReaderPolicy.exact(MODEL_LOCK_SHA256, SOURCE_LOCK_SHA256,
+        CONVERSION_POLICY_SHA256, CATALOG_SHA256, wholeSha256,
+        1 as UInt32, maxOpenWindows)
+}
+
+fun byteAt(view: SqwTensorView, index: Int) r: Int {
+    require(index >= 0 and (index as UInt64) < view.byteLength,
+        "pointer byte index must be inside the mapped tensor view")
+    return (ptr_deref_i8((view.data as Int) + index) as Int) & 255
+}
+
+fun requireOpenError(path: String, wholeSha256: String,
+    expectedCode: String) r: Void {
+    let opened = SqwReader.open(path, fixturePolicy(wholeSha256, 2))
+    require(opened.isErr(), "corrupt SQW fixture must fail closed")
+    require(opened.unwrapErr().code == expectedCode,
+        "corrupt SQW fixture must preserve its first stable sqw.* code")
+}
+
+fun testValidLookupAndOptionalComponents() r: Void {
+    let opened = SqwReader.open(VALID_PATH,
+        fixturePolicy(VALID_WHOLE_SHA256, 4))
+    require(opened.isOkay(), "open deterministic valid SQW fixture")
+    let reader = opened.unwrap()
+
+    require(reader.length() == 2, "retain the exact validated tensor count")
+    require(reader.nameAt(0).unwrap() == FIRST_NAME,
+        "first indexed name follows canonical UTF-8 order")
+    require(reader.nameAt(1).unwrap() == LAST_NAME,
+        "last indexed name follows canonical UTF-8 order")
+
+    let negativeName = reader.nameAt(-1)
+    require(negativeName.isErr() and
+        negativeName.unwrapErr().code == "sqw.bounds",
+        "reject a negative indexed name lookup")
+    let pastName = reader.nameAt(2)
+    require(pastName.isErr() and pastName.unwrapErr().code == "sqw.bounds",
+        "reject a name lookup at the upper bound")
+    let negativeTensor = reader.tensorAt(-1)
+    require(negativeTensor.isErr() and
+        negativeTensor.unwrapErr().code == "sqw.bounds",
+        "reject a negative indexed tensor lookup")
+    let pastTensor = reader.tensorAt(2)
+    require(pastTensor.isErr() and
+        pastTensor.unwrapErr().code == "sqw.bounds",
+        "reject a tensor lookup at the upper bound")
+    let missing = reader.tensor("model.language_model.missing.weight")
+    require(missing.isErr() and missing.unwrapErr().code == "sqw.missing",
+        "reject an absent exact tensor name")
+
+    let firstByIndex = reader.tensorAt(0)
+    require(firstByIndex.isOkay(), "map the first tensor by index")
+    let first = firstByIndex.unwrap()
+    require(first.byteLength == (8 as UInt64) and
+        first.logicalElements == (4 as UInt64) and
+        first.codec == SQW_CODEC_BF16,
+        "first zero-copy view preserves its fixed four-field metadata")
+    require(byteAt(first, 0) == 0 and byteAt(first, 2) == 128 and
+        byteAt(first, 3) == 63 and byteAt(first, 7) == 64,
+        "first view points at the deterministic payload bytes")
+
+    let firstAgainResult = reader.tensor(FIRST_NAME)
+    require(firstAgainResult.isOkay(),
+        "repeat an exact cached lookup deterministically")
+    let firstAgain = firstAgainResult.unwrap()
+    require(firstAgain.byteLength == first.byteLength and
+        firstAgain.logicalElements == first.logicalElements and
+        firstAgain.codec == first.codec and
+        byteAt(firstAgain, 2) == byteAt(first, 2),
+        "repeated lookup returns the same bounded tensor semantics")
+
+    let lastByName = reader.tensor(LAST_NAME)
+    require(lastByName.isOkay(), "map the last tensor by exact name")
+    let last = lastByName.unwrap()
+    require(last.byteLength == (128 as UInt64) and
+        last.logicalElements == (128 as UInt64) and
+        last.codec == SQW_CODEC_Q8_SYM_G64,
+        "last zero-copy view preserves Q8 geometry")
+    require(byteAt(last, 0) == 11 and byteAt(last, 1) == 48 and
+        byteAt(last, 2) == 85 and byteAt(last, 127) == 102,
+        "last view points at the deterministic Q8 payload bytes")
+
+    let firstScale = reader.component(FIRST_NAME, SQW_COMPONENT_SCALE)
+    require(firstScale.isErr() and
+        firstScale.unwrapErr().code == "sqw.component_absent",
+        "plain BF16 tensor has no optional scale component")
+    let lastZero = reader.component(LAST_NAME, SQW_COMPONENT_ZERO)
+    require(lastZero.isErr() and
+        lastZero.unwrapErr().code == "sqw.component_absent",
+        "symmetric Q8 tensor has no zero-point component")
+    let lastMetadata = reader.component(LAST_NAME, SQW_COMPONENT_METADATA)
+    require(lastMetadata.isErr() and
+        lastMetadata.unwrapErr().code == "sqw.component_absent",
+        "fixture tensor has no metadata component")
+    let invalidComponent = reader.componentAt(0, 0)
+    require(invalidComponent.isErr() and
+        invalidComponent.unwrapErr().code == "sqw.component",
+        "reject a component selector outside the frozen contract")
+
+    let lastScaleResult = reader.component(LAST_NAME, SQW_COMPONENT_SCALE)
+    require(lastScaleResult.isOkay(), "map the present Q8 scale component")
+    let lastScale = lastScaleResult.unwrap()
+    require(lastScale.byteLength == (4 as UInt64) and
+        lastScale.logicalElements == (128 as UInt64) and
+        lastScale.codec == SQW_CODEC_Q8_SYM_G64,
+        "scale view preserves the exact four-field view ABI")
+    require(byteAt(lastScale, 0) == 0 and byteAt(lastScale, 1) == 60 and
+        byteAt(lastScale, 2) == 0 and byteAt(lastScale, 3) == 64,
+        "scale view points directly into the converted bundle")
+
+    require(reader.releaseTensor(FIRST_NAME).unwrap(),
+        "release the first data mapping")
+    require(not reader.releaseTensor(FIRST_NAME).unwrap(),
+        "releasing an already released mapping is idempotent")
+    require(reader.releaseTensor(LAST_NAME).unwrap(),
+        "release the last data mapping")
+    require(reader.releaseComponent(LAST_NAME,
+        SQW_COMPONENT_SCALE).unwrap(), "release the optional scale mapping")
+    require(reader.close().unwrap(), "close the valid reader")
+    require(not reader.close().unwrap(), "reader close is idempotent")
+}
+
+fun testBoundedWindowReleaseAndReuse() r: Void {
+    let opened = SqwReader.open(VALID_PATH,
+        fixturePolicy(VALID_WHOLE_SHA256, 1))
+    require(opened.isOkay(), "open reader with one live-window slot")
+    let reader = opened.unwrap()
+
+    let first = reader.tensor(FIRST_NAME)
+    require(first.isOkay() and byteAt(first.unwrap(), 0) == 0,
+        "consume the single bounded tensor window")
+    let firstRepeated = reader.tensor(FIRST_NAME)
+    require(firstRepeated.isOkay() and
+        byteAt(firstRepeated.unwrap(), 3) == 63,
+        "cached repeated lookup does not consume another window")
+    let exhausted = reader.tensor(LAST_NAME)
+    require(exhausted.isErr() and
+        exhausted.unwrapErr().code == "sqw.window_limit",
+        "fail before exceeding the live-window bound")
+
+    require(reader.releaseTensor(FIRST_NAME).unwrap(),
+        "release the live data window")
+    require(not reader.releaseTensor(FIRST_NAME).unwrap(),
+        "repeat release does not change window accounting")
+    let reusedLast = reader.tensor(LAST_NAME)
+    require(reusedLast.isOkay() and byteAt(reusedLast.unwrap(), 0) == 11,
+        "reuse the inactive window slot for another tensor")
+    require(reader.releaseTensor(LAST_NAME).unwrap(),
+        "release the reused data window")
+
+    let scale = reader.componentAt(1, SQW_COMPONENT_SCALE)
+    require(scale.isOkay() and scale.unwrap().byteLength == (4 as UInt64),
+        "reuse the bounded slot for an optional component")
+    let blockedByScale = reader.componentAt(1, SQW_COMPONENT_DATA)
+    require(blockedByScale.isErr() and
+        blockedByScale.unwrapErr().code == "sqw.window_limit",
+        "optional component mappings count against the same hard bound")
+    require(reader.releaseComponent(LAST_NAME,
+        SQW_COMPONENT_SCALE).unwrap(), "release the optional component slot")
+
+    let liveAtClose = reader.tensorAt(0)
+    require(liveAtClose.isOkay() and liveAtClose.unwrap().byteLength ==
+        (8 as UInt64), "leave one borrowed pointer live for reader cleanup")
+    require(reader.close().unwrap(),
+        "reader close invalidates and closes every live window")
+    require(reader.length() == 0, "closed reader exposes no directory length")
+    let closedTensor = reader.tensorAt(0)
+    require(closedTensor.isErr() and
+        closedTensor.unwrapErr().code == "sqw.closed",
+        "closed reader rejects tensor access")
+    let closedName = reader.nameAt(0)
+    require(closedName.isErr() and closedName.unwrapErr().code == "sqw.closed",
+        "closed reader rejects borrowed-name access")
+    require(not reader.releaseTensor(FIRST_NAME).unwrap(),
+        "release after reader close is a deterministic no-op")
+    require(not reader.close().unwrap(),
+        "repeated close after live-view cleanup is idempotent")
+}
+
+fun testQ4OddRowTailPadding() r: Void {
+    let opened = SqwReader.open(Q4_VALID_PATH,
+        q4FixturePolicy(Q4_VALID_WHOLE_SHA256, 2))
+    require(opened.isOkay(),
+        "accept a valid Q4 odd-row tensor with zero high-nibble tail padding")
+    let reader = opened.unwrap()
+    require(reader.length() == 1 and reader.nameAt(0).unwrap() == Q4_NAME,
+        "validate the isolated one-tensor Q4 fixture")
+
+    let dataResult = reader.tensorAt(0)
+    require(dataResult.isOkay(), "map valid odd-row Q4 payload bytes")
+    let data = dataResult.unwrap()
+    require(data.byteLength == (33 as UInt64) and
+        data.logicalElements == (65 as UInt64) and
+        data.codec == SQW_CODEC_Q4_SYM_G64,
+        "Q4 odd row uses ceil(65 / 2) packed data bytes")
+    require(byteAt(data, 32) == 7 and (byteAt(data, 32) & 0xF0) == 0,
+        "unused high nibble in the final Q4 row byte is zero")
+
+    let scaleResult = reader.componentAt(0, SQW_COMPONENT_SCALE)
+    require(scaleResult.isOkay() and
+        scaleResult.unwrap().byteLength == (4 as UInt64),
+        "Q4 row with two groups carries two FP16 scales")
+    require(reader.releaseTensor(Q4_NAME).unwrap(),
+        "release valid Q4 data mapping")
+    require(reader.releaseComponent(Q4_NAME,
+        SQW_COMPONENT_SCALE).unwrap(), "release valid Q4 scale mapping")
+    require(reader.close().unwrap(), "close the valid Q4 reader")
+
+    let corrupt = SqwReader.open(Q4_NONZERO_TAIL_PATH,
+        q4FixturePolicy(Q4_NONZERO_TAIL_WHOLE_SHA256, 2))
+    require(corrupt.isErr() and corrupt.unwrapErr().code == "sqw.q4_tail",
+        "reject a non-zero unused Q4 high nibble with its stable code")
+}
+
+fun testOptionalEvidenceSection() r: Void {
+    let opened = SqwReader.open(EVIDENCE_VALID_PATH,
+        fixturePolicy(EVIDENCE_VALID_WHOLE_SHA256, 2))
+    require(opened.isOkay(),
+        "accept a valid SQW fixture with the optional evidence section")
+    let reader = opened.unwrap()
+    require(reader.length() == 2 and reader.nameAt(0).unwrap() == FIRST_NAME and
+        reader.nameAt(1).unwrap() == LAST_NAME,
+        "evidence-present SQW preserves the exact two-tensor policy")
+    require(reader.close().unwrap(), "close the evidence-present reader")
+
+    requireOpenError(EVIDENCE_CORRUPT_PATH,
+        EVIDENCE_CORRUPT_WHOLE_SHA256, "sqw.section_digest")
+}
+
+fun testPolicyAndCorruptionDiagnostics() r: Void {
+    let badPolicy = SqwReaderPolicy.exact("not-a-digest", SOURCE_LOCK_SHA256,
+        CONVERSION_POLICY_SHA256, CATALOG_SHA256, VALID_WHOLE_SHA256,
+        2 as UInt32, 2)
+    let rejectedPolicy = SqwReader.open(VALID_PATH, badPolicy)
+    require(rejectedPolicy.isErr() and
+        rejectedPolicy.unwrapErr().code == "sqw.reader_policy",
+        "reject a malformed reader policy before mapping")
+    let emptyPath = SqwReader.open("", fixturePolicy(VALID_WHOLE_SHA256, 2))
+    require(emptyPath.isErr() and emptyPath.unwrapErr().code == "sqw.path",
+        "reject an empty SQW path")
+
+    let wrongModel = SqwReaderPolicy.exact(
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        SOURCE_LOCK_SHA256, CONVERSION_POLICY_SHA256, CATALOG_SHA256,
+        VALID_WHOLE_SHA256, 2 as UInt32, 2)
+    let identity = SqwReader.open(VALID_PATH, wrongModel)
+    require(identity.isErr() and identity.unwrapErr().code == "sqw.identity",
+        "reject a model-lock mismatch")
+    let wrongCount = SqwReaderPolicy.exact(MODEL_LOCK_SHA256,
+        SOURCE_LOCK_SHA256, CONVERSION_POLICY_SHA256, CATALOG_SHA256,
+        VALID_WHOLE_SHA256, 1 as UInt32, 2)
+    let tensorCount = SqwReader.open(VALID_PATH, wrongCount)
+    require(tensorCount.isErr() and
+        tensorCount.unwrapErr().code == "sqw.tensor_count",
+        "reject a policy tensor-count mismatch")
+
+    requireOpenError(fixturePath("wrong_magic.sqw"),
+        "7c40742f45c0451af434f65aae95a9e1eb33db2b53516cfd4b42df98448b1705",
+        "sqw.magic")
+    requireOpenError(fixturePath("wrong_whole_digest.sqw"),
+        "6c885b6c8839b72b4da1f54cc99e96b9cccc2e7a744b0d9609444cca2939b5fd",
+        "sqw.file_digest")
+    requireOpenError(fixturePath("wrong_section_digest.sqw"),
+        "fba25039a392a7bec04160d2f1f1b3d0052f6d748677b047898057df0678e2b2",
+        "sqw.section_digest")
+    requireOpenError(fixturePath("wrong_tensor_digest.sqw"),
+        "6d05ebaf55a845b3dc01ea0752c3144721be2e8dba38c534d224f344503ebd36",
+        "sqw.tensor_digest")
+    requireOpenError(fixturePath("nonzero_padding.sqw"),
+        "6833a09b8eb8bee077a855142b7565e4c1a16a070103dd35ffaeca4f722c654f",
+        "sqw.padding")
+    requireOpenError(fixturePath("unsupported_codec.sqw"),
+        "8277b93c792daf53ba92045a50d4997dd08906826cf1d29268cd46da4bcf7514",
+        "sqw.id")
+    requireOpenError(fixturePath("invalid_utf8_name.sqw"),
+        "73758c903a93dc09a5e5fab3bd3e87e08be12247fc13d94a8631336a4fbbd716",
+        "sqw.name_utf8")
+    requireOpenError(fixturePath("noncanonical_manifest.sqw"),
+        "7b86a76ec17bed226a588836c33945f91c0786f11a8bba1ec1c9da81c0ceba82",
+        "sqw.manifest_canonical")
+    requireOpenError(fixturePath("duplicate_manifest_key.sqw"),
+        "4c781a540be4f7186bfca7c92bcfa985f80de3af2f3003d460073657cea55af7",
+        "sqw.manifest_json")
+    requireOpenError(fixturePath("truncated.sqw"), VALID_WHOLE_SHA256,
+        "sqw.truncated")
+}
+
+fun main() r: Int {
+    testValidLookupAndOptionalComponents()
+    testBoundedWindowReleaseAndReuse()
+    testQ4OddRowTailPadding()
+    testOptionalEvidenceSection()
+    testPolicyAndCorruptionDiagnostics()
+    println("PASS: QWN-030B bounded zero-copy SQW reader and cleanup contract")
+    return 0
+}
+
+main()
