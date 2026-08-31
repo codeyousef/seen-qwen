@@ -8,6 +8,7 @@ visibility = "private"
 edition = "2025"
 modules = [
     "src/formats/sqw.seen",
+    "src/formats/sqw_reader.seen",
     "src/model/config.seen",
     "src/model/tensor_catalog.seen",
     "src/model/contract_geometry.seen",

@@ -1,0 +1,1563 @@
+///
+/// Bounded, read-only SQW v1.0 validation and zero-copy tensor windows.
+///
+/// The reader validates the complete file before it becomes observable. Large
+/// sections are hashed through bounded mappings; tensor bytes are never copied
+/// into reader-owned storage. Returned pointers are borrowed from the reader
+/// and become invalid when their cached component window is released or when
+/// the reader closes.
+///
+
+import core.result.{Result}
+import crypto.sha256.{Sha256}
+import json.canonical.{canonicalizeJson}
+import json.parser.{JsonParseResult, destroyJsonParseResult,
+    parseJsonWithStrictLimits}
+import json.strict.{validateJsonUtf8}
+import json.value.{JsonValue}
+import memory.mapped_file.{MappedFile, MappedWindow}
+import seen_qwen.formats.sqw.{SQW_CODEC_BF16, SQW_CODEC_F16,
+    SQW_CODEC_F32, SQW_CODEC_Q8_SYM_G64, SQW_CODEC_Q4_SYM_G64,
+    SQW_DIRECTORY_ENTRY_BYTES, SQW_FOOTER_ENTRY_BYTES,
+    SQW_FOOTER_HEADER_BYTES, SQW_HEADER_BYTES, SQW_MAX_TENSORS,
+    SQW_ROLE_EMBEDDING, SQW_ROLE_LM_HEAD, SQW_ROLE_ATTENTION_Q,
+    SQW_ROLE_ATTENTION_K, SQW_ROLE_ATTENTION_V, SQW_ROLE_ATTENTION_O,
+    SQW_ROLE_GDN_PROJECTION, SQW_ROLE_GDN_STATE_PARAMETER,
+    SQW_ROLE_MLP_GATE, SQW_ROLE_MLP_UP, SQW_ROLE_MLP_DOWN,
+    SQW_ROLE_NORM, SQW_ROLE_BIAS_SCALAR,
+    SQW_DTYPE_BOOL, SQW_DTYPE_I8, SQW_DTYPE_U8, SQW_DTYPE_I16,
+    SQW_DTYPE_U16, SQW_DTYPE_F16, SQW_DTYPE_BF16, SQW_DTYPE_I32,
+    SQW_DTYPE_U32, SQW_DTYPE_F32, SQW_DTYPE_I64, SQW_DTYPE_U64,
+    SQW_SECTION_DIRECTORY,
+    SQW_SECTION_NAMES, SQW_SECTION_PAYLOAD, SQW_SECTION_EVIDENCE,
+    SqwDirectoryEntry, SqwError, SqwHeader, parseSqwDirectoryEntry,
+    parseSqwFooterEntry, parseSqwFooterHeader, parseSqwHeader,
+    parseSqwUnsignedDecimal, sqwCheckedAdd}
+
+extern "C" fun seen_string_clone_owned(value: String) r: String
+extern "C" fun seen_string_release_owned(value: String) r: Void
+extern "C" fun seen_string_view_bytes(data: *const UInt8,
+    length: Int64) r: String
+
+pub let SQW_COMPONENT_DATA: Int = 1
+pub let SQW_COMPONENT_SCALE: Int = 2
+pub let SQW_COMPONENT_ZERO: Int = 3
+pub let SQW_COMPONENT_METADATA: Int = 4
+pub let SQW_QWEN38_TENSOR_COUNT: UInt32 = 866 as UInt32
+pub let SQW_QWEN38_CATALOG_SHA256: String =
+    "5f466d43bae3059e54f0bfe183d0e82c822242f45a834d778414d3e5b5248f1f"
+
+let SQW_READER_MAX_WINDOWS: Int = 64
+let SQW_READER_HASH_CHUNK: UInt64 = 1048576 as UInt64
+
+fun sqwReaderError(code: String, field: String, message: String) r: SqwError {
+    return SqwError{ code: code, field: field, message: message }
+}
+
+fun sqwCanonicalDigest(text: String) r: Bool {
+    if text.length() != 64 { return false }
+    var index = 0
+    while index < 64 {
+        let byte = text.byteAt(index)
+        if not ((byte >= 48 and byte <= 57) or
+                (byte >= 97 and byte <= 102)) { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun sqwHexDigit(value: Int) r: Int {
+    if value < 10 { return 48 + value }
+    return 87 + value
+}
+
+fun sqwHexFromArray(bytes: Array<Int>, offset: Int) r: String {
+    let encoded = Array<UInt8>()
+    var index = 0
+    while index < 32 {
+        let value = bytes[offset + index] & 255
+        encoded.push(sqwHexDigit((value >> 4) & 15) as UInt8)
+        encoded.push(sqwHexDigit(value & 15) as UInt8)
+        index = index + 1
+    }
+    let view = seen_string_view_bytes(encoded.data(), 64 as Int64)
+    let result = seen_string_clone_owned(view)
+    encoded.free()
+    return result
+}
+
+fun sqwDiscardSha256(state: Sha256) r: Void {
+    let discarded = state.finalizeHex()
+    if discarded.isOkay() {
+        seen_string_release_owned(discarded.unwrap())
+    }
+}
+
+fun sqwReleaseSectionDigests(namesSha256: String, payloadSha256: String,
+    evidenceSha256: String, hasEvidence: Bool) r: Void {
+    seen_string_release_owned(namesSha256)
+    seen_string_release_owned(payloadSha256)
+    if hasEvidence { seen_string_release_owned(evidenceSha256) }
+}
+
+// Preserve the release-mode parser frame barrier from parseStrictJson while
+// retaining the raw failed result owner needed for FEL-1561 cleanup.
+@noinline
+fun sqwParseManifestJson(input: String, maxInputBytes: Int,
+    maxValues: Int) r: JsonParseResult {
+    return parseJsonWithStrictLimits(input, maxInputBytes, 32,
+        maxValues, 2048)
+}
+
+// Seen v0.19.2 keeps mapped-resource handles live when close fails but cannot
+// transfer that cleanup owner through SqwError. Temporary validation resources
+// therefore fail-stop on this runtime anomaly; reader-owned resources remain
+// retryable through SqwReader.close below.
+fun sqwCloseTemporaryWindow(borrow window: MappedWindow) r: Void {
+    let closed = window.close()
+    if closed.isErr() {
+        abort("sqw.close: temporary mapped-window cleanup failed")
+    }
+}
+
+fun sqwCloseRejectedFile(borrow file: MappedFile) r: Void {
+    let closed = file.close()
+    if closed.isErr() {
+        abort("sqw.close: rejected mapped-file cleanup failed")
+    }
+}
+
+fun sqwPointerBytes(data: *const UInt8, length: Int) r: Array<Int> {
+    let bytes = Array<Int>()
+    var index = 0
+    while index < length {
+        bytes.push((ptr_deref_i8((data as Int) + index) as Int) & 255)
+        index = index + 1
+    }
+    return bytes
+}
+
+fun sqwMapBytes(borrow file: MappedFile, offset: UInt64, length: UInt64,
+    limit: UInt64, field: String) r: Result<Array<Int>, SqwError> {
+    if length == (0 as UInt64) or length > limit or
+        length > (0x7FFFFFFF as UInt64) {
+        return Err<Array<Int>, SqwError>(sqwReaderError("sqw.reader_limit",
+            field, "bounded mapped copy length is invalid"))
+    }
+    let mapped = file.window(offset, length)
+    if mapped.isErr() {
+        return Err<Array<Int>, SqwError>(sqwReaderError("sqw.map", field,
+            "failed to map a validated SQW range"))
+    }
+    let window = mapped.unwrap()
+    let bytes = sqwPointerBytes(window.data, length as Int)
+    sqwCloseTemporaryWindow(window)
+    return Ok<Array<Int>, SqwError>(bytes)
+}
+
+fun sqwHashMappedRange(borrow file: MappedFile, state: Sha256, offset: UInt64,
+    length: UInt64, zeroOffset: UInt64 = 0 as UInt64,
+    zeroLength: UInt64 = 0 as UInt64) r: Result<Bool, SqwError> {
+    var cursor: UInt64 = 0 as UInt64
+    while cursor < length {
+        var chunkLength = length - cursor
+        if chunkLength > SQW_READER_HASH_CHUNK {
+            chunkLength = SQW_READER_HASH_CHUNK
+        }
+        let absoluteResult = sqwCheckedAdd(offset, cursor)
+        if absoluteResult.isErr() {
+            sqwDiscardSha256(state)
+            return Err<Bool, SqwError>(absoluteResult.unwrapErr())
+        }
+        let absolute = absoluteResult.unwrap()
+        let mapped = file.window(absolute, chunkLength)
+        if mapped.isErr() {
+            sqwDiscardSha256(state)
+            return Err<Bool, SqwError>(sqwReaderError("sqw.map", "digest",
+                "failed to map a bounded digest chunk"))
+        }
+        let window = mapped.unwrap()
+        let bytes = Array<Int>()
+        var index = 0
+        while index < (chunkLength as Int) {
+            let position = absolute + (index as UInt64)
+            var value = (ptr_deref_i8((window.data as Int) + index) as Int) & 255
+            if zeroLength > (0 as UInt64) and position >= zeroOffset and
+                position - zeroOffset < zeroLength { value = 0 }
+            bytes.push(value)
+            index = index + 1
+        }
+        let updated = state.updateBytes(bytes)
+        bytes.free()
+        sqwCloseTemporaryWindow(window)
+        if updated.isErr() {
+            sqwDiscardSha256(state)
+            return Err<Bool, SqwError>(sqwReaderError("sqw.digest", "digest",
+                "failed while streaming a bounded SQW digest"))
+        }
+        cursor = cursor + chunkLength
+    }
+    return Ok<Bool, SqwError>(true)
+}
+
+fun sqwHashRange(borrow file: MappedFile, offset: UInt64, length: UInt64)
+    r: Result<String, SqwError> {
+    let state = Sha256.new()
+    let updated = sqwHashMappedRange(file, state, offset, length)
+    if updated.isErr() {
+        return Err<String, SqwError>(updated.unwrapErr())
+    }
+    let digest = state.finalizeHex()
+    if digest.isErr() {
+        return Err<String, SqwError>(sqwReaderError("sqw.digest", "digest",
+            "failed to finalize a SQW section digest"))
+    }
+    return Ok<String, SqwError>(digest.unwrap())
+}
+
+fun sqwWholeFileHash(borrow file: MappedFile, header: SqwHeader)
+    r: Result<String, SqwError> {
+    let state = Sha256.new()
+    let updated = sqwHashMappedRange(file, state, 0 as UInt64, file.length,
+        header.wholeFileDigestOffset, 32 as UInt64)
+    if updated.isErr() {
+        return Err<String, SqwError>(updated.unwrapErr())
+    }
+    let digest = state.finalizeHex()
+    if digest.isErr() {
+        return Err<String, SqwError>(sqwReaderError("sqw.file_digest",
+            "file", "failed to finalize the whole-file digest"))
+    }
+    return Ok<String, SqwError>(digest.unwrap())
+}
+
+fun sqwRangeIsZero(borrow file: MappedFile, offset: UInt64, length: UInt64,
+    field: String) r: Result<Bool, SqwError> {
+    var cursor: UInt64 = 0 as UInt64
+    while cursor < length {
+        var chunkLength = length - cursor
+        if chunkLength > SQW_READER_HASH_CHUNK {
+            chunkLength = SQW_READER_HASH_CHUNK
+        }
+        let mapped = file.window(offset + cursor, chunkLength)
+        if mapped.isErr() {
+            return Err<Bool, SqwError>(sqwReaderError("sqw.map", field,
+                "failed to map a canonical padding range"))
+        }
+        let window = mapped.unwrap()
+        var index = 0
+        var zero = true
+        while index < (chunkLength as Int) {
+            if ptr_deref_i8((window.data as Int) + index) != (0 as Int8) {
+                zero = false
+            }
+            index = index + 1
+        }
+        sqwCloseTemporaryWindow(window)
+        if not zero {
+            return Err<Bool, SqwError>(sqwReaderError("sqw.padding", field,
+                "canonical SQW gaps and alignment padding must be zero"))
+        }
+        cursor = cursor + chunkLength
+    }
+    return Ok<Bool, SqwError>(true)
+}
+
+fun sqwValidateZeroGap(borrow file: MappedFile, start: UInt64, end: UInt64,
+    field: String) r: Result<Bool, SqwError> {
+    if end < start {
+        return Err<Bool, SqwError>(sqwReaderError("sqw.section_order", field,
+            "SQW ranges are not canonically ordered"))
+    }
+    if end == start { return Ok<Bool, SqwError>(true) }
+    return sqwRangeIsZero(file, start, end - start, field)
+}
+
+fun sqwJsonField(object: JsonValue, field: String) r: JsonValue? {
+    if not object.isObject() { return null }
+    let count = object.length()
+    var index = 0
+    while index < count {
+        let key = object.keyAt(index)
+        let value = object.valueAt(index)
+        if key.isNone() or value.isNone() { return null }
+        if key.unwrap() == field { return value.unwrap() }
+        index = index + 1
+    }
+    return null
+}
+
+fun sqwJsonExactFields(object: JsonValue, fields: Array<String>) r: Bool {
+    if not object.isObject() or object.length() != fields.length() {
+        return false
+    }
+    var index = 0
+    while index < object.length() {
+        let key = object.keyAt(index)
+        let value = object.valueAt(index)
+        if key.isNone() or value.isNone() { return false }
+        var known = false
+        var fieldIndex = 0
+        while fieldIndex < fields.length() {
+            if key.unwrap() == fields[fieldIndex] { known = true }
+            fieldIndex = fieldIndex + 1
+        }
+        if not known { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun sqwJsonStringEquals(object: JsonValue, field: String,
+    expected: String) r: Bool {
+    let value = sqwJsonField(object, field)
+    return not value.isNone() and value.unwrap().isString() and
+        value.unwrap().getString() == expected
+}
+
+fun sqwJsonIntEquals(object: JsonValue, field: String, expected: Int) r: Bool {
+    let value = sqwJsonField(object, field)
+    return not value.isNone() and value.unwrap().isNumber() and
+        value.unwrap().getNumber() == expected.toFloat()
+}
+
+fun sqwJsonU64(object: JsonValue, field: String)
+    r: Result<UInt64, SqwError> {
+    let value = sqwJsonField(object, field)
+    if value.isNone() or not value.unwrap().isString() {
+        return Err<UInt64, SqwError>(sqwReaderError("sqw.manifest_type",
+            field, "manifest geometry must be a canonical decimal string"))
+    }
+    let parsed = parseSqwUnsignedDecimal(value.unwrap().getString())
+    if parsed.isErr() {
+        return Err<UInt64, SqwError>(parsed.unwrapErr())
+    }
+    return Ok<UInt64, SqwError>(parsed.unwrap())
+}
+
+fun sqwJsonRangeMatches(value: JsonValue, offset: UInt64,
+    length: UInt64) r: Bool {
+    let fields = Array<String>()
+    fields.push("offset"); fields.push("length")
+    let exact = sqwJsonExactFields(value, fields)
+    fields.free()
+    if not exact { return false }
+    let parsedOffset = sqwJsonU64(value, "offset")
+    let parsedLength = sqwJsonU64(value, "length")
+    return parsedOffset.isOkay() and parsedLength.isOkay() and
+        parsedOffset.unwrap() == offset and parsedLength.unwrap() == length
+}
+
+fun sqwRoleName(value: UInt16) r: String {
+    if value == SQW_ROLE_EMBEDDING { return "embedding" }
+    if value == SQW_ROLE_LM_HEAD { return "lm_head" }
+    if value == SQW_ROLE_ATTENTION_Q { return "attention_q" }
+    if value == SQW_ROLE_ATTENTION_K { return "attention_k" }
+    if value == SQW_ROLE_ATTENTION_V { return "attention_v" }
+    if value == SQW_ROLE_ATTENTION_O { return "attention_o" }
+    if value == SQW_ROLE_GDN_PROJECTION { return "gdn_projection" }
+    if value == SQW_ROLE_GDN_STATE_PARAMETER { return "gdn_state_parameter" }
+    if value == SQW_ROLE_MLP_GATE { return "mlp_gate" }
+    if value == SQW_ROLE_MLP_UP { return "mlp_up" }
+    if value == SQW_ROLE_MLP_DOWN { return "mlp_down" }
+    if value == SQW_ROLE_NORM { return "norm" }
+    if value == SQW_ROLE_BIAS_SCALAR { return "bias_scalar" }
+    return "mtp"
+}
+
+fun sqwDtypeName(value: UInt16) r: String {
+    if value == SQW_DTYPE_BOOL { return "BOOL" }
+    if value == SQW_DTYPE_I8 { return "I8" }
+    if value == SQW_DTYPE_U8 { return "U8" }
+    if value == SQW_DTYPE_I16 { return "I16" }
+    if value == SQW_DTYPE_U16 { return "U16" }
+    if value == SQW_DTYPE_F16 { return "F16" }
+    if value == SQW_DTYPE_BF16 { return "BF16" }
+    if value == SQW_DTYPE_I32 { return "I32" }
+    if value == SQW_DTYPE_U32 { return "U32" }
+    if value == SQW_DTYPE_F32 { return "F32" }
+    if value == SQW_DTYPE_I64 { return "I64" }
+    if value == SQW_DTYPE_U64 { return "U64" }
+    return "F64"
+}
+
+fun sqwCodecName(value: UInt16) r: String {
+    if value == SQW_CODEC_BF16 { return "BF16" }
+    if value == SQW_CODEC_F16 { return "F16" }
+    if value == SQW_CODEC_F32 { return "F32" }
+    if value == SQW_CODEC_Q8_SYM_G64 { return "Q8_SYM_G64" }
+    return "Q4_SYM_G64"
+}
+
+fun sqwNameBytesCompare(left: String, right: String) r: Int {
+    var index = 0
+    var count = left.length()
+    if right.length() < count { count = right.length() }
+    while index < count {
+        let leftByte = left.byteAt(index)
+        let rightByte = right.byteAt(index)
+        if leftByte < rightByte { return -1 }
+        if leftByte > rightByte { return 1 }
+        index = index + 1
+    }
+    if left.length() < right.length() { return -1 }
+    if left.length() > right.length() { return 1 }
+    return 0
+}
+
+fun sqwNameAllowed(name: String) r: Bool {
+    if name.length() == 0 or name.length() > 1024 { return false }
+    var index = 0
+    while index < name.length() {
+        if name.byteAt(index) == 0 { return false }
+        index = index + 1
+    }
+    if name == "lm_head.weight" { return true }
+    if name.startsWith("model.language_model.") and
+        name.length() > "model.language_model.".length() { return true }
+    return name.startsWith("mtp.") and name.length() > 4
+}
+
+pub class SqwReaderPolicy {
+    var expectedModelLockSha256: String
+    var expectedSourceLockSha256: String
+    var expectedConversionPolicySha256: String
+    var expectedCatalogSha256: String
+    var expectedWholeFileSha256: String
+    var expectedTensorCount: UInt32
+    var maxOpenWindows: Int
+
+    static fun exact(modelLockSha256: String, sourceLockSha256: String,
+        conversionPolicySha256: String, catalogSha256: String,
+        wholeFileSha256: String, tensorCount: UInt32,
+        maxOpenWindows: Int = 16) r: SqwReaderPolicy {
+        return SqwReaderPolicy{
+            expectedModelLockSha256: modelLockSha256,
+            expectedSourceLockSha256: sourceLockSha256,
+            expectedConversionPolicySha256: conversionPolicySha256,
+            expectedCatalogSha256: catalogSha256,
+            expectedWholeFileSha256: wholeFileSha256,
+            expectedTensorCount: tensorCount,
+            maxOpenWindows: maxOpenWindows,
+        }
+    }
+
+    static fun qwen38(modelLockSha256: String, sourceLockSha256: String,
+        conversionPolicySha256: String, wholeFileSha256: String,
+        maxOpenWindows: Int = 16) r: SqwReaderPolicy {
+        return SqwReaderPolicy.exact(modelLockSha256, sourceLockSha256,
+            conversionPolicySha256, SQW_QWEN38_CATALOG_SHA256,
+            wholeFileSha256, SQW_QWEN38_TENSOR_COUNT, maxOpenWindows)
+    }
+}
+
+@repr(C)
+@trivially_copyable
+pub class SqwTensorView {
+    var data: *const UInt8
+    var byteLength: UInt64
+    var logicalElements: UInt64
+    var codec: UInt16
+}
+
+class SqwTensorRecord {
+    var name: String
+    var entry: SqwDirectoryEntry
+}
+
+@move
+class SqwCachedWindow {
+    var key: Int
+    var window: MappedWindow
+    var active: Bool
+}
+
+class SqwValidatedMetadata {
+    var header: SqwHeader
+    var records: Array<SqwTensorRecord>
+}
+
+fun sqwDestroyRecords(records: Array<SqwTensorRecord>) r: Void {
+    var index = 0
+    while index < records.length() {
+        seen_string_release_owned(records[index].name)
+        records[index].entry.close()
+        index = index + 1
+    }
+    records.free()
+}
+
+fun sqwPolicyValid(policy: SqwReaderPolicy) r: Bool {
+    return sqwCanonicalDigest(policy.expectedModelLockSha256) and
+        sqwCanonicalDigest(policy.expectedSourceLockSha256) and
+        sqwCanonicalDigest(policy.expectedConversionPolicySha256) and
+        sqwCanonicalDigest(policy.expectedCatalogSha256) and
+        sqwCanonicalDigest(policy.expectedWholeFileSha256) and
+        policy.expectedTensorCount > (0 as UInt32) and
+        policy.expectedTensorCount <= SQW_MAX_TENSORS and
+        policy.maxOpenWindows > 0 and
+        policy.maxOpenWindows <= SQW_READER_MAX_WINDOWS
+}
+
+fun sqwValidateManifestRoot(root: JsonValue, policy: SqwReaderPolicy,
+    header: SqwHeader, directorySha256: String)
+    r: Result<JsonValue, SqwError> {
+    let fields = Array<String>()
+    fields.push("schema"); fields.push("format_version")
+    fields.push("model_lock_sha256"); fields.push("source_lock_sha256")
+    fields.push("conversion_policy_sha256"); fields.push("tensor_contract")
+    fields.push("catalog_sha256"); fields.push("directory_sha256")
+    fields.push("payload_order"); fields.push("compatibility")
+    fields.push("tensors")
+    let exact = sqwJsonExactFields(root, fields)
+    fields.free()
+    if not exact {
+        return Err<JsonValue, SqwError>(sqwReaderError(
+            "sqw.manifest_schema", "manifest",
+            "manifest root fields do not match the closed v1 schema"))
+    }
+    if not sqwJsonStringEquals(root, "schema",
+            "seen-qwen-sqw-manifest-v1") or
+        not sqwJsonStringEquals(root, "format_version", "1.0") or
+        not sqwJsonStringEquals(root, "tensor_contract",
+            "seen-qwen38-text-v1") or
+        not sqwJsonStringEquals(root, "payload_order",
+            "canonical_utf8_tensor_name") or
+        not sqwJsonStringEquals(root, "model_lock_sha256",
+            policy.expectedModelLockSha256) or
+        not sqwJsonStringEquals(root, "source_lock_sha256",
+            policy.expectedSourceLockSha256) or
+        not sqwJsonStringEquals(root, "conversion_policy_sha256",
+            policy.expectedConversionPolicySha256) or
+        not sqwJsonStringEquals(root, "catalog_sha256",
+            policy.expectedCatalogSha256) or
+        not sqwJsonStringEquals(root, "directory_sha256", directorySha256) {
+        return Err<JsonValue, SqwError>(sqwReaderError(
+            "sqw.compatibility", "manifest",
+            "manifest identity, format, catalog, or directory digest mismatches policy"))
+    }
+    let compatibility = sqwJsonField(root, "compatibility")
+    if compatibility.isNone() or not compatibility.unwrap().isObject() {
+        return Err<JsonValue, SqwError>(sqwReaderError(
+            "sqw.compatibility", "compatibility",
+            "manifest compatibility object is required"))
+    }
+    let compatibilityFields = Array<String>()
+    compatibilityFields.push("required_features")
+    compatibilityFields.push("reader_major")
+    compatibilityFields.push("reader_minor")
+    let compatibilityExact = sqwJsonExactFields(compatibility.unwrap(),
+        compatibilityFields)
+    compatibilityFields.free()
+    let requiredFeatures = sqwJsonField(compatibility.unwrap(),
+        "required_features")
+    if not compatibilityExact or requiredFeatures.isNone() or
+        not requiredFeatures.unwrap().isArray() or
+        requiredFeatures.unwrap().length() != 0 or
+        not sqwJsonIntEquals(compatibility.unwrap(), "reader_major", 1) or
+        not sqwJsonIntEquals(compatibility.unwrap(), "reader_minor", 0) {
+        return Err<JsonValue, SqwError>(sqwReaderError(
+            "sqw.compatibility", "compatibility",
+            "reader accepts exactly v1.0 with no required features"))
+    }
+    let tensors = sqwJsonField(root, "tensors")
+    if tensors.isNone() or not tensors.unwrap().isArray() or
+        tensors.unwrap().length() != (header.tensorCount as Int) {
+        return Err<JsonValue, SqwError>(sqwReaderError(
+            "sqw.manifest_tensor_count", "tensors",
+            "manifest tensor count disagrees with the fixed header"))
+    }
+    return Ok<JsonValue, SqwError>(tensors.unwrap())
+}
+
+fun sqwManifestTensorMatches(value: JsonValue, name: String,
+    entry: SqwDirectoryEntry, sourceSha256: String,
+    convertedSha256: String) r: Result<Bool, SqwError> {
+    let fields = Array<String>()
+    fields.push("name"); fields.push("semantic_role")
+    fields.push("source_dtype"); fields.push("runtime_codec")
+    fields.push("rank"); fields.push("shape")
+    fields.push("logical_elements"); fields.push("data")
+    fields.push("scale"); fields.push("zero"); fields.push("metadata")
+    fields.push("row_elements"); fields.push("group_elements")
+    fields.push("required_alignment"); fields.push("source_sha256")
+    fields.push("converted_sha256")
+    let exact = sqwJsonExactFields(value, fields)
+    fields.free()
+    if not exact or
+        not sqwJsonStringEquals(value, "name", name) or
+        not sqwJsonStringEquals(value, "semantic_role",
+            sqwRoleName(entry.semanticRole)) or
+        not sqwJsonStringEquals(value, "source_dtype",
+            sqwDtypeName(entry.sourceDtype)) or
+        not sqwJsonStringEquals(value, "runtime_codec",
+            sqwCodecName(entry.runtimeCodec)) or
+        not sqwJsonIntEquals(value, "rank", entry.rank as Int) or
+        not sqwJsonIntEquals(value, "group_elements",
+            entry.groupElements as Int) or
+        not sqwJsonIntEquals(value, "required_alignment",
+            entry.requiredAlignment as Int) or
+        not sqwJsonStringEquals(value, "source_sha256", sourceSha256) or
+        not sqwJsonStringEquals(value, "converted_sha256", convertedSha256) {
+        return Err<Bool, SqwError>(sqwReaderError(
+            "sqw.manifest_tensor", "tensor",
+            "manifest tensor scalar fields disagree with the directory"))
+    }
+    let logical = sqwJsonU64(value, "logical_elements")
+    let rowElements = sqwJsonU64(value, "row_elements")
+    if logical.isErr() or rowElements.isErr() or
+        logical.unwrap() != entry.logicalElements or
+        rowElements.unwrap() != entry.rowElements {
+        return Err<Bool, SqwError>(sqwReaderError(
+            "sqw.manifest_tensor", "tensor",
+            "manifest tensor geometry disagrees with the directory"))
+    }
+    let shape = sqwJsonField(value, "shape")
+    if shape.isNone() or not shape.unwrap().isArray() or
+        shape.unwrap().length() != (entry.rank as Int) {
+        return Err<Bool, SqwError>(sqwReaderError(
+            "sqw.manifest_tensor", "tensor",
+            "manifest tensor shape rank disagrees with the directory"))
+    }
+    var dimension = 0
+    while dimension < shape.unwrap().length() {
+        let item = shape.unwrap().getAt(dimension)
+        if item.isNone() or not item.unwrap().isString() {
+            return Err<Bool, SqwError>(sqwReaderError(
+                "sqw.manifest_tensor", "tensor",
+                "manifest shape dimensions must be canonical strings"))
+        }
+        let parsed = parseSqwUnsignedDecimal(item.unwrap().getString())
+        if parsed.isErr() or parsed.unwrap() != entry.shape[dimension] {
+            return Err<Bool, SqwError>(sqwReaderError(
+                "sqw.manifest_tensor", "tensor",
+                "manifest shape differs from the directory"))
+        }
+        dimension = dimension + 1
+    }
+    let data = sqwJsonField(value, "data")
+    let scale = sqwJsonField(value, "scale")
+    let zero = sqwJsonField(value, "zero")
+    let metadata = sqwJsonField(value, "metadata")
+    if data.isNone() or scale.isNone() or zero.isNone() or metadata.isNone() or
+        not sqwJsonRangeMatches(data.unwrap(), entry.dataOffset,
+            entry.dataLength) or
+        not sqwJsonRangeMatches(scale.unwrap(), entry.scaleOffset,
+            entry.scaleLength) or
+        not sqwJsonRangeMatches(zero.unwrap(), entry.zeroOffset,
+            entry.zeroLength) or
+        not sqwJsonRangeMatches(metadata.unwrap(), entry.metadataOffset,
+            entry.metadataLength) {
+        return Err<Bool, SqwError>(sqwReaderError(
+            "sqw.manifest_tensor", "tensor",
+            "manifest component ranges disagree with the directory"))
+    }
+    return Ok<Bool, SqwError>(true)
+}
+
+fun sqwComponentAligned(offset: UInt64, length: UInt64,
+    alignment: UInt32) r: Bool {
+    if length == (0 as UInt64) { return offset == (0 as UInt64) }
+    return (offset & ((alignment as UInt64) - (1 as UInt64))) ==
+        (0 as UInt64)
+}
+
+fun sqwEntryEnd(entry: SqwDirectoryEntry) r: UInt64 {
+    if entry.metadataLength > (0 as UInt64) {
+        return entry.metadataOffset + entry.metadataLength
+    }
+    if entry.zeroLength > (0 as UInt64) {
+        return entry.zeroOffset + entry.zeroLength
+    }
+    if entry.scaleLength > (0 as UInt64) {
+        return entry.scaleOffset + entry.scaleLength
+    }
+    return entry.dataOffset + entry.dataLength
+}
+
+fun sqwValidateComponentPadding(borrow file: MappedFile,
+    entry: SqwDirectoryEntry) r: Result<Bool, SqwError> {
+    var cursor = entry.dataOffset + entry.dataLength
+    if entry.scaleLength > (0 as UInt64) {
+        let gap = sqwValidateZeroGap(file, cursor, entry.scaleOffset, "tensor")
+        if gap.isErr() { return gap }
+        cursor = entry.scaleOffset + entry.scaleLength
+    }
+    if entry.zeroLength > (0 as UInt64) {
+        let gap = sqwValidateZeroGap(file, cursor, entry.zeroOffset, "tensor")
+        if gap.isErr() { return gap }
+        cursor = entry.zeroOffset + entry.zeroLength
+    }
+    if entry.metadataLength > (0 as UInt64) {
+        let gap = sqwValidateZeroGap(file, cursor, entry.metadataOffset,
+            "tensor")
+        if gap.isErr() { return gap }
+    }
+    return Ok<Bool, SqwError>(true)
+}
+
+fun sqwTensorBundleHash(borrow file: MappedFile, entry: SqwDirectoryEntry)
+    r: Result<String, SqwError> {
+    let state = Sha256.new()
+    let data = sqwHashMappedRange(file, state, entry.dataOffset,
+        entry.dataLength)
+    if data.isErr() { return Err<String, SqwError>(data.unwrapErr()) }
+    if entry.scaleLength > (0 as UInt64) {
+        let scale = sqwHashMappedRange(file, state, entry.scaleOffset,
+            entry.scaleLength)
+        if scale.isErr() { return Err<String, SqwError>(scale.unwrapErr()) }
+    }
+    if entry.zeroLength > (0 as UInt64) {
+        let zero = sqwHashMappedRange(file, state, entry.zeroOffset,
+            entry.zeroLength)
+        if zero.isErr() { return Err<String, SqwError>(zero.unwrapErr()) }
+    }
+    if entry.metadataLength > (0 as UInt64) {
+        let metadata = sqwHashMappedRange(file, state, entry.metadataOffset,
+            entry.metadataLength)
+        if metadata.isErr() {
+            return Err<String, SqwError>(metadata.unwrapErr())
+        }
+    }
+    let digest = state.finalizeHex()
+    if digest.isErr() {
+        return Err<String, SqwError>(sqwReaderError("sqw.tensor_digest",
+            "tensor", "failed to finalize converted tensor digest"))
+    }
+    return Ok<String, SqwError>(digest.unwrap())
+}
+
+fun sqwValidateQ4Tail(borrow file: MappedFile, entry: SqwDirectoryEntry)
+    r: Result<Bool, SqwError> {
+    if entry.runtimeCodec != SQW_CODEC_Q4_SYM_G64 or
+        entry.rowElements % (2 as UInt64) == (0 as UInt64) {
+        return Ok<Bool, SqwError>(true)
+    }
+    let bytesPerRow = (entry.rowElements + (1 as UInt64)) / (2 as UInt64)
+    var cursor: UInt64 = 0 as UInt64
+    while cursor < entry.dataLength {
+        var chunkLength = entry.dataLength - cursor
+        if chunkLength > SQW_READER_HASH_CHUNK {
+            chunkLength = SQW_READER_HASH_CHUNK
+        }
+        let mapped = file.window(entry.dataOffset + cursor, chunkLength)
+        if mapped.isErr() {
+            return Err<Bool, SqwError>(sqwReaderError("sqw.map", "tensor",
+                "failed to map Q4 tail validation bytes"))
+        }
+        let window = mapped.unwrap()
+        var index = 0
+        var valid = true
+        while index < (chunkLength as Int) {
+            let relative = cursor + (index as UInt64)
+            if relative % bytesPerRow == bytesPerRow - (1 as UInt64) and
+                (((ptr_deref_i8((window.data as Int) + index) as Int) & 255) &
+                    0xF0) != 0 {
+                valid = false
+            }
+            index = index + 1
+        }
+        sqwCloseTemporaryWindow(window)
+        if not valid {
+            return Err<Bool, SqwError>(sqwReaderError("sqw.q4_tail", "tensor",
+                "Q4 odd-row high nibble padding must be zero"))
+        }
+        cursor = cursor + chunkLength
+    }
+    return Ok<Bool, SqwError>(true)
+}
+
+fun sqwPointerRangeZero(data: *const UInt8, offset: Int,
+    length: Int) r: Bool {
+    var index = 0
+    while index < length {
+        if ptr_deref_i8((data as Int) + offset + index) != (0 as Int8) {
+            return false
+        }
+        index = index + 1
+    }
+    return true
+}
+
+fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
+    manifestTensors: JsonValue) r: Result<Array<SqwTensorRecord>, SqwError> {
+    let directoryLength = (header.tensorCount as UInt64) *
+        (SQW_DIRECTORY_ENTRY_BYTES as UInt64)
+    let directoryResult = sqwMapBytes(file, header.directoryOffset,
+        directoryLength, (SQW_MAX_TENSORS as UInt64) *
+        (SQW_DIRECTORY_ENTRY_BYTES as UInt64), "directory")
+    if directoryResult.isErr() {
+        return Err<Array<SqwTensorRecord>, SqwError>(
+            directoryResult.unwrapErr())
+    }
+    let directory = directoryResult.unwrap()
+    let namesResult = file.window(header.namesOffset, header.namesLength)
+    if namesResult.isErr() {
+        directory.free()
+        return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
+            "sqw.map", "names", "failed to map the bounded name table"))
+    }
+    let namesWindow = namesResult.unwrap()
+    let records = Array<SqwTensorRecord>()
+    var nameCursor: UInt64 = 0 as UInt64
+    var payloadCursor = header.payloadOffset
+    var tensorIndex = 0
+    while tensorIndex < (header.tensorCount as Int) {
+        let entryBytes = Array<Int>()
+        let directoryBase = tensorIndex * SQW_DIRECTORY_ENTRY_BYTES
+        var byteIndex = 0
+        while byteIndex < SQW_DIRECTORY_ENTRY_BYTES {
+            entryBytes.push(directory[directoryBase + byteIndex])
+            byteIndex = byteIndex + 1
+        }
+        let parsedEntry = parseSqwDirectoryEntry(entryBytes, header)
+        if parsedEntry.isErr() {
+            let error = parsedEntry.unwrapErr()
+            entryBytes.free(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(error)
+        }
+        let entry = parsedEntry.unwrap()
+        if entry.nameOffset < nameCursor {
+            entry.close(); entryBytes.free(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
+                "sqw.name_overlap", "names",
+                "tensor names overlap or are not in canonical table order"))
+        }
+        if entry.nameOffset > nameCursor and not sqwPointerRangeZero(
+            namesWindow.data, nameCursor as Int,
+            (entry.nameOffset - nameCursor) as Int) {
+            entry.close(); entryBytes.free(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
+                "sqw.padding", "names", "name-table gaps must be zero"))
+        }
+        let name = seen_string_view_bytes(namesWindow.data +
+            (entry.nameOffset as Int), entry.nameLength as Int64)
+        let utf8 = validateJsonUtf8(name)
+        if utf8.isErr() or not sqwNameAllowed(name) {
+            entry.close(); entryBytes.free(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
+                "sqw.name_utf8", "name",
+                "tensor name is invalid UTF-8, contains NUL, or uses a forbidden namespace"))
+        }
+        if records.length() > 0 and sqwNameBytesCompare(
+            records[records.length() - 1].name, name) >= 0 {
+            entry.close(); entryBytes.free(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
+                "sqw.name_order", "name",
+                "tensor names must be strictly increasing UTF-8 bytes"))
+        }
+        nameCursor = entry.nameOffset + (entry.nameLength as UInt64)
+        if not sqwComponentAligned(entry.dataOffset, entry.dataLength,
+                entry.requiredAlignment) or
+            not sqwComponentAligned(entry.scaleOffset, entry.scaleLength,
+                entry.requiredAlignment) or
+            not sqwComponentAligned(entry.zeroOffset, entry.zeroLength,
+                entry.requiredAlignment) or
+            not sqwComponentAligned(entry.metadataOffset,
+                entry.metadataLength, entry.requiredAlignment) {
+            entry.close(); entryBytes.free(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
+                "sqw.alignment", "tensor",
+                "every present tensor component must obey its alignment"))
+        }
+        if entry.dataOffset < payloadCursor {
+            entry.close(); entryBytes.free(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
+                "sqw.tensor_overlap", "tensor",
+                "tensor bundles overlap or violate canonical payload order"))
+        }
+        let payloadGap = sqwValidateZeroGap(file, payloadCursor,
+            entry.dataOffset, "tensor")
+        if payloadGap.isErr() {
+            let error = payloadGap.unwrapErr()
+            entry.close(); entryBytes.free(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(error)
+        }
+        let componentPadding = sqwValidateComponentPadding(file, entry)
+        if componentPadding.isErr() {
+            let error = componentPadding.unwrapErr()
+            entry.close(); entryBytes.free(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(error)
+        }
+        let q4Tail = sqwValidateQ4Tail(file, entry)
+        if q4Tail.isErr() {
+            let error = q4Tail.unwrapErr()
+            entry.close(); entryBytes.free(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(error)
+        }
+        let sourceSha256 = sqwHexFromArray(entryBytes, 176)
+        let convertedSha256 = sqwHexFromArray(entryBytes, 208)
+        entryBytes.free()
+        let bundleDigest = sqwTensorBundleHash(file, entry)
+        if bundleDigest.isErr() {
+            let error = bundleDigest.unwrapErr()
+            entry.close(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            seen_string_release_owned(sourceSha256)
+            seen_string_release_owned(convertedSha256)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(error)
+        }
+        if bundleDigest.unwrap() != convertedSha256 {
+            entry.close(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            seen_string_release_owned(bundleDigest.unwrap())
+            seen_string_release_owned(sourceSha256)
+            seen_string_release_owned(convertedSha256)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
+                "sqw.tensor_digest", "tensor",
+                "converted tensor bundle digest mismatch"))
+        }
+        let manifestItem = manifestTensors.getAt(tensorIndex)
+        if manifestItem.isNone() {
+            entry.close(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            seen_string_release_owned(bundleDigest.unwrap())
+            seen_string_release_owned(sourceSha256)
+            seen_string_release_owned(convertedSha256)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
+                "sqw.manifest_tensor", "tensor",
+                "manifest tensor indexed traversal is inconsistent"))
+        }
+        let manifestMatch = sqwManifestTensorMatches(manifestItem.unwrap(),
+            name, entry, sourceSha256, convertedSha256)
+        if manifestMatch.isErr() {
+            let error = manifestMatch.unwrapErr()
+            entry.close(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            seen_string_release_owned(bundleDigest.unwrap())
+            seen_string_release_owned(sourceSha256)
+            seen_string_release_owned(convertedSha256)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(error)
+        }
+        seen_string_release_owned(bundleDigest.unwrap())
+        seen_string_release_owned(sourceSha256)
+        seen_string_release_owned(convertedSha256)
+        payloadCursor = sqwEntryEnd(entry)
+        records.push(SqwTensorRecord{
+            name: seen_string_clone_owned(name), entry: entry
+        })
+        tensorIndex = tensorIndex + 1
+    }
+    if nameCursor < header.namesLength and not sqwPointerRangeZero(
+        namesWindow.data, nameCursor as Int,
+        (header.namesLength - nameCursor) as Int) {
+        directory.free(); sqwCloseTemporaryWindow(namesWindow)
+        sqwDestroyRecords(records)
+        return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
+            "sqw.padding", "names", "unused name-table bytes must be zero"))
+    }
+    sqwCloseTemporaryWindow(namesWindow)
+    directory.free()
+    let payloadEnd = header.payloadOffset + header.payloadLength
+    let payloadTail = sqwValidateZeroGap(file, payloadCursor,
+        payloadEnd, "payload")
+    if payloadTail.isErr() {
+        let error = payloadTail.unwrapErr()
+        sqwDestroyRecords(records)
+        return Err<Array<SqwTensorRecord>, SqwError>(error)
+    }
+    return Ok<Array<SqwTensorRecord>, SqwError>(records)
+}
+
+fun sqwValidateOuterPadding(borrow file: MappedFile, header: SqwHeader)
+    r: Result<Bool, SqwError> {
+    let manifestEnd = header.manifestOffset + header.manifestLength
+    let directoryEnd = header.directoryOffset +
+        (header.tensorCount as UInt64) *
+        (SQW_DIRECTORY_ENTRY_BYTES as UInt64)
+    let namesEnd = header.namesOffset + header.namesLength
+    let payloadEnd = header.payloadOffset + header.payloadLength
+    let manifestGap = sqwValidateZeroGap(file, manifestEnd,
+        header.directoryOffset, "manifest_directory_gap")
+    if manifestGap.isErr() { return manifestGap }
+    let directoryGap = sqwValidateZeroGap(file, directoryEnd,
+        header.namesOffset, "directory_names_gap")
+    if directoryGap.isErr() { return directoryGap }
+    let namesGap = sqwValidateZeroGap(file, namesEnd,
+        header.payloadOffset, "names_payload_gap")
+    if namesGap.isErr() { return namesGap }
+    if header.evidenceLength > (0 as UInt64) {
+        let evidenceGap = sqwValidateZeroGap(file, payloadEnd,
+            header.evidenceOffset, "payload_evidence_gap")
+        if evidenceGap.isErr() { return evidenceGap }
+        let evidenceEnd = header.evidenceOffset + header.evidenceLength
+        return sqwValidateZeroGap(file, evidenceEnd, header.footerOffset,
+            "evidence_footer_gap")
+    }
+    return sqwValidateZeroGap(file, payloadEnd, header.footerOffset,
+        "payload_footer_gap")
+}
+
+fun sqwValidateFooterAndHashes(borrow file: MappedFile, header: SqwHeader,
+    policy: SqwReaderPolicy, manifestSha256: String,
+    directorySha256: String) r: Result<Bool, SqwError> {
+    let namesResult = sqwHashRange(file, header.namesOffset,
+        header.namesLength)
+    if namesResult.isErr() {
+        return Err<Bool, SqwError>(namesResult.unwrapErr())
+    }
+    let namesSha256 = namesResult.unwrap()
+    let payloadResult = sqwHashRange(file, header.payloadOffset,
+        header.payloadLength)
+    if payloadResult.isErr() {
+        let error = payloadResult.unwrapErr()
+        seen_string_release_owned(namesSha256)
+        return Err<Bool, SqwError>(error)
+    }
+    let payloadSha256 = payloadResult.unwrap()
+    var evidenceSha256 = ""
+    var hasEvidence = false
+    if header.evidenceLength > (0 as UInt64) {
+        let evidence = sqwHashRange(file, header.evidenceOffset,
+            header.evidenceLength)
+        if evidence.isErr() {
+            sqwReleaseSectionDigests(namesSha256, payloadSha256,
+                evidenceSha256, false)
+            return Err<Bool, SqwError>(evidence.unwrapErr())
+        }
+        evidenceSha256 = evidence.unwrap()
+        hasEvidence = true
+    }
+    let footerResult = sqwMapBytes(file, header.footerOffset,
+        header.footerLength, (SQW_FOOTER_HEADER_BYTES as UInt64) +
+        (5 as UInt64) * (SQW_FOOTER_ENTRY_BYTES as UInt64), "footer")
+    if footerResult.isErr() {
+        sqwReleaseSectionDigests(namesSha256, payloadSha256,
+            evidenceSha256, hasEvidence)
+        return Err<Bool, SqwError>(footerResult.unwrapErr())
+    }
+    let footer = footerResult.unwrap()
+    let headerBytes = Array<Int>()
+    var index = 0
+    while index < SQW_FOOTER_HEADER_BYTES {
+        headerBytes.push(footer[index]); index = index + 1
+    }
+    let parsedHeader = parseSqwFooterHeader(headerBytes, header)
+    let storedWholeSha256 = sqwHexFromArray(headerBytes, 16)
+    headerBytes.free()
+    if parsedHeader.isErr() {
+        let error = parsedHeader.unwrapErr(); footer.free()
+        seen_string_release_owned(storedWholeSha256)
+        sqwReleaseSectionDigests(namesSha256, payloadSha256,
+            evidenceSha256, hasEvidence)
+        return Err<Bool, SqwError>(error)
+    }
+    if storedWholeSha256 != policy.expectedWholeFileSha256 {
+        footer.free()
+        seen_string_release_owned(storedWholeSha256)
+        sqwReleaseSectionDigests(namesSha256, payloadSha256,
+            evidenceSha256, hasEvidence)
+        return Err<Bool, SqwError>(sqwReaderError("sqw.file_digest",
+            "footer", "footer whole-file digest mismatches external policy"))
+    }
+    let entryCount = parsedHeader.unwrap().entryCount as Int
+    index = 0
+    while index < entryCount {
+        let entryBytes = Array<Int>()
+        let base = SQW_FOOTER_HEADER_BYTES + index * SQW_FOOTER_ENTRY_BYTES
+        var byteIndex = 0
+        while byteIndex < SQW_FOOTER_ENTRY_BYTES {
+            entryBytes.push(footer[base + byteIndex])
+            byteIndex = byteIndex + 1
+        }
+        let expectedSection = (index + 1) as UInt32
+        let parsedEntry = parseSqwFooterEntry(entryBytes, expectedSection,
+            header)
+        let storedSectionSha256 = sqwHexFromArray(entryBytes, 24)
+        entryBytes.free()
+        if parsedEntry.isErr() {
+            let error = parsedEntry.unwrapErr(); footer.free()
+            seen_string_release_owned(storedSectionSha256)
+            seen_string_release_owned(storedWholeSha256)
+            sqwReleaseSectionDigests(namesSha256, payloadSha256,
+                evidenceSha256, hasEvidence)
+            return Err<Bool, SqwError>(error)
+        }
+        var expectedSha256 = manifestSha256
+        if expectedSection == SQW_SECTION_DIRECTORY {
+            expectedSha256 = directorySha256
+        } else if expectedSection == SQW_SECTION_NAMES {
+            expectedSha256 = namesSha256
+        } else if expectedSection == SQW_SECTION_PAYLOAD {
+            expectedSha256 = payloadSha256
+        } else if expectedSection == SQW_SECTION_EVIDENCE {
+            expectedSha256 = evidenceSha256
+        }
+        let sectionMatches = storedSectionSha256 == expectedSha256
+        seen_string_release_owned(storedSectionSha256)
+        if not sectionMatches {
+            footer.free()
+            seen_string_release_owned(storedWholeSha256)
+            sqwReleaseSectionDigests(namesSha256, payloadSha256,
+                evidenceSha256, hasEvidence)
+            return Err<Bool, SqwError>(sqwReaderError(
+                "sqw.section_digest", "footer",
+                "footer section digest does not match section bytes"))
+        }
+        index = index + 1
+    }
+    footer.free()
+    let wholeResult = sqwWholeFileHash(file, header)
+    if wholeResult.isErr() {
+        let error = wholeResult.unwrapErr()
+        seen_string_release_owned(storedWholeSha256)
+        sqwReleaseSectionDigests(namesSha256, payloadSha256,
+            evidenceSha256, hasEvidence)
+        return Err<Bool, SqwError>(error)
+    }
+    let wholeSha256 = wholeResult.unwrap()
+    let wholeMatches = wholeSha256 == storedWholeSha256 and
+        wholeSha256 == policy.expectedWholeFileSha256
+    seen_string_release_owned(wholeSha256)
+    seen_string_release_owned(storedWholeSha256)
+    sqwReleaseSectionDigests(namesSha256, payloadSha256,
+        evidenceSha256, hasEvidence)
+    if not wholeMatches {
+        return Err<Bool, SqwError>(sqwReaderError("sqw.file_digest", "file",
+            "whole-file digest mismatch"))
+    }
+    return Ok<Bool, SqwError>(true)
+}
+
+fun sqwValidateFile(borrow file: MappedFile, policy: SqwReaderPolicy)
+    r: Result<SqwValidatedMetadata, SqwError> {
+    if file.length < (SQW_HEADER_BYTES as UInt64) {
+        return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
+            "sqw.truncated", "header", "SQW file is shorter than its header"))
+    }
+    let headerResult = sqwMapBytes(file, 0 as UInt64,
+        SQW_HEADER_BYTES as UInt64, SQW_HEADER_BYTES as UInt64, "header")
+    if headerResult.isErr() {
+        return Err<SqwValidatedMetadata, SqwError>(headerResult.unwrapErr())
+    }
+    let headerBytes = headerResult.unwrap()
+    let parsedHeader = parseSqwHeader(headerBytes, file.length)
+    if parsedHeader.isErr() {
+        let error = parsedHeader.unwrapErr(); headerBytes.free()
+        return Err<SqwValidatedMetadata, SqwError>(error)
+    }
+    let header = parsedHeader.unwrap()
+    let headerModelSha256 = sqwHexFromArray(headerBytes, 128)
+    let headerPolicySha256 = sqwHexFromArray(headerBytes, 160)
+    headerBytes.free()
+    let headerIdentityMatches =
+        headerModelSha256 == policy.expectedModelLockSha256 and
+        headerPolicySha256 == policy.expectedConversionPolicySha256
+    seen_string_release_owned(headerModelSha256)
+    seen_string_release_owned(headerPolicySha256)
+    if not headerIdentityMatches {
+        return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
+            "sqw.identity", "header",
+            "header model or conversion-policy digest mismatches policy"))
+    }
+    if header.tensorCount != policy.expectedTensorCount {
+        return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
+            "sqw.tensor_count", "directory",
+            "SQW tensor count mismatches the explicit reader policy"))
+    }
+    let padding = sqwValidateOuterPadding(file, header)
+    if padding.isErr() {
+        return Err<SqwValidatedMetadata, SqwError>(padding.unwrapErr())
+    }
+    let directoryLength = (header.tensorCount as UInt64) *
+        (SQW_DIRECTORY_ENTRY_BYTES as UInt64)
+    let directoryResult = sqwHashRange(file, header.directoryOffset,
+        directoryLength)
+    if directoryResult.isErr() {
+        return Err<SqwValidatedMetadata, SqwError>(
+            directoryResult.unwrapErr())
+    }
+    let directorySha256 = directoryResult.unwrap()
+    let manifestDigestResult = sqwHashRange(file, header.manifestOffset,
+        header.manifestLength)
+    if manifestDigestResult.isErr() {
+        let error = manifestDigestResult.unwrapErr()
+        seen_string_release_owned(directorySha256)
+        return Err<SqwValidatedMetadata, SqwError>(error)
+    }
+    let manifestSha256 = manifestDigestResult.unwrap()
+    let manifestResult = file.window(header.manifestOffset,
+        header.manifestLength)
+    if manifestResult.isErr() {
+        seen_string_release_owned(manifestSha256)
+        seen_string_release_owned(directorySha256)
+        return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
+            "sqw.map", "manifest", "failed to map the bounded manifest"))
+    }
+    let manifestWindow = manifestResult.unwrap()
+    let manifestText = seen_string_view_bytes(manifestWindow.data,
+        header.manifestLength as Int64)
+    let manifestUtf8 = validateJsonUtf8(manifestText)
+    if manifestUtf8.isErr() {
+        sqwCloseTemporaryWindow(manifestWindow)
+        seen_string_release_owned(manifestSha256)
+        seen_string_release_owned(directorySha256)
+        return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
+            "sqw.manifest_json", "manifest",
+            "manifest is not bounded duplicate-free strict UTF-8 JSON"))
+    }
+    // Seen v0.19.2 parseStrictJson loses its JsonParseResult owner while
+    // converting syntax failures (FEL-1561). Compose the same canonical
+    // UTF-8 validation and strict parser primitive here so rejected manifests
+    // can release that owner deterministically.
+    let parsed = sqwParseManifestJson(manifestText,
+        header.manifestLength as Int,
+        (header.tensorCount as Int) * 64 + 128)
+    if parsed.success != 1 {
+        destroyJsonParseResult(parsed, false)
+        sqwCloseTemporaryWindow(manifestWindow)
+        seen_string_release_owned(manifestSha256)
+        seen_string_release_owned(directorySha256)
+        return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
+            "sqw.manifest_json", "manifest",
+            "manifest is not bounded duplicate-free strict UTF-8 JSON"))
+    }
+    let root = parsed.value.unwrap()
+    let canonical = canonicalizeJson(root)
+    if canonical.isErr() {
+        destroyJsonParseResult(parsed, true)
+        sqwCloseTemporaryWindow(manifestWindow)
+        seen_string_release_owned(manifestSha256)
+        seen_string_release_owned(directorySha256)
+        return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
+            "sqw.manifest_canonical", "manifest",
+            "manifest cannot be canonically serialized"))
+    }
+    let canonicalText = canonical.unwrap()
+    let isCanonical = canonicalText == manifestText
+    seen_string_release_owned(canonicalText)
+    sqwCloseTemporaryWindow(manifestWindow)
+    if not isCanonical {
+        destroyJsonParseResult(parsed, true)
+        seen_string_release_owned(manifestSha256)
+        seen_string_release_owned(directorySha256)
+        return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
+            "sqw.manifest_canonical", "manifest",
+            "manifest bytes are not the exact canonical serialization"))
+    }
+    let manifestRoot = sqwValidateManifestRoot(root, policy, header,
+        directorySha256)
+    if manifestRoot.isErr() {
+        let error = manifestRoot.unwrapErr()
+        destroyJsonParseResult(parsed, true)
+        seen_string_release_owned(manifestSha256)
+        seen_string_release_owned(directorySha256)
+        return Err<SqwValidatedMetadata, SqwError>(error)
+    }
+    let recordsResult = sqwValidateDirectoryAndNames(file, header,
+        manifestRoot.unwrap())
+    if recordsResult.isErr() {
+        let error = recordsResult.unwrapErr()
+        destroyJsonParseResult(parsed, true)
+        seen_string_release_owned(manifestSha256)
+        seen_string_release_owned(directorySha256)
+        return Err<SqwValidatedMetadata, SqwError>(error)
+    }
+    let records = recordsResult.unwrap()
+    let footer = sqwValidateFooterAndHashes(file, header, policy,
+        manifestSha256, directorySha256)
+    seen_string_release_owned(manifestSha256)
+    seen_string_release_owned(directorySha256)
+    if footer.isErr() {
+        let error = footer.unwrapErr()
+        sqwDestroyRecords(records)
+        destroyJsonParseResult(parsed, true)
+        return Err<SqwValidatedMetadata, SqwError>(error)
+    }
+    // All borrowed key/value/name views have been consumed. Records retain
+    // owned name clones, so the parsed document can now be destroyed exactly once.
+    destroyJsonParseResult(parsed, true)
+    return Ok<SqwValidatedMetadata, SqwError>(SqwValidatedMetadata{
+        header: header, records: records
+    })
+}
+
+@move
+pub class SqwReader {
+    var file: MappedFile
+    var header: SqwHeader
+    var records: Array<SqwTensorRecord>
+    var windows: Array<SqwCachedWindow>
+    var activeWindows: Int
+    var maxOpenWindows: Int
+    var closing: Bool
+    var metadataReleased: Bool
+    var closed: Bool
+
+    static fun open(path: String, policy: SqwReaderPolicy)
+        r: Result<SqwReader, SqwError> {
+        if path.length() == 0 {
+            return Err<SqwReader, SqwError>(sqwReaderError("sqw.path",
+                "path", "SQW path is required"))
+        }
+        if not sqwPolicyValid(policy) {
+            return Err<SqwReader, SqwError>(sqwReaderError(
+                "sqw.reader_policy", "policy",
+                "reader policy digests, count, or window bound are invalid"))
+        }
+        let opened = MappedFile.openReadonly(path)
+        if opened.isErr() {
+            return Err<SqwReader, SqwError>(sqwReaderError("sqw.open",
+                "path", "failed to open SQW read-only"))
+        }
+        let file = opened.unwrap()
+        let validated = sqwValidateFile(file, policy)
+        if validated.isErr() {
+            let error = validated.unwrapErr()
+            sqwCloseRejectedFile(file)
+            return Err<SqwReader, SqwError>(error)
+        }
+        let metadata = validated.unwrap()
+        return Ok<SqwReader, SqwError>(SqwReader{
+            file: file, header: metadata.header, records: metadata.records,
+            windows: Array<SqwCachedWindow>(), activeWindows: 0,
+            maxOpenWindows: policy.maxOpenWindows, closing: false,
+            metadataReleased: false, closed: false,
+        })
+    }
+
+    fun length() r: Int {
+        if this.closed or this.closing { return 0 }
+        return this.records.length()
+    }
+
+    fun nameAt(index: Int) r: Result<String, SqwError> {
+        if this.closed or this.closing {
+            return Err<String, SqwError>(sqwReaderError("sqw.closed",
+                "reader", "SQW reader is closed or cleanup is pending"))
+        }
+        if index < 0 or index >= this.records.length() {
+            return Err<String, SqwError>(sqwReaderError("sqw.bounds",
+                "index", "tensor index is outside the validated directory"))
+        }
+        return Ok<String, SqwError>(this.records[index].name)
+    }
+
+    fun findIndex(name: String) r: Int {
+        if this.closed or this.closing { return -1 }
+        var low = 0
+        var high = this.records.length() - 1
+        while low <= high {
+            let middle = low + (high - low) / 2
+            let comparison = sqwNameBytesCompare(this.records[middle].name,
+                name)
+            if comparison == 0 { return middle }
+            if comparison < 0 { low = middle + 1 }
+            else { high = middle - 1 }
+        }
+        return -1
+    }
+
+    fun component(name: String, component: Int)
+        r: Result<SqwTensorView, SqwError> {
+        if this.closed or this.closing {
+            return Err<SqwTensorView, SqwError>(sqwReaderError("sqw.closed",
+                "reader", "SQW reader is closed or cleanup is pending"))
+        }
+        let index = this.findIndex(name)
+        if index < 0 {
+            return Err<SqwTensorView, SqwError>(sqwReaderError("sqw.missing",
+                "tensor", "tensor name is absent from the validated directory"))
+        }
+        return this.componentAt(index, component)
+    }
+
+    fun tensor(name: String) r: Result<SqwTensorView, SqwError> {
+        return this.component(name, SQW_COMPONENT_DATA)
+    }
+
+    fun tensorAt(index: Int) r: Result<SqwTensorView, SqwError> {
+        return this.componentAt(index, SQW_COMPONENT_DATA)
+    }
+
+    fun componentAt(index: Int, component: Int)
+        r: Result<SqwTensorView, SqwError> {
+        if this.closed or this.closing {
+            return Err<SqwTensorView, SqwError>(sqwReaderError("sqw.closed",
+                "reader", "SQW reader is closed or cleanup is pending"))
+        }
+        if index < 0 or index >= this.records.length() {
+            return Err<SqwTensorView, SqwError>(sqwReaderError("sqw.bounds",
+                "index", "tensor index is outside the validated directory"))
+        }
+        if component < SQW_COMPONENT_DATA or
+            component > SQW_COMPONENT_METADATA {
+            return Err<SqwTensorView, SqwError>(sqwReaderError(
+                "sqw.component", "component",
+                "component selector is outside the SQW reader contract"))
+        }
+        let entry = this.records[index].entry
+        var offset = entry.dataOffset
+        var length = entry.dataLength
+        if component == SQW_COMPONENT_SCALE {
+            offset = entry.scaleOffset; length = entry.scaleLength
+        } else if component == SQW_COMPONENT_ZERO {
+            offset = entry.zeroOffset; length = entry.zeroLength
+        } else if component == SQW_COMPONENT_METADATA {
+            offset = entry.metadataOffset; length = entry.metadataLength
+        }
+        if length == (0 as UInt64) {
+            return Err<SqwTensorView, SqwError>(sqwReaderError(
+                "sqw.component_absent", "component",
+                "requested tensor component is absent"))
+        }
+        let key = index * 4 + component
+        var slotIndex = 0
+        while slotIndex < this.windows.length() {
+            if this.windows[slotIndex].active and
+                this.windows[slotIndex].key == key {
+                let validated = this.windows[slotIndex].window.validate()
+                if validated.isErr() {
+                    return Err<SqwTensorView, SqwError>(sqwReaderError(
+                        "sqw.map", "tensor",
+                        "cached tensor mapping is invalid"))
+                }
+                let view = SqwTensorView{
+                    data: this.windows[slotIndex].window.data,
+                    byteLength: length,
+                    logicalElements: entry.logicalElements,
+                    codec: entry.runtimeCodec,
+                }
+                return Ok<SqwTensorView, SqwError>(view)
+            }
+            slotIndex = slotIndex + 1
+        }
+        if this.activeWindows >= this.maxOpenWindows {
+            return Err<SqwTensorView, SqwError>(sqwReaderError(
+                "sqw.window_limit", "tensor",
+                "bounded live tensor-window limit is reached"))
+        }
+        let mapped = this.file.window(offset, length)
+        if mapped.isErr() {
+            return Err<SqwTensorView, SqwError>(sqwReaderError("sqw.map",
+                "tensor",
+                "failed to map validated tensor component"))
+        }
+        let window = mapped.unwrap()
+        let data = window.data
+        var reusable = -1
+        slotIndex = 0
+        while slotIndex < this.windows.length() {
+            if not this.windows[slotIndex].active and reusable < 0 {
+                reusable = slotIndex
+            }
+            slotIndex = slotIndex + 1
+        }
+        if reusable >= 0 {
+            this.windows[reusable].key = key
+            this.windows[reusable].window = window
+            this.windows[reusable].active = true
+        } else {
+            this.windows.push(SqwCachedWindow{
+                key: key, window: window, active: true
+            })
+        }
+        this.activeWindows = this.activeWindows + 1
+        let view = SqwTensorView{
+            data: data, byteLength: length,
+            logicalElements: entry.logicalElements,
+            codec: entry.runtimeCodec,
+        }
+        return Ok<SqwTensorView, SqwError>(view)
+    }
+
+    fun releaseComponent(name: String, component: Int)
+        r: Result<Bool, SqwError> {
+        if this.closed or this.closing {
+            return Ok<Bool, SqwError>(false)
+        }
+        let index = this.findIndex(name)
+        if index < 0 {
+            return Err<Bool, SqwError>(sqwReaderError("sqw.missing", "tensor",
+                "tensor name is absent from the validated directory"))
+        }
+        if component < SQW_COMPONENT_DATA or
+            component > SQW_COMPONENT_METADATA {
+            return Err<Bool, SqwError>(sqwReaderError("sqw.component",
+                "component", "component selector is invalid"))
+        }
+        let key = index * 4 + component
+        var slotIndex = 0
+        while slotIndex < this.windows.length() {
+            if this.windows[slotIndex].active and
+                this.windows[slotIndex].key == key {
+                let closed = this.windows[slotIndex].window.close()
+                if closed.isErr() {
+                    return Err<Bool, SqwError>(sqwReaderError("sqw.close",
+                        "component", "failed to close tensor component mapping"))
+                }
+                this.windows[slotIndex].active = false
+                this.activeWindows = this.activeWindows - 1
+                return Ok<Bool, SqwError>(true)
+            }
+            slotIndex = slotIndex + 1
+        }
+        return Ok<Bool, SqwError>(false)
+    }
+
+    fun releaseTensor(name: String) r: Result<Bool, SqwError> {
+        return this.releaseComponent(name, SQW_COMPONENT_DATA)
+    }
+
+    fun close() r: Result<Bool, SqwError> {
+        if this.closed { return Ok<Bool, SqwError>(false) }
+        this.closing = true
+        if not this.metadataReleased {
+            var closeFailed = false
+            var index = 0
+            while index < this.windows.length() {
+                if this.windows[index].active {
+                    let closed = this.windows[index].window.close()
+                    if closed.isErr() {
+                        closeFailed = true
+                    } else {
+                        this.windows[index].active = false
+                        this.activeWindows = this.activeWindows - 1
+                    }
+                }
+                index = index + 1
+            }
+            if closeFailed {
+                return Err<Bool, SqwError>(sqwReaderError(
+                    "sqw.close", "reader",
+                    "cleanup remains owned; retry reader close explicitly"))
+            }
+            this.activeWindows = 0
+            this.windows.free()
+            // Owned names and shapes are released only after every tensor window.
+            sqwDestroyRecords(this.records)
+            this.metadataReleased = true
+        }
+        let fileClosed = this.file.close()
+        if fileClosed.isErr() {
+            return Err<Bool, SqwError>(sqwReaderError("sqw.close", "reader",
+                "mapped file remains owned; retry reader close explicitly"))
+        }
+        this.closed = true
+        return Ok<Bool, SqwError>(true)
+    }
+}
