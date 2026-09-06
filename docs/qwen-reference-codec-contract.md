@@ -69,3 +69,22 @@ owned by the caller. In addition to the shared diagnostics above, Q8 uses
 This is a CPU correctness reference. It defines no automatic codec selection,
 CUDA behavior, performance claim, retry, repair, padding storage, zero point,
 or fallback.
+
+## Q4_SYM_G64
+
+`encodeQ4SymG64Buffer` uses the same bounded complete-row geometry as Q8 and
+resets groups at each row. For each group of at most 64 binary32 values it
+computes `max_abs`; a zero group stores a zero FP16 scale and zero codes.
+Otherwise the binary32 scale is `max_abs / 7`, must be representable as finite
+nonzero FP16, and drives ties-to-even quantization clamped to `[-8, 7]`.
+
+Signed two's-complement codes occupy four-bit nibbles, with the earlier logical
+value in the low nibble. Each odd row ends with one zero high padding nibble;
+groups introduce no other stored padding. Decode validates the codec, bounds,
+row and scale geometry, exact `rows * ceil(rowElements / 2)` payload length,
+finite nonnegative scales, zero-scale codes, and the row-tail padding nibble
+before reconstructing `float(code) * float(fp16_scale)`.
+
+`ReferenceQ4Buffer` owns packed bytes and scales; cleanup and decoded-output
+ownership match `ReferenceQ8Buffer`. This CPU reference adds no codec selection,
+CUDA behavior, fallback, zero point, or performance claim.
