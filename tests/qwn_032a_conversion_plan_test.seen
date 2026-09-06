@@ -1,0 +1,113 @@
+import io.file.{readText}
+import seen_qwen.converter.conversion_plan.{buildQwen38ConversionPlan}
+import seen_qwen.model.config.{parseQwen38Config}
+import seen_qwen.model.tensor_catalog.{parseQwenTensorCatalog}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun main() r: Int {
+    let config = parseQwen38Config(
+        readText("tests/fixtures/qwen3_8_config.json")).unwrap()
+    let catalog = parseQwenTensorCatalog(
+        readText("tests/fixtures/qwen3_8_model.safetensors.index.json")).unwrap()
+
+    let first = buildQwen38ConversionPlan(config, catalog,
+        4294967296 as UInt64, 67108864 as UInt64, 134217728 as UInt64,
+        1048576 as UInt64, 1048576 as UInt64, 268435456 as UInt64,
+        68719476736 as UInt64)
+    let second = buildQwen38ConversionPlan(config, catalog,
+        4294967296 as UInt64, 67108864 as UInt64, 134217728 as UInt64,
+        1048576 as UInt64, 1048576 as UInt64, 268435456 as UInt64,
+        68719476736 as UInt64)
+    require(first.isOkay() and second.isOkay(),
+        "build the pinned conversion plan twice")
+    let plan = first.unwrap()
+    let duplicate = second.unwrap()
+    require(plan.sourceTotalBytes == (55562855904 as UInt64) and
+        plan.sourceShardCount == (18 as UInt64) and
+        plan.catalogTensorCount == (1199 as UInt64) and
+        plan.includedTensorCount == (866 as UInt64) and
+        plan.excludedVisionTensorCount == (333 as UInt64),
+        "freeze exact official source and catalog identities")
+    require(plan.maxOpenShards == (1 as UInt64) and
+        plan.maxInFlightTensors == (1 as UInt64) and
+        plan.workerCount == (1 as UInt64),
+        "freeze serial bounded conversion concurrency")
+    require(plan.peakHostBytes == (471859200 as UInt64) and
+        plan.remainingBudget().unwrap() == (3823108096 as UInt64),
+        "sum every simultaneous host reservation exactly")
+    require(plan.planFingerprint ==
+        "0666131d7d6d01f51ce437a5e5a93c070f9f9b057d5b5e04d2746daf18018b0c" and
+        plan.planFingerprint == duplicate.planFingerprint,
+        "produce the canonical plan fingerprint deterministically")
+    require(plan.validate().isOkay(), "revalidate the complete admitted plan")
+
+    let changed = buildQwen38ConversionPlan(config, catalog,
+        4294967296 as UInt64, 67108864 as UInt64, 134217729 as UInt64,
+        1048576 as UInt64, 1048576 as UInt64, 268435456 as UInt64,
+        68719476736 as UInt64).unwrap()
+    require(changed.planFingerprint != plan.planFingerprint,
+        "bind every reservation into the plan fingerprint")
+    duplicate.maxOpenShards = 2 as UInt64
+    require(duplicate.validate().unwrapErr().code ==
+        "qwen.conversion.invalid-state",
+        "reject forged concurrency before a later consumer opens a shard")
+    duplicate.maxOpenShards = 1 as UInt64
+    duplicate.peakHostBytes = duplicate.peakHostBytes + (1 as UInt64)
+    require(duplicate.validate().unwrapErr().field == "peak_host_bytes",
+        "reject forged reservation geometry before conversion")
+    duplicate.peakHostBytes = duplicate.peakHostBytes - (1 as UInt64)
+    require(duplicate.validate().isOkay(), "accept a restored canonical plan")
+
+    let zeroWindow = buildQwen38ConversionPlan(config, catalog,
+        4294967296 as UInt64, 0 as UInt64, 1 as UInt64,
+        1 as UInt64, 0 as UInt64, 0 as UInt64, 1 as UInt64)
+    require(zeroWindow.unwrapErr().code == "qwen.conversion.input" and
+        not zeroWindow.unwrapErr().retryable,
+        "reject an unbounded zero source window with a stable error")
+    let largeBudget = buildQwen38ConversionPlan(config, catalog,
+        68719476737 as UInt64, 1 as UInt64, 1 as UInt64,
+        1 as UInt64, 0 as UInt64, 0 as UInt64, 1 as UInt64)
+    require(largeBudget.unwrapErr().code == "qwen.conversion.limit",
+        "reject a memory budget above 64 GiB")
+    require(buildQwen38ConversionPlan(config, catalog, 4294967296 as UInt64,
+        1 as UInt64, 1 as UInt64, 1048577 as UInt64, 0 as UInt64,
+        0 as UInt64, 1 as UInt64).unwrapErr().field == "writer_chunk_bytes",
+        "enforce the writer's one MiB chunk bound")
+    require(buildQwen38ConversionPlan(config, catalog, 4294967296 as UInt64,
+        1 as UInt64, 1 as UInt64, 1 as UInt64, 67108865 as UInt64,
+        0 as UInt64, 1 as UInt64).unwrapErr().field ==
+        "evidence_buffer_bytes", "enforce the SQW evidence bound")
+    let overBudget = buildQwen38ConversionPlan(config, catalog,
+        1024 as UInt64, 512 as UInt64, 512 as UInt64, 1 as UInt64,
+        0 as UInt64, 0 as UInt64, 1 as UInt64)
+    require(overBudget.unwrapErr().code == "qwen.conversion.budget",
+        "reject aggregate reservations beyond the admitted budget")
+    require(buildQwen38ConversionPlan(config, catalog, 4294967296 as UInt64,
+        1 as UInt64, 1 as UInt64, 1 as UInt64, 0 as UInt64, 0 as UInt64,
+        0x8000000000000000 as UInt64).unwrapErr().field == "max_artifact_bytes",
+        "reject a non-signed-safe artifact extent")
+
+    config.layers = 63
+    require(buildQwen38ConversionPlan(config, catalog, 1024 as UInt64,
+        1 as UInt64, 1 as UInt64, 1 as UInt64, 0 as UInt64, 0 as UInt64,
+        1 as UInt64).unwrapErr().code == "qwen.conversion.unsupported-model",
+        "reject a forged model contract before resource planning")
+    config.layers = 64
+
+    plan.close(); plan.close()
+    require(plan.remainingBudget().unwrapErr().code == "qwen.conversion.closed" and
+        plan.validate().unwrapErr().exitCode == 11,
+        "make plan cleanup idempotent and reject use after close")
+    duplicate.close(); changed.close(); catalog.close()
+    require(buildQwen38ConversionPlan(config, catalog, 1024 as UInt64,
+        1 as UInt64, 1 as UInt64, 1 as UInt64, 0 as UInt64, 0 as UInt64,
+        1 as UInt64).unwrapErr().code == "qwen.conversion.invalid-state",
+        "reject a closed catalog before planning")
+    println("PASS: QWN-032A deterministic conversion and memory-budget plan")
+    return 0
+}
+
+main()
