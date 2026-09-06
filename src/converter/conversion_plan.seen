@@ -1,0 +1,374 @@
+///
+/// Deterministic admission plan for the pinned Qwen3.8-27B conversion.
+///
+/// This module fixes identities and resource bounds before any shard is opened.
+/// Shard streaming, tensor conversion, journaling, and artifact promotion belong
+/// to later QWN-032 leaves.
+///
+
+import core.result.{Result}
+import crypto.sha256.{sha256}
+import inference.scalars.{checkedAdd64}
+import seen_qwen.model.config.{Qwen38Config}
+import seen_qwen.model.contract_geometry.{validateQwen38Contract}
+import seen_qwen.model.tensor_catalog.{QwenTensorCatalog}
+import str.string.{StringBuilder}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+let QWEN_CONVERSION_SOURCE_BYTES: UInt64 = 55562855904 as UInt64
+let QWEN_CONVERSION_SOURCE_SHARDS: UInt64 = 18 as UInt64
+let QWEN_CONVERSION_CATALOG_TENSORS: UInt64 = 1199 as UInt64
+let QWEN_CONVERSION_INCLUDED_TENSORS: UInt64 = 866 as UInt64
+let QWEN_CONVERSION_EXCLUDED_VISION_TENSORS: UInt64 = 333 as UInt64
+let QWEN_CONVERSION_MAX_MEMORY_BYTES: UInt64 = 68719476736 as UInt64
+let QWEN_CONVERSION_MAX_WRITER_CHUNK_BYTES: UInt64 = 1048576 as UInt64
+let QWEN_CONVERSION_MAX_EVIDENCE_BYTES: UInt64 = 67108864 as UInt64
+let QWEN_CONVERSION_SIGNED_SAFE_MAX: UInt64 =
+    0x7FFFFFFFFFFFFFFF as UInt64
+
+pub class QwenConversionPlanError {
+    var code: String
+    var field: String
+    var message: String
+    var exitCode: Int
+    var retryable: Bool
+}
+
+fun conversionPlanError(code: String, field: String, message: String)
+    r: QwenConversionPlanError {
+    let exitCode = if code == "qwen.conversion.closed" or
+        code == "qwen.conversion.invalid-state" { 11 } else { 2 }
+    return QwenConversionPlanError{ code: code, field: field,
+        message: message, exitCode: exitCode, retryable: false }
+}
+
+pub class QwenConversionPlan {
+    var sourceTotalBytes: UInt64
+    var sourceShardCount: UInt64
+    var catalogTensorCount: UInt64
+    var includedTensorCount: UInt64
+    var excludedVisionTensorCount: UInt64
+    var maxOpenShards: UInt64
+    var maxInFlightTensors: UInt64
+    var workerCount: UInt64
+    var memoryBudgetBytes: UInt64
+    var sourceWindowBytes: UInt64
+    var codecWorkspaceBytes: UInt64
+    var writerChunkBytes: UInt64
+    var evidenceBufferBytes: UInt64
+    var fixedOverheadBytes: UInt64
+    var peakHostBytes: UInt64
+    var maxArtifactBytes: UInt64
+    var planFingerprint: String
+    var closed: Bool
+
+    fun remainingBudget() r: Result<UInt64, QwenConversionPlanError> {
+        if this.closed {
+            return Err<UInt64, QwenConversionPlanError>(conversionPlanError(
+                "qwen.conversion.closed", "plan",
+                "conversion plan is closed"))
+        }
+        if this.peakHostBytes > this.memoryBudgetBytes {
+            return Err<UInt64, QwenConversionPlanError>(conversionPlanError(
+                "qwen.conversion.invalid-state", "peak_host_bytes",
+                "conversion plan memory geometry is invalid"))
+        }
+        return Ok<UInt64, QwenConversionPlanError>(
+            this.memoryBudgetBytes - this.peakHostBytes)
+    }
+
+    fun validate() r: Result<Bool, QwenConversionPlanError> {
+        return validateQwen38ConversionPlan(this)
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        seen_string_release_owned(this.planFingerprint)
+        this.sourceTotalBytes = 0 as UInt64
+        this.sourceShardCount = 0 as UInt64
+        this.catalogTensorCount = 0 as UInt64
+        this.includedTensorCount = 0 as UInt64
+        this.excludedVisionTensorCount = 0 as UInt64
+        this.maxOpenShards = 0 as UInt64
+        this.maxInFlightTensors = 0 as UInt64
+        this.workerCount = 0 as UInt64
+        this.memoryBudgetBytes = 0 as UInt64
+        this.sourceWindowBytes = 0 as UInt64
+        this.codecWorkspaceBytes = 0 as UInt64
+        this.writerChunkBytes = 0 as UInt64
+        this.evidenceBufferBytes = 0 as UInt64
+        this.fixedOverheadBytes = 0 as UInt64
+        this.peakHostBytes = 0 as UInt64
+        this.maxArtifactBytes = 0 as UInt64
+        this.closed = true
+    }
+}
+
+fun addReservation(total: UInt64, value: UInt64, field: String)
+    r: Result<UInt64, QwenConversionPlanError> {
+    if value > QWEN_CONVERSION_SIGNED_SAFE_MAX {
+        return Err<UInt64, QwenConversionPlanError>(conversionPlanError(
+            "qwen.conversion.overflow", field,
+            "conversion reservation exceeds the signed-safe bound"))
+    }
+    let added = checkedAdd64(total, value)
+    if added.isNone() or added.unwrap() > QWEN_CONVERSION_SIGNED_SAFE_MAX {
+        return Err<UInt64, QwenConversionPlanError>(conversionPlanError(
+            "qwen.conversion.overflow", field,
+            "conversion reservation sum overflowed"))
+    }
+    return Ok<UInt64, QwenConversionPlanError>(added.unwrap())
+}
+
+fun appendPlanField(builder: StringBuilder, renderedValues: Array<String>,
+    name: String, value: UInt64) r: Void {
+    let rendered = value.toString()
+    renderedValues.push(rendered)
+    builder.append(name)
+    builder.append("=")
+    builder.append(rendered)
+    builder.append("\n")
+}
+
+fun conversionPlanFingerprint(memoryBudgetBytes: UInt64,
+    sourceWindowBytes: UInt64, codecWorkspaceBytes: UInt64,
+    writerChunkBytes: UInt64, evidenceBufferBytes: UInt64,
+    fixedOverheadBytes: UInt64, peakHostBytes: UInt64,
+    maxArtifactBytes: UInt64)
+    r: Result<String, QwenConversionPlanError> {
+    let builder = StringBuilder.new()
+    let renderedValues = Array<String>()
+    builder.append("qwen38-conversion-plan-v1\n")
+    builder.append("model_revision=1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0\n")
+    builder.append("catalog_sha256=")
+    builder.append("5f466d43bae3059e54f0bfe183d0e82c822242f45a834d778414d3e5b5248f1f\n")
+    appendPlanField(builder, renderedValues, "source_total_bytes",
+        QWEN_CONVERSION_SOURCE_BYTES)
+    appendPlanField(builder, renderedValues, "source_shards",
+        QWEN_CONVERSION_SOURCE_SHARDS)
+    appendPlanField(builder, renderedValues, "catalog_tensors",
+        QWEN_CONVERSION_CATALOG_TENSORS)
+    appendPlanField(builder, renderedValues, "included_tensors",
+        QWEN_CONVERSION_INCLUDED_TENSORS)
+    appendPlanField(builder, renderedValues, "excluded_vision_tensors",
+        QWEN_CONVERSION_EXCLUDED_VISION_TENSORS)
+    appendPlanField(builder, renderedValues, "max_open_shards", 1 as UInt64)
+    appendPlanField(builder, renderedValues, "max_in_flight_tensors",
+        1 as UInt64)
+    appendPlanField(builder, renderedValues, "worker_count", 1 as UInt64)
+    appendPlanField(builder, renderedValues, "memory_budget_bytes",
+        memoryBudgetBytes)
+    appendPlanField(builder, renderedValues, "source_window_bytes",
+        sourceWindowBytes)
+    appendPlanField(builder, renderedValues, "codec_workspace_bytes",
+        codecWorkspaceBytes)
+    appendPlanField(builder, renderedValues, "writer_chunk_bytes",
+        writerChunkBytes)
+    appendPlanField(builder, renderedValues, "evidence_buffer_bytes",
+        evidenceBufferBytes)
+    appendPlanField(builder, renderedValues, "fixed_overhead_bytes",
+        fixedOverheadBytes)
+    appendPlanField(builder, renderedValues, "peak_host_bytes", peakHostBytes)
+    appendPlanField(builder, renderedValues, "max_artifact_bytes",
+        maxArtifactBytes)
+    let canonical = builder.buildAndClear()
+    builder.free()
+    var renderedIndex = 0
+    while renderedIndex < renderedValues.length() {
+        seen_string_release_owned(renderedValues[renderedIndex])
+        renderedIndex = renderedIndex + 1
+    }
+    renderedValues.free()
+    let hashed = sha256(canonical)
+    seen_string_release_owned(canonical)
+    if hashed.isErr() {
+        return Err<String, QwenConversionPlanError>(conversionPlanError(
+            "qwen.conversion.hash", "plan",
+            "failed to hash the canonical conversion plan"))
+    }
+    return Ok<String, QwenConversionPlanError>(hashed.unwrap())
+}
+
+pub fun validateQwen38ConversionPlan(plan: QwenConversionPlan)
+    r: Result<Bool, QwenConversionPlanError> {
+    if plan.closed {
+        return Err<Bool, QwenConversionPlanError>(conversionPlanError(
+            "qwen.conversion.closed", "plan", "conversion plan is closed"))
+    }
+    if plan.sourceTotalBytes != QWEN_CONVERSION_SOURCE_BYTES or
+        plan.sourceShardCount != QWEN_CONVERSION_SOURCE_SHARDS or
+        plan.catalogTensorCount != QWEN_CONVERSION_CATALOG_TENSORS or
+        plan.includedTensorCount != QWEN_CONVERSION_INCLUDED_TENSORS or
+        plan.excludedVisionTensorCount !=
+            QWEN_CONVERSION_EXCLUDED_VISION_TENSORS or
+        plan.maxOpenShards != (1 as UInt64) or
+        plan.maxInFlightTensors != (1 as UInt64) or
+        plan.workerCount != (1 as UInt64) {
+        return Err<Bool, QwenConversionPlanError>(conversionPlanError(
+            "qwen.conversion.invalid-state", "identity",
+            "conversion plan identity or concurrency was modified"))
+    }
+    if plan.memoryBudgetBytes == (0 as UInt64) or
+        plan.memoryBudgetBytes > QWEN_CONVERSION_MAX_MEMORY_BYTES or
+        plan.sourceWindowBytes == (0 as UInt64) or
+        plan.writerChunkBytes == (0 as UInt64) or
+        plan.writerChunkBytes > QWEN_CONVERSION_MAX_WRITER_CHUNK_BYTES or
+        plan.evidenceBufferBytes > QWEN_CONVERSION_MAX_EVIDENCE_BYTES or
+        plan.maxArtifactBytes == (0 as UInt64) or
+        plan.maxArtifactBytes > QWEN_CONVERSION_SIGNED_SAFE_MAX {
+        return Err<Bool, QwenConversionPlanError>(conversionPlanError(
+            "qwen.conversion.invalid-state", "limits",
+            "conversion plan bounds were modified"))
+    }
+    var calculated = addReservation(0 as UInt64, plan.sourceWindowBytes,
+        "source_window_bytes")
+    if calculated.isErr() {
+        return Err<Bool, QwenConversionPlanError>(calculated.unwrapErr())
+    }
+    calculated = addReservation(calculated.unwrap(), plan.codecWorkspaceBytes,
+        "codec_workspace_bytes")
+    if calculated.isErr() {
+        return Err<Bool, QwenConversionPlanError>(calculated.unwrapErr())
+    }
+    calculated = addReservation(calculated.unwrap(), plan.writerChunkBytes,
+        "writer_chunk_bytes")
+    if calculated.isErr() {
+        return Err<Bool, QwenConversionPlanError>(calculated.unwrapErr())
+    }
+    calculated = addReservation(calculated.unwrap(), plan.evidenceBufferBytes,
+        "evidence_buffer_bytes")
+    if calculated.isErr() {
+        return Err<Bool, QwenConversionPlanError>(calculated.unwrapErr())
+    }
+    calculated = addReservation(calculated.unwrap(), plan.fixedOverheadBytes,
+        "fixed_overhead_bytes")
+    if calculated.isErr() {
+        return Err<Bool, QwenConversionPlanError>(calculated.unwrapErr())
+    }
+    if calculated.unwrap() != plan.peakHostBytes or
+        calculated.unwrap() > plan.memoryBudgetBytes {
+        return Err<Bool, QwenConversionPlanError>(conversionPlanError(
+            "qwen.conversion.invalid-state", "peak_host_bytes",
+            "conversion plan memory geometry was modified"))
+    }
+    let expected = conversionPlanFingerprint(plan.memoryBudgetBytes,
+        plan.sourceWindowBytes, plan.codecWorkspaceBytes,
+        plan.writerChunkBytes, plan.evidenceBufferBytes,
+        plan.fixedOverheadBytes, plan.peakHostBytes, plan.maxArtifactBytes)
+    if expected.isErr() {
+        return Err<Bool, QwenConversionPlanError>(expected.unwrapErr())
+    }
+    let matches = expected.unwrap() == plan.planFingerprint
+    seen_string_release_owned(expected.unwrap())
+    if not matches {
+        return Err<Bool, QwenConversionPlanError>(conversionPlanError(
+            "qwen.conversion.invalid-state", "plan_fingerprint",
+            "conversion plan fingerprint does not match its fields"))
+    }
+    return Ok<Bool, QwenConversionPlanError>(true)
+}
+
+pub fun buildQwen38ConversionPlan(config: Qwen38Config,
+    catalog: QwenTensorCatalog, memoryBudgetBytes: UInt64,
+    sourceWindowBytes: UInt64, codecWorkspaceBytes: UInt64,
+    writerChunkBytes: UInt64, evidenceBufferBytes: UInt64,
+    fixedOverheadBytes: UInt64, maxArtifactBytes: UInt64)
+    r: Result<QwenConversionPlan, QwenConversionPlanError> {
+    let contract = validateQwen38Contract(config, catalog)
+    if contract.isErr() {
+        let contractError = contract.unwrapErr()
+        let code = if contractError.code == "qwen.contract.invalid-state" {
+            "qwen.conversion.invalid-state"
+        } else {
+            "qwen.conversion.unsupported-model"
+        }
+        return Err<QwenConversionPlan, QwenConversionPlanError>(
+            conversionPlanError(code, contractError.field,
+                "conversion requires the pinned Qwen3.8-27B contract"))
+    }
+    if memoryBudgetBytes == (0 as UInt64) or
+        memoryBudgetBytes > QWEN_CONVERSION_MAX_MEMORY_BYTES {
+        return Err<QwenConversionPlan, QwenConversionPlanError>(
+            conversionPlanError("qwen.conversion.limit", "memory_budget_bytes",
+                "conversion memory budget must be within 1 byte and 64 GiB"))
+    }
+    if sourceWindowBytes == (0 as UInt64) {
+        return Err<QwenConversionPlan, QwenConversionPlanError>(
+            conversionPlanError("qwen.conversion.input", "source_window_bytes",
+                "source window must be positive"))
+    }
+    if writerChunkBytes == (0 as UInt64) or
+        writerChunkBytes > QWEN_CONVERSION_MAX_WRITER_CHUNK_BYTES {
+        return Err<QwenConversionPlan, QwenConversionPlanError>(
+            conversionPlanError("qwen.conversion.limit", "writer_chunk_bytes",
+                "writer chunk must be within 1 byte and 1 MiB"))
+    }
+    if evidenceBufferBytes > QWEN_CONVERSION_MAX_EVIDENCE_BYTES {
+        return Err<QwenConversionPlan, QwenConversionPlanError>(
+            conversionPlanError("qwen.conversion.limit",
+                "evidence_buffer_bytes",
+                "evidence buffer must not exceed the SQW 64 MiB bound"))
+    }
+    if maxArtifactBytes == (0 as UInt64) or
+        maxArtifactBytes > QWEN_CONVERSION_SIGNED_SAFE_MAX {
+        return Err<QwenConversionPlan, QwenConversionPlanError>(
+            conversionPlanError("qwen.conversion.limit", "max_artifact_bytes",
+                "artifact bound must be positive and signed-safe"))
+    }
+
+    var peak = addReservation(0 as UInt64, sourceWindowBytes,
+        "source_window_bytes")
+    if peak.isErr() {
+        return Err<QwenConversionPlan, QwenConversionPlanError>(peak.unwrapErr())
+    }
+    peak = addReservation(peak.unwrap(), codecWorkspaceBytes,
+        "codec_workspace_bytes")
+    if peak.isErr() {
+        return Err<QwenConversionPlan, QwenConversionPlanError>(peak.unwrapErr())
+    }
+    peak = addReservation(peak.unwrap(), writerChunkBytes,
+        "writer_chunk_bytes")
+    if peak.isErr() {
+        return Err<QwenConversionPlan, QwenConversionPlanError>(peak.unwrapErr())
+    }
+    peak = addReservation(peak.unwrap(), evidenceBufferBytes,
+        "evidence_buffer_bytes")
+    if peak.isErr() {
+        return Err<QwenConversionPlan, QwenConversionPlanError>(peak.unwrapErr())
+    }
+    peak = addReservation(peak.unwrap(), fixedOverheadBytes,
+        "fixed_overhead_bytes")
+    if peak.isErr() {
+        return Err<QwenConversionPlan, QwenConversionPlanError>(peak.unwrapErr())
+    }
+    if peak.unwrap() > memoryBudgetBytes {
+        return Err<QwenConversionPlan, QwenConversionPlanError>(
+            conversionPlanError("qwen.conversion.budget", "peak_host_bytes",
+                "conversion reservations exceed the memory budget"))
+    }
+    let fingerprint = conversionPlanFingerprint(memoryBudgetBytes,
+        sourceWindowBytes, codecWorkspaceBytes, writerChunkBytes,
+        evidenceBufferBytes, fixedOverheadBytes, peak.unwrap(),
+        maxArtifactBytes)
+    if fingerprint.isErr() {
+        return Err<QwenConversionPlan, QwenConversionPlanError>(
+            fingerprint.unwrapErr())
+    }
+    return Ok<QwenConversionPlan, QwenConversionPlanError>(QwenConversionPlan{
+        sourceTotalBytes: QWEN_CONVERSION_SOURCE_BYTES,
+        sourceShardCount: QWEN_CONVERSION_SOURCE_SHARDS,
+        catalogTensorCount: QWEN_CONVERSION_CATALOG_TENSORS,
+        includedTensorCount: QWEN_CONVERSION_INCLUDED_TENSORS,
+        excludedVisionTensorCount: QWEN_CONVERSION_EXCLUDED_VISION_TENSORS,
+        maxOpenShards: 1 as UInt64, maxInFlightTensors: 1 as UInt64,
+        workerCount: 1 as UInt64, memoryBudgetBytes: memoryBudgetBytes,
+        sourceWindowBytes: sourceWindowBytes,
+        codecWorkspaceBytes: codecWorkspaceBytes,
+        writerChunkBytes: writerChunkBytes,
+        evidenceBufferBytes: evidenceBufferBytes,
+        fixedOverheadBytes: fixedOverheadBytes, peakHostBytes: peak.unwrap(),
+        maxArtifactBytes: maxArtifactBytes,
+        planFingerprint: fingerprint.unwrap(), closed: false
+    })
+}
