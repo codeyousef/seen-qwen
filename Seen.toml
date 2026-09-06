@@ -12,6 +12,7 @@ modules = [
     "src/formats/sqw_writer.seen",
     "src/converter/conversion_plan.seen",
     "src/converter/shard_stream.seen",
+    "src/converter/conversion_evidence.seen",
     "src/model/config.seen",
     "src/model/tensor_catalog.seen",
     "src/model/contract_geometry.seen",

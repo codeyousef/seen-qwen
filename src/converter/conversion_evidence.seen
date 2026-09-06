@@ -1,0 +1,816 @@
+///
+/// Streaming tensor checksums and a fail-closed Qwen conversion resume journal.
+///
+/// Journal validation proves identity and a canonical completed-tensor prefix.
+/// It never promotes or declares a partial SQW artifact reusable; independent
+/// readback and atomic promotion belong to QWN-032D.
+///
+
+import core.result.{Result}
+import crypto.sha256.{Sha256, sha256}
+import io.file.{writeTextAtomically}
+import json.builder.{jsonAppendBorrowedPart, jsonAppendEscapedString,
+    jsonAppendInt, jsonAppendOwnedPart, jsonFinishOwned}
+import json.parser.{JsonParseResult, destroyJsonParseResult}
+import json.strict.{StrictJsonLimits, parseStrictJson}
+import json.value.{JsonValue}
+import seen_qwen.converter.conversion_plan.{QwenConversionPlan}
+import seen_qwen.model.tensor_catalog.{QwenTensorCatalog}
+import str.string.{StringBuilder}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+let QWEN_CONVERT_MODEL_REVISION: String =
+    "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+let QWEN_CONVERT_CATALOG_SHA256: String =
+    "5f466d43bae3059e54f0bfe183d0e82c822242f45a834d778414d3e5b5248f1f"
+let QWEN_CONVERT_INCLUDED_TENSORS: Int = 866
+let QWEN_CONVERT_MAX_CHUNK_BYTES: Int = 1048576
+let QWEN_CONVERT_SIGNED_SAFE_MAX: UInt64 =
+    0x7FFFFFFFFFFFFFFF as UInt64
+
+pub class QwenConversionEvidenceError {
+    var code: String
+    var field: String
+    var message: String
+    var exitCode: Int
+    var retryable: Bool
+}
+
+fun qwenConvertError(code: String, field: String, message: String)
+    r: QwenConversionEvidenceError {
+    let exitCode = if code == "qwen.convert.closed" or
+        code == "qwen.convert.invalid-state" { 11 } else if
+        code == "qwen.convert.io" or code == "qwen.convert.cleanup" {
+            3
+        } else { 2 }
+    return QwenConversionEvidenceError{ code: code, field: field,
+        message: message, exitCode: exitCode, retryable: false }
+}
+
+fun qwenConvertDigestValid(value: String) r: Bool {
+    if value.length() != 64 { return false }
+    var index = 0
+    while index < value.length() {
+        let byte = value.byteAt(index)
+        if not ((byte >= 48 and byte <= 57) or
+            (byte >= 97 and byte <= 102)) { return false }
+        index = index + 1
+    }
+    return true
+}
+
+pub class QwenConversionIdentity {
+    var modelRevision: String
+    var modelLockSha256: String
+    var sourceLockSha256: String
+    var conversionPolicySha256: String
+    var catalogSha256: String
+    var planSha256: String
+    var toolchainCompatibilitySha256: String
+
+    static fun exact(modelLockSha256: String, sourceLockSha256: String,
+        conversionPolicySha256: String, planSha256: String,
+        toolchainCompatibilitySha256: String)
+        r: Result<QwenConversionIdentity, QwenConversionEvidenceError> {
+        if not qwenConvertDigestValid(modelLockSha256) or
+            not qwenConvertDigestValid(sourceLockSha256) or
+            not qwenConvertDigestValid(conversionPolicySha256) or
+            not qwenConvertDigestValid(planSha256) or
+            not qwenConvertDigestValid(toolchainCompatibilitySha256) {
+            return Err<QwenConversionIdentity, QwenConversionEvidenceError>(
+                qwenConvertError("qwen.convert.checksum", "identity",
+                    "conversion identity requires canonical SHA-256 digests"))
+        }
+        return Ok<QwenConversionIdentity, QwenConversionEvidenceError>(
+            QwenConversionIdentity{
+                modelRevision: QWEN_CONVERT_MODEL_REVISION,
+                modelLockSha256: modelLockSha256,
+                sourceLockSha256: sourceLockSha256,
+                conversionPolicySha256: conversionPolicySha256,
+                catalogSha256: QWEN_CONVERT_CATALOG_SHA256,
+                planSha256: planSha256,
+                toolchainCompatibilitySha256:
+                    toolchainCompatibilitySha256,
+            })
+    }
+}
+
+pub class QwenTensorEvidence {
+    var ordinal: Int
+    var name: String
+    var sourceBytes: UInt64
+    var convertedBytes: UInt64
+    var sourceSha256: String
+    var convertedSha256: String
+    var closed: Bool
+
+    fun close() r: Void {
+        if this.closed { return }
+        seen_string_release_owned(this.sourceSha256)
+        seen_string_release_owned(this.convertedSha256)
+        this.sourceBytes = 0 as UInt64
+        this.convertedBytes = 0 as UInt64
+        this.closed = true
+    }
+}
+
+fun qwenConvertChunkValid(bytes: Array<Int>) r: Bool {
+    if bytes.length() < 1 or bytes.length() > QWEN_CONVERT_MAX_CHUNK_BYTES {
+        return false
+    }
+    var index = 0
+    while index < bytes.length() {
+        if bytes[index] < 0 or bytes[index] > 255 { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun qwenConvertAdd(total: UInt64, amount: UInt64)
+    r: Result<UInt64, QwenConversionEvidenceError> {
+    if total > QWEN_CONVERT_SIGNED_SAFE_MAX or
+        amount > QWEN_CONVERT_SIGNED_SAFE_MAX - total {
+        return Err<UInt64, QwenConversionEvidenceError>(qwenConvertError(
+            "qwen.convert.bounds", "bytes",
+            "tensor byte accounting exceeds the signed-safe bound"))
+    }
+    return Ok<UInt64, QwenConversionEvidenceError>(total + amount)
+}
+
+fun qwenConvertParseU64(text: String)
+    r: Result<UInt64, QwenConversionEvidenceError> {
+    if text.length() == 0 or text.length() > 19 or
+        (text.length() > 1 and text.byteAt(0) == 48) {
+        return Err<UInt64, QwenConversionEvidenceError>(qwenConvertError(
+            "qwen.convert.schema", "decimal",
+            "journal integer is not canonical unsigned decimal"))
+    }
+    var value: UInt64 = 0 as UInt64
+    var index = 0
+    while index < text.length() {
+        let byte = text.byteAt(index)
+        if byte < 48 or byte > 57 {
+            return Err<UInt64, QwenConversionEvidenceError>(qwenConvertError(
+                "qwen.convert.schema", "decimal",
+                "journal integer contains a non-decimal byte"))
+        }
+        let digit = (byte - 48) as UInt64
+        if value > (QWEN_CONVERT_SIGNED_SAFE_MAX - digit) /
+            (10 as UInt64) {
+            return Err<UInt64, QwenConversionEvidenceError>(qwenConvertError(
+                "qwen.convert.bounds", "decimal",
+                "journal integer exceeds the signed-safe bound"))
+        }
+        value = value * (10 as UInt64) + digit
+        index = index + 1
+    }
+    return Ok<UInt64, QwenConversionEvidenceError>(value)
+}
+
+fun qwenDiscardHasher(state: Sha256) r: Void {
+    if state.finalized { return }
+    let digest = state.finalizeHex()
+    if digest.isErr() {
+        abort("qwen.convert.cleanup: failed to finalize discarded checksum")
+    }
+    seen_string_release_owned(digest.unwrap())
+}
+
+pub class QwenTensorChecksum {
+    var ordinal: Int
+    var name: String
+    var expectedSourceBytes: UInt64
+    var expectedConvertedBytes: UInt64
+    var sourceBytes: UInt64
+    var convertedBytes: UInt64
+    var source: Sha256
+    var converted: Sha256
+    var convertedStarted: Bool
+    var state: Int
+
+    static fun begin(ordinal: Int, name: String, sourceBytes: UInt64,
+        convertedBytes: UInt64)
+        r: Result<QwenTensorChecksum, QwenConversionEvidenceError> {
+        if ordinal < 0 or ordinal >= QWEN_CONVERT_INCLUDED_TENSORS or
+            name.length() < 1 or name.length() > 1024 {
+            return Err<QwenTensorChecksum, QwenConversionEvidenceError>(
+                qwenConvertError("qwen.convert.bounds", "tensor",
+                    "tensor identity is outside the bounded evidence schema"))
+        }
+        if sourceBytes == (0 as UInt64) or
+            convertedBytes == (0 as UInt64) or
+            sourceBytes > QWEN_CONVERT_SIGNED_SAFE_MAX or
+            convertedBytes > QWEN_CONVERT_SIGNED_SAFE_MAX {
+            return Err<QwenTensorChecksum, QwenConversionEvidenceError>(
+                qwenConvertError("qwen.convert.bounds", "tensor_bytes",
+                    "tensor evidence requires positive signed-safe extents"))
+        }
+        return Ok<QwenTensorChecksum, QwenConversionEvidenceError>(
+            QwenTensorChecksum{
+                ordinal: ordinal, name: name,
+                expectedSourceBytes: sourceBytes,
+                expectedConvertedBytes: convertedBytes,
+                sourceBytes: 0 as UInt64, convertedBytes: 0 as UInt64,
+                source: Sha256.new(), converted: Sha256.new(),
+                convertedStarted: false, state: 1,
+            })
+    }
+
+    fun updateSource(bytes: Array<Int>)
+        r: Result<Bool, QwenConversionEvidenceError> {
+        if this.state != 1 or this.convertedStarted {
+            return Err<Bool, QwenConversionEvidenceError>(qwenConvertError(
+                "qwen.convert.invalid-state", "source",
+                "source checksum is no longer accepting bytes"))
+        }
+        if not qwenConvertChunkValid(bytes) {
+            return Err<Bool, QwenConversionEvidenceError>(qwenConvertError(
+                "qwen.convert.bounds", "source_chunk",
+                "source checksum chunk must contain at most 1 MiB of bytes"))
+        }
+        let next = qwenConvertAdd(this.sourceBytes,
+            bytes.length() as UInt64)
+        if next.isErr() or next.unwrap() > this.expectedSourceBytes {
+            return Err<Bool, QwenConversionEvidenceError>(qwenConvertError(
+                "qwen.convert.bounds", "source_bytes",
+                "source checksum exceeds its declared tensor extent"))
+        }
+        let updated = this.source.updateBytes(bytes)
+        if updated.isErr() {
+            return Err<Bool, QwenConversionEvidenceError>(qwenConvertError(
+                "qwen.convert.checksum", "source",
+                "failed to update the source tensor checksum"))
+        }
+        this.sourceBytes = next.unwrap()
+        return Ok<Bool, QwenConversionEvidenceError>(true)
+    }
+
+    fun updateConverted(bytes: Array<Int>)
+        r: Result<Bool, QwenConversionEvidenceError> {
+        if this.state != 1 or
+            this.sourceBytes != this.expectedSourceBytes {
+            return Err<Bool, QwenConversionEvidenceError>(qwenConvertError(
+                "qwen.convert.invalid-state", "converted",
+                "converted checksum starts only after complete source input"))
+        }
+        if not qwenConvertChunkValid(bytes) {
+            return Err<Bool, QwenConversionEvidenceError>(qwenConvertError(
+                "qwen.convert.bounds", "converted_chunk",
+                "converted checksum chunk must contain at most 1 MiB of bytes"))
+        }
+        let next = qwenConvertAdd(this.convertedBytes,
+            bytes.length() as UInt64)
+        if next.isErr() or next.unwrap() > this.expectedConvertedBytes {
+            return Err<Bool, QwenConversionEvidenceError>(qwenConvertError(
+                "qwen.convert.bounds", "converted_bytes",
+                "converted checksum exceeds its declared tensor extent"))
+        }
+        this.convertedStarted = true
+        let updated = this.converted.updateBytes(bytes)
+        if updated.isErr() {
+            return Err<Bool, QwenConversionEvidenceError>(qwenConvertError(
+                "qwen.convert.checksum", "converted",
+                "failed to update the converted tensor checksum"))
+        }
+        this.convertedBytes = next.unwrap()
+        return Ok<Bool, QwenConversionEvidenceError>(true)
+    }
+
+    fun finish() r: Result<QwenTensorEvidence,
+        QwenConversionEvidenceError> {
+        if this.state != 1 or
+            this.sourceBytes != this.expectedSourceBytes or
+            this.convertedBytes != this.expectedConvertedBytes {
+            return Err<QwenTensorEvidence, QwenConversionEvidenceError>(
+                qwenConvertError("qwen.convert.incomplete", "tensor",
+                    "tensor checksums require both declared extents"))
+        }
+        let sourceDigest = this.source.finalizeHex()
+        if sourceDigest.isErr() {
+            qwenDiscardHasher(this.converted)
+            this.state = 3
+            return Err<QwenTensorEvidence, QwenConversionEvidenceError>(
+                qwenConvertError("qwen.convert.checksum", "source",
+                    "failed to finalize the source tensor checksum"))
+        }
+        let convertedDigest = this.converted.finalizeHex()
+        if convertedDigest.isErr() {
+            seen_string_release_owned(sourceDigest.unwrap())
+            this.state = 3
+            return Err<QwenTensorEvidence, QwenConversionEvidenceError>(
+                qwenConvertError("qwen.convert.checksum", "converted",
+                    "failed to finalize the converted tensor checksum"))
+        }
+        this.state = 2
+        return Ok<QwenTensorEvidence, QwenConversionEvidenceError>(
+            QwenTensorEvidence{
+                ordinal: this.ordinal, name: this.name,
+                sourceBytes: this.sourceBytes,
+                convertedBytes: this.convertedBytes,
+                sourceSha256: sourceDigest.unwrap(),
+                convertedSha256: convertedDigest.unwrap(), closed: false,
+            })
+    }
+
+    fun close() r: Void {
+        if this.state == 3 { return }
+        if this.state == 1 {
+            qwenDiscardHasher(this.source)
+            qwenDiscardHasher(this.converted)
+        }
+        this.sourceBytes = 0 as UInt64
+        this.convertedBytes = 0 as UInt64
+        this.state = 3
+    }
+}
+
+fun qwenJournalField(object: JsonValue, field: String) r: JsonValue? {
+    if not object.isObject() { return null }
+    var index = 0
+    while index < object.length() {
+        let key = object.keyAt(index)
+        let value = object.valueAt(index)
+        if key.isNone() or value.isNone() { return null }
+        if key.unwrap() == field { return value.unwrap() }
+        index = index + 1
+    }
+    return null
+}
+
+fun qwenJournalExactFields(object: JsonValue, fields: Array<String>) r: Bool {
+    if not object.isObject() or object.length() != fields.length() {
+        return false
+    }
+    var index = 0
+    while index < object.length() {
+        let key = object.keyAt(index)
+        let value = object.valueAt(index)
+        if key.isNone() or value.isNone() { return false }
+        var known = false
+        var fieldIndex = 0
+        while fieldIndex < fields.length() {
+            if key.unwrap() == fields[fieldIndex] { known = true }
+            fieldIndex = fieldIndex + 1
+        }
+        if not known { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun qwenJournalStringEquals(object: JsonValue, field: String,
+    expected: String) r: Bool {
+    let value = qwenJournalField(object, field)
+    return not value.isNone() and value.unwrap().isString() and
+        value.unwrap().getString() == expected
+}
+
+fun qwenJournalIncludedName(catalog: QwenTensorCatalog, ordinal: Int)
+    r: Result<String, QwenConversionEvidenceError> {
+    var catalogIndex = 0
+    var includedIndex = 0
+    while catalogIndex < catalog.length() {
+        let included = catalog.shouldExtractAt(catalogIndex)
+        if included.isErr() {
+            return Err<String, QwenConversionEvidenceError>(qwenConvertError(
+                "qwen.convert.invalid-state", "catalog",
+                "catalog became invalid during journal validation"))
+        }
+        if included.unwrap() {
+            if includedIndex == ordinal {
+                let name = catalog.nameAt(catalogIndex)
+                if name.isErr() {
+                    return Err<String, QwenConversionEvidenceError>(
+                        qwenConvertError("qwen.convert.invalid-state",
+                            "catalog", "catalog tensor name is unavailable"))
+                }
+                return Ok<String, QwenConversionEvidenceError>(name.unwrap())
+            }
+            includedIndex = includedIndex + 1
+        }
+        catalogIndex = catalogIndex + 1
+    }
+    return Err<String, QwenConversionEvidenceError>(qwenConvertError(
+        "qwen.convert.order", "ordinal",
+        "journal ordinal is outside the included tensor catalog"))
+}
+
+fun qwenValidateContext(identity: QwenConversionIdentity,
+    plan: QwenConversionPlan, catalog: QwenTensorCatalog)
+    r: Result<Bool, QwenConversionEvidenceError> {
+    if plan.validate().isErr() or catalog.length() != 1199 or
+        catalog.fingerprint != QWEN_CONVERT_CATALOG_SHA256 {
+        return Err<Bool, QwenConversionEvidenceError>(qwenConvertError(
+            "qwen.convert.invalid-state", "inputs",
+            "journal operations require live pinned plan and catalog inputs"))
+    }
+    if identity.modelRevision != QWEN_CONVERT_MODEL_REVISION or
+        identity.catalogSha256 != QWEN_CONVERT_CATALOG_SHA256 or
+        identity.planSha256 != plan.planFingerprint or
+        not qwenConvertDigestValid(identity.modelLockSha256) or
+        not qwenConvertDigestValid(identity.sourceLockSha256) or
+        not qwenConvertDigestValid(identity.conversionPolicySha256) or
+        not qwenConvertDigestValid(identity.toolchainCompatibilitySha256) {
+        return Err<Bool, QwenConversionEvidenceError>(qwenConvertError(
+            "qwen.convert.compatibility", "identity",
+            "conversion identity differs from the live pinned inputs"))
+    }
+    return Ok<Bool, QwenConversionEvidenceError>(true)
+}
+
+fun qwenEvidenceValid(evidence: QwenTensorEvidence) r: Bool {
+    return not evidence.closed and evidence.ordinal >= 0 and
+        evidence.ordinal < QWEN_CONVERT_INCLUDED_TENSORS and
+        evidence.name.length() > 0 and evidence.name.length() <= 1024 and
+        evidence.sourceBytes > (0 as UInt64) and
+        evidence.convertedBytes > (0 as UInt64) and
+        evidence.sourceBytes <= QWEN_CONVERT_SIGNED_SAFE_MAX and
+        evidence.convertedBytes <= QWEN_CONVERT_SIGNED_SAFE_MAX and
+        qwenConvertDigestValid(evidence.sourceSha256) and
+        qwenConvertDigestValid(evidence.convertedSha256)
+}
+
+fun qwenJournalAppendKey(builder: StringBuilder, ownership: Array<Bool>,
+    key: String) r: Void {
+    jsonAppendEscapedString(builder, ownership, key)
+    jsonAppendBorrowedPart(builder, ownership, ":")
+}
+
+fun qwenJournalAppendStringField(builder: StringBuilder,
+    ownership: Array<Bool>, key: String, value: String,
+    comma: Bool) r: Void {
+    if comma { jsonAppendBorrowedPart(builder, ownership, ",") }
+    qwenJournalAppendKey(builder, ownership, key)
+    jsonAppendEscapedString(builder, ownership, value)
+}
+
+fun qwenJournalAppendU64String(builder: StringBuilder,
+    ownership: Array<Bool>, key: String, value: UInt64) r: Void {
+    jsonAppendBorrowedPart(builder, ownership, ",")
+    qwenJournalAppendKey(builder, ownership, key)
+    jsonAppendBorrowedPart(builder, ownership, "\"")
+    jsonAppendOwnedPart(builder, ownership, value.toString())
+    jsonAppendBorrowedPart(builder, ownership, "\"")
+}
+
+pub fun renderQwenResumeJournal(identity: QwenConversionIdentity,
+    plan: QwenConversionPlan, catalog: QwenTensorCatalog,
+    entries: Array<QwenTensorEvidence>)
+    r: Result<String, QwenConversionEvidenceError> {
+    let context = qwenValidateContext(identity, plan, catalog)
+    if context.isErr() {
+        return Err<String, QwenConversionEvidenceError>(context.unwrapErr())
+    }
+    if entries.length() > QWEN_CONVERT_INCLUDED_TENSORS {
+        return Err<String, QwenConversionEvidenceError>(qwenConvertError(
+            "qwen.convert.bounds", "completed_count",
+            "resume journal exceeds the included tensor count"))
+    }
+    var sourceTotal: UInt64 = 0 as UInt64
+    var convertedTotal: UInt64 = 0 as UInt64
+    var index = 0
+    while index < entries.length() {
+        let expected = qwenJournalIncludedName(catalog, index)
+        if expected.isErr() or not qwenEvidenceValid(entries[index]) or
+            entries[index].ordinal != index or
+            entries[index].name != expected.unwrap() {
+            return Err<String, QwenConversionEvidenceError>(qwenConvertError(
+                "qwen.convert.order", "entries",
+                "evidence entries must be a canonical catalog prefix"))
+        }
+        let sourceAdded = qwenConvertAdd(sourceTotal,
+            entries[index].sourceBytes)
+        let convertedAdded = qwenConvertAdd(convertedTotal,
+            entries[index].convertedBytes)
+        if sourceAdded.isErr() or convertedAdded.isErr() {
+            return Err<String, QwenConversionEvidenceError>(qwenConvertError(
+                "qwen.convert.bounds", "entries",
+                "journal byte totals overflowed"))
+        }
+        sourceTotal = sourceAdded.unwrap()
+        convertedTotal = convertedAdded.unwrap()
+        if sourceTotal > plan.sourceTotalBytes or
+            convertedTotal > plan.maxArtifactBytes {
+            return Err<String, QwenConversionEvidenceError>(qwenConvertError(
+                "qwen.convert.bounds", "entries",
+                "journal byte totals exceed the conversion plan"))
+        }
+        index = index + 1
+    }
+
+    let builder = StringBuilder.new()
+    let ownership = Array<Bool>()
+    jsonAppendBorrowedPart(builder, ownership, "{")
+    qwenJournalAppendStringField(builder, ownership, "schema",
+        "seen-qwen-conversion-journal-v1", false)
+    qwenJournalAppendStringField(builder, ownership, "version", "1", true)
+    qwenJournalAppendStringField(builder, ownership, "output_format",
+        "SQW1", true)
+    qwenJournalAppendStringField(builder, ownership, "model_revision",
+        identity.modelRevision, true)
+    qwenJournalAppendStringField(builder, ownership, "model_lock_sha256",
+        identity.modelLockSha256, true)
+    qwenJournalAppendStringField(builder, ownership, "source_lock_sha256",
+        identity.sourceLockSha256, true)
+    qwenJournalAppendStringField(builder, ownership,
+        "conversion_policy_sha256", identity.conversionPolicySha256, true)
+    qwenJournalAppendStringField(builder, ownership, "catalog_sha256",
+        identity.catalogSha256, true)
+    qwenJournalAppendStringField(builder, ownership, "plan_sha256",
+        identity.planSha256, true)
+    qwenJournalAppendStringField(builder, ownership,
+        "toolchain_compatibility_sha256",
+        identity.toolchainCompatibilitySha256, true)
+    qwenJournalAppendStringField(builder, ownership, "tensor_order",
+        "canonical_included_catalog_prefix", true)
+    jsonAppendBorrowedPart(builder, ownership, ",")
+    qwenJournalAppendKey(builder, ownership, "completed_count")
+    jsonAppendInt(builder, ownership, entries.length())
+    jsonAppendBorrowedPart(builder, ownership, ",")
+    qwenJournalAppendKey(builder, ownership, "entries")
+    jsonAppendBorrowedPart(builder, ownership, "[")
+    index = 0
+    while index < entries.length() {
+        if index > 0 { jsonAppendBorrowedPart(builder, ownership, ",") }
+        let entry = entries[index]
+        jsonAppendBorrowedPart(builder, ownership, "{")
+        qwenJournalAppendKey(builder, ownership, "ordinal")
+        jsonAppendInt(builder, ownership, entry.ordinal)
+        qwenJournalAppendStringField(builder, ownership, "name",
+            entry.name, true)
+        qwenJournalAppendU64String(builder, ownership, "source_bytes",
+            entry.sourceBytes)
+        qwenJournalAppendU64String(builder, ownership, "converted_bytes",
+            entry.convertedBytes)
+        qwenJournalAppendStringField(builder, ownership, "source_sha256",
+            entry.sourceSha256, true)
+        qwenJournalAppendStringField(builder, ownership, "converted_sha256",
+            entry.convertedSha256, true)
+        jsonAppendBorrowedPart(builder, ownership, "}")
+        index = index + 1
+    }
+    jsonAppendBorrowedPart(builder, ownership, "]}")
+    let rendered = jsonFinishOwned(builder, ownership)
+    if rendered.length() > plan.evidenceBufferBytes as Int {
+        seen_string_release_owned(rendered)
+        return Err<String, QwenConversionEvidenceError>(qwenConvertError(
+            "qwen.convert.bounds", "journal",
+            "rendered journal exceeds the evidence buffer bound"))
+    }
+    return Ok<String, QwenConversionEvidenceError>(rendered)
+}
+
+pub class QwenResumeJournal {
+    var document: JsonParseResult
+    var completedCount: Int
+    var sourceBytes: UInt64
+    var convertedBytes: UInt64
+    var journalSha256: String
+    var closed: Bool
+
+    fun close() r: Void {
+        if this.closed { return }
+        destroyJsonParseResult(this.document, true)
+        seen_string_release_owned(this.journalSha256)
+        this.completedCount = 0
+        this.sourceBytes = 0 as UInt64
+        this.convertedBytes = 0 as UInt64
+        this.closed = true
+    }
+}
+
+fun qwenJournalRootFields() r: Array<String> {
+    let fields = Array<String>()
+    fields.push("schema"); fields.push("version")
+    fields.push("output_format")
+    fields.push("model_revision"); fields.push("model_lock_sha256")
+    fields.push("source_lock_sha256")
+    fields.push("conversion_policy_sha256"); fields.push("catalog_sha256")
+    fields.push("plan_sha256"); fields.push("toolchain_compatibility_sha256")
+    fields.push("tensor_order"); fields.push("completed_count")
+    fields.push("entries")
+    return fields
+}
+
+fun qwenJournalEntryFields() r: Array<String> {
+    let fields = Array<String>()
+    fields.push("ordinal"); fields.push("name")
+    fields.push("source_bytes"); fields.push("converted_bytes")
+    fields.push("source_sha256"); fields.push("converted_sha256")
+    return fields
+}
+
+fun qwenJournalU64(entry: JsonValue, field: String)
+    r: Result<UInt64, QwenConversionEvidenceError> {
+    let value = qwenJournalField(entry, field)
+    if value.isNone() or not value.unwrap().isString() {
+        return Err<UInt64, QwenConversionEvidenceError>(qwenConvertError(
+            "qwen.convert.schema", field,
+            "journal byte geometry must be a canonical decimal string"))
+    }
+    let parsed = qwenConvertParseU64(value.unwrap().getString())
+    if parsed.isErr() {
+        return Err<UInt64, QwenConversionEvidenceError>(qwenConvertError(
+            "qwen.convert.schema", field,
+            "journal byte geometry is not canonical unsigned decimal"))
+    }
+    return Ok<UInt64, QwenConversionEvidenceError>(parsed.unwrap())
+}
+
+pub fun validateQwenResumeJournal(text: String,
+    identity: QwenConversionIdentity, plan: QwenConversionPlan,
+    catalog: QwenTensorCatalog)
+    r: Result<QwenResumeJournal, QwenConversionEvidenceError> {
+    let context = qwenValidateContext(identity, plan, catalog)
+    if context.isErr() {
+        return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+            context.unwrapErr())
+    }
+    if text.length() < 2 or text.length() > plan.evidenceBufferBytes as Int {
+        return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+            qwenConvertError("qwen.convert.bounds", "journal",
+                "resume journal is empty or exceeds its admitted buffer"))
+    }
+    let parsed = parseStrictJson(text, StrictJsonLimits{
+        maxInputBytes: plan.evidenceBufferBytes as Int,
+        maxDepth: 8, maxValues: 10000, maxStringBytes: 2048,
+    })
+    if parsed.isErr() {
+        return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+            qwenConvertError("qwen.convert.json", "journal",
+                "resume journal is not strict bounded JSON"))
+    }
+    let document = parsed.unwrap()
+    if document.value.isNone() {
+        destroyJsonParseResult(document, true)
+        return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+            qwenConvertError("qwen.convert.schema", "journal",
+                "resume journal root is missing"))
+    }
+    let root = document.value.unwrap()
+    let rootFields = qwenJournalRootFields()
+    let rootExact = qwenJournalExactFields(root, rootFields)
+    rootFields.free()
+    if not rootExact {
+        destroyJsonParseResult(document, true)
+        return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+            qwenConvertError("qwen.convert.schema", "journal",
+                "resume journal fields differ from the closed v1 schema"))
+    }
+    if not qwenJournalStringEquals(root, "schema",
+            "seen-qwen-conversion-journal-v1") or
+        not qwenJournalStringEquals(root, "version", "1") or
+        not qwenJournalStringEquals(root, "output_format", "SQW1") or
+        not qwenJournalStringEquals(root, "model_revision",
+            identity.modelRevision) or
+        not qwenJournalStringEquals(root, "model_lock_sha256",
+            identity.modelLockSha256) or
+        not qwenJournalStringEquals(root, "source_lock_sha256",
+            identity.sourceLockSha256) or
+        not qwenJournalStringEquals(root, "conversion_policy_sha256",
+            identity.conversionPolicySha256) or
+        not qwenJournalStringEquals(root, "catalog_sha256",
+            identity.catalogSha256) or
+        not qwenJournalStringEquals(root, "plan_sha256",
+            identity.planSha256) or
+        not qwenJournalStringEquals(root, "toolchain_compatibility_sha256",
+            identity.toolchainCompatibilitySha256) or
+        not qwenJournalStringEquals(root, "tensor_order",
+            "canonical_included_catalog_prefix") {
+        destroyJsonParseResult(document, true)
+        return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+            qwenConvertError("qwen.convert.compatibility", "journal",
+                "resume journal identity is incompatible with this run"))
+    }
+    let countValue = qwenJournalField(root, "completed_count")
+    let entriesValue = qwenJournalField(root, "entries")
+    if countValue.isNone() or not countValue.unwrap().isNumber() or
+        entriesValue.isNone() or not entriesValue.unwrap().isArray() {
+        destroyJsonParseResult(document, true)
+        return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+            qwenConvertError("qwen.convert.schema", "entries",
+                "journal count and entries have invalid types"))
+    }
+    let completed = countValue.unwrap().getInt()
+    if countValue.unwrap().getNumber() != completed.toFloat() or
+        completed < 0 or completed > QWEN_CONVERT_INCLUDED_TENSORS or
+        entriesValue.unwrap().length() != completed {
+        destroyJsonParseResult(document, true)
+        return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+            qwenConvertError("qwen.convert.bounds", "completed_count",
+                "journal count differs from its bounded entries"))
+    }
+
+    var sourceTotal: UInt64 = 0 as UInt64
+    var convertedTotal: UInt64 = 0 as UInt64
+    var index = 0
+    while index < completed {
+        let entryValue = entriesValue.unwrap().getAt(index)
+        let entryFields = qwenJournalEntryFields()
+        let entryExact = not entryValue.isNone() and
+            qwenJournalExactFields(entryValue.unwrap(), entryFields)
+        entryFields.free()
+        if not entryExact {
+            destroyJsonParseResult(document, true)
+            return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+                qwenConvertError("qwen.convert.schema", "entry",
+                    "journal entry fields differ from the closed v1 schema"))
+        }
+        let entry = entryValue.unwrap()
+        let ordinalValue = qwenJournalField(entry, "ordinal")
+        let nameValue = qwenJournalField(entry, "name")
+        let sourceDigest = qwenJournalField(entry, "source_sha256")
+        let convertedDigest = qwenJournalField(entry, "converted_sha256")
+        let expectedName = qwenJournalIncludedName(catalog, index)
+        if ordinalValue.isNone() or not ordinalValue.unwrap().isNumber() or
+            ordinalValue.unwrap().getNumber() != index.toFloat() or
+            nameValue.isNone() or not nameValue.unwrap().isString() or
+            expectedName.isErr() or
+            nameValue.unwrap().getString() != expectedName.unwrap() {
+            destroyJsonParseResult(document, true)
+            return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+                qwenConvertError("qwen.convert.order", "entry",
+                    "journal entries are duplicate, reordered, or noncanonical"))
+        }
+        if sourceDigest.isNone() or not sourceDigest.unwrap().isString() or
+            convertedDigest.isNone() or
+            not convertedDigest.unwrap().isString() or
+            not qwenConvertDigestValid(sourceDigest.unwrap().getString()) or
+            not qwenConvertDigestValid(
+                convertedDigest.unwrap().getString()) {
+            destroyJsonParseResult(document, true)
+            return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+                qwenConvertError("qwen.convert.checksum", "entry",
+                    "journal entry checksum is not canonical SHA-256"))
+        }
+        let sourceBytes = qwenJournalU64(entry, "source_bytes")
+        let convertedBytes = qwenJournalU64(entry, "converted_bytes")
+        if sourceBytes.isErr() or convertedBytes.isErr() or
+            sourceBytes.unwrap() == (0 as UInt64) or
+            convertedBytes.unwrap() == (0 as UInt64) {
+            destroyJsonParseResult(document, true)
+            return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+                qwenConvertError("qwen.convert.bounds", "entry",
+                    "journal tensor extents must be positive and canonical"))
+        }
+        let sourceAdded = qwenConvertAdd(sourceTotal, sourceBytes.unwrap())
+        let convertedAdded = qwenConvertAdd(convertedTotal,
+            convertedBytes.unwrap())
+        if sourceAdded.isErr() or convertedAdded.isErr() {
+            destroyJsonParseResult(document, true)
+            return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+                qwenConvertError("qwen.convert.bounds", "entry",
+                    "journal tensor totals overflowed"))
+        }
+        sourceTotal = sourceAdded.unwrap()
+        convertedTotal = convertedAdded.unwrap()
+        if sourceTotal > plan.sourceTotalBytes or
+            convertedTotal > plan.maxArtifactBytes {
+            destroyJsonParseResult(document, true)
+            return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+                qwenConvertError("qwen.convert.bounds", "entry",
+                    "journal tensor totals exceed the conversion plan"))
+        }
+        index = index + 1
+    }
+    let digest = sha256(text)
+    if digest.isErr() {
+        destroyJsonParseResult(document, true)
+        return Err<QwenResumeJournal, QwenConversionEvidenceError>(
+            qwenConvertError("qwen.convert.checksum", "journal",
+                "failed to hash the validated resume journal"))
+    }
+    return Ok<QwenResumeJournal, QwenConversionEvidenceError>(
+        QwenResumeJournal{
+            document: document, completedCount: completed,
+            sourceBytes: sourceTotal, convertedBytes: convertedTotal,
+            journalSha256: digest.unwrap(), closed: false,
+        })
+}
+
+pub fun persistQwenResumeJournal(path: String, text: String,
+    identity: QwenConversionIdentity, plan: QwenConversionPlan,
+    catalog: QwenTensorCatalog)
+    r: Result<Bool, QwenConversionEvidenceError> {
+    if path.length() < 1 or path.length() > 4095 {
+        return Err<Bool, QwenConversionEvidenceError>(qwenConvertError(
+            "qwen.convert.bounds", "journal_path",
+            "journal path is empty or outside its byte bound"))
+    }
+    let validated = validateQwenResumeJournal(text, identity, plan, catalog)
+    if validated.isErr() {
+        return Err<Bool, QwenConversionEvidenceError>(validated.unwrapErr())
+    }
+    validated.unwrap().close()
+    if not writeTextAtomically(path, text) {
+        return Err<Bool, QwenConversionEvidenceError>(qwenConvertError(
+            "qwen.convert.io", "journal",
+            "atomic journal persistence failed and retained no partial output"))
+    }
+    return Ok<Bool, QwenConversionEvidenceError>(true)
+}
+
+pub fun releaseQwenJournalText(text: String) r: Void {
+    seen_string_release_owned(text)
+}

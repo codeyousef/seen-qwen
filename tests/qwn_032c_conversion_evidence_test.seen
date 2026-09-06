@@ -1,0 +1,167 @@
+import io.file.{deleteFile, exists, readText}
+import seen_qwen.converter.conversion_evidence.{QwenConversionIdentity,
+    QwenTensorChecksum, persistQwenResumeJournal,
+    releaseQwenJournalText, renderQwenResumeJournal,
+    validateQwenResumeJournal}
+import seen_qwen.converter.conversion_plan.{buildQwen38ConversionPlan}
+import seen_qwen.model.config.{parseQwen38Config}
+import seen_qwen.model.tensor_catalog.{parseQwenTensorCatalog}
+import str.string.{replaceFirst}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+let HASH_A: String =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+let HASH_B: String =
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+let HASH_C: String =
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+let BAD_HASH: String =
+    "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+let COMPATIBILITY_SHA256: String =
+    "06a48bafe0714b704047b900cd7f554bdf8a332c6fd6407ded907ebad8f54777"
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun bytes(first: Int, second: Int, third: Int) r: Array<Int> {
+    let output = Array<Int>()
+    output.push(first); output.push(second); output.push(third)
+    return output
+}
+
+fun main() r: Int {
+    let config = parseQwen38Config(
+        readText("tests/fixtures/qwen3_8_config.json")).unwrap()
+    let catalog = parseQwenTensorCatalog(
+        readText("tests/fixtures/qwen3_8_model.safetensors.index.json")).unwrap()
+    let plan = buildQwen38ConversionPlan(config, catalog,
+        4294967296 as UInt64, 67108864 as UInt64, 134217728 as UInt64,
+        1048576 as UInt64, 1048576 as UInt64, 268435456 as UInt64,
+        68719476736 as UInt64).unwrap()
+    let identity = QwenConversionIdentity.exact(HASH_A, HASH_B, HASH_C,
+        plan.planFingerprint, COMPATIBILITY_SHA256).unwrap()
+
+    let source = bytes(0, 1, 2)
+    let converted = bytes(3, 4, 5)
+    let firstHasher = QwenTensorChecksum.begin(0, "lm_head.weight",
+        3 as UInt64, 3 as UInt64).unwrap()
+    require(firstHasher.updateSource(source).unwrap(),
+        "hash the complete bounded source tensor")
+    require(firstHasher.updateConverted(converted).unwrap(),
+        "hash the complete bounded converted tensor")
+    let first = firstHasher.finish().unwrap()
+    require(first.sourceSha256.length() == 64 and
+        first.convertedSha256.length() == 64 and
+        first.sourceSha256 != first.convertedSha256,
+        "produce distinct canonical source and converted SHA-256 evidence")
+
+    let repeatedHasher = QwenTensorChecksum.begin(0, "lm_head.weight",
+        3 as UInt64, 3 as UInt64).unwrap()
+    repeatedHasher.updateSource(source).unwrap()
+    repeatedHasher.updateConverted(converted).unwrap()
+    let repeated = repeatedHasher.finish().unwrap()
+    require(repeated.sourceSha256 == first.sourceSha256 and
+        repeated.convertedSha256 == first.convertedSha256,
+        "repeat tensor checksums deterministically")
+    repeated.close(); repeatedHasher.close()
+
+    let entries = Array<QwenTensorEvidence>()
+    entries.push(first)
+    let renderedResult = renderQwenResumeJournal(identity, plan, catalog,
+        entries)
+    require(renderedResult.isOkay(),
+        "render a canonical one-entry resume journal")
+    let rendered = renderedResult.unwrap()
+    let journal = validateQwenResumeJournal(rendered, identity, plan,
+        catalog).unwrap()
+    require(journal.completedCount == 1 and
+        journal.sourceBytes == (3 as UInt64) and
+        journal.convertedBytes == (3 as UInt64) and
+        journal.journalSha256.length() == 64,
+        "validate exact journal identity, prefix order, totals, and digest")
+    journal.close(); journal.close()
+
+    let incompatible = replaceFirst(rendered, COMPATIBILITY_SHA256, HASH_A)
+    require(validateQwenResumeJournal(incompatible, identity, plan,
+        catalog).unwrapErr().code == "qwen.convert.compatibility",
+        "reject a stale toolchain compatibility identity")
+    let reordered = replaceFirst(rendered, "\"ordinal\":0",
+        "\"ordinal\":1")
+    require(validateQwenResumeJournal(reordered, identity, plan,
+        catalog).unwrapErr().code == "qwen.convert.order",
+        "reject a reordered or duplicate completed entry")
+    let corruptDigest = replaceFirst(rendered, first.sourceSha256, BAD_HASH)
+    let corruptResult = validateQwenResumeJournal(corruptDigest, identity,
+        plan, catalog)
+    require(corruptResult.unwrapErr().code == "qwen.convert.checksum",
+        "reject a corrupt per-tensor checksum")
+    let truncated = rendered.substring(0, rendered.length() - 1)
+    require(validateQwenResumeJournal(truncated, identity, plan,
+        catalog).unwrapErr().code == "qwen.convert.json",
+        "reject a truncated resume journal")
+
+    let journalPath = ".seen/ci/output/qwn_032c/journal.json"
+    require(persistQwenResumeJournal(journalPath, rendered, identity,
+        plan, catalog).unwrap(), "persist only a prevalidated journal atomically")
+    require(readText(journalPath) == rendered,
+        "read back the complete atomically persisted journal")
+    require(persistQwenResumeJournal(journalPath, corruptDigest, identity,
+        plan, catalog).unwrapErr().code == "qwen.convert.checksum" and
+        readText(journalPath) == rendered,
+        "preserve the prior journal when replacement validation fails")
+    require(persistQwenResumeJournal(
+        ".seen/ci/output/qwn_032c/missing/journal.json", rendered,
+        identity, plan, catalog).unwrapErr().code == "qwen.convert.io",
+        "report atomic persistence failure without a partial destination")
+    require(not exists(
+        ".seen/ci/output/qwn_032c/missing/journal.json"),
+        "leave no destination after failed atomic persistence")
+
+    let incomplete = QwenTensorChecksum.begin(1,
+        "model.language_model.embed_tokens.weight",
+        4 as UInt64, 3 as UInt64).unwrap()
+    require(incomplete.updateSource(source).unwrap(),
+        "accept a bounded incomplete checksum prefix")
+    require(incomplete.finish().unwrapErr().code ==
+        "qwen.convert.incomplete", "reject incomplete tensor evidence")
+    incomplete.close(); incomplete.close()
+    require(incomplete.updateSource(source).unwrapErr().code ==
+        "qwen.convert.invalid-state",
+        "make failed-work cleanup idempotent and reject use after close")
+    require(QwenTensorChecksum.begin(866, "outside", 1 as UInt64,
+        1 as UInt64).unwrapErr().code == "qwen.convert.bounds",
+        "reject evidence beyond the included tensor count")
+    let outOfOrder = QwenTensorChecksum.begin(1,
+        "model.language_model.embed_tokens.weight",
+        3 as UInt64, 3 as UInt64).unwrap()
+    require(outOfOrder.updateConverted(converted).unwrapErr().code ==
+        "qwen.convert.invalid-state",
+        "reject converted bytes before the source checksum completes")
+    outOfOrder.close()
+    let invalidBytes = bytes(256, 1, 2)
+    let invalidByteHasher = QwenTensorChecksum.begin(1,
+        "model.language_model.embed_tokens.weight",
+        3 as UInt64, 3 as UInt64).unwrap()
+    require(invalidByteHasher.updateSource(invalidBytes).unwrapErr().code ==
+        "qwen.convert.bounds", "reject bytes outside the octet domain")
+    invalidByteHasher.close(); invalidBytes.free()
+    require(QwenConversionIdentity.exact("ABC", HASH_B, HASH_C,
+        plan.planFingerprint, COMPATIBILITY_SHA256).unwrapErr().code ==
+        "qwen.convert.checksum", "reject noncanonical identity digests")
+
+    require(deleteFile(journalPath), "remove the owned journal fixture")
+    seen_string_release_owned(incompatible)
+    seen_string_release_owned(reordered)
+    seen_string_release_owned(corruptDigest)
+    seen_string_release_owned(truncated)
+    releaseQwenJournalText(rendered)
+    first.close(); firstHasher.close(); entries.free()
+    source.free(); converted.free()
+    plan.close(); catalog.close()
+    println("PASS: QWN-032C checksums, resume journal, and failure cleanup")
+    return 0
+}
+
+main()
