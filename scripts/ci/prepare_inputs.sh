@@ -7,16 +7,16 @@ ROOT_DIR="$(cd -P -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
 CI_ROOT="$ROOT_DIR/.seen/ci"
 DOWNLOAD_ROOT="$CI_ROOT/downloads"
 TOOLCHAIN_PARENT="$ROOT_DIR/.seen/toolchains"
-TOOLCHAIN_ROOT="$TOOLCHAIN_PARENT/seen-0.19.2-linux-x64"
+TOOLCHAIN_ROOT="$TOOLCHAIN_PARENT/seen-0.19.3-linux-x64"
 ASSET_ROOT="$ROOT_DIR/.seen/oracle-assets-qwen38"
 
-SEEN_ARCHIVE_URL="https://github.com/codeyousef/SeenLang/releases/download/v0.19.2/seen-0.19.2-linux-x64.tar.gz"
-SEEN_ARCHIVE_SHA256="e830da3fb246fd03e64d203dd7291e0b38390b211bbc794a9793b80fa6b901aa"
-SEEN_COMPILER_SHA256="e7dc3fab02292a7c04303e5d1574d7f87bfcbe72b6827364c2f3588192134d95"
-SEEN_PACKAGE_CLIENT_SHA256="8de71225c7600093df230129fbd71d9ec2f8b5b5a59fe9b4ec59305e977cbc4f"
-SEEN_COMPATIBILITY_SHA256="f5fe5bebb9a6d533f65f0726026b6a2e2e7b82d8ef0ed7be9c21899edd9ad313"
-SEEN_SOURCE_COMMIT="336baa3ac728bf0887deaf119f405313527409d9"
-SEEN_BUILD_ID="5c05b97f921349ef603908cabf0531e09c071acb"
+SEEN_ARCHIVE_URL="https://github.com/codeyousef/SeenLang/releases/download/v0.19.3/seen-0.19.3-linux-x64.tar.gz"
+SEEN_ARCHIVE_SHA256="3c717c50b9b9ccedc720d758cd5f48a3ac903b407f87bddd30816aaf994f8b92"
+SEEN_COMPILER_SHA256="95d35317179f08ee4106ad47e9a02ce9cd8f680aac6d01efc4f292026731ad0f"
+SEEN_PACKAGE_CLIENT_SHA256="884197e1bc68e59ac986ebb3a4a82b9f3484b8d392d87fda429c458d03ada40f"
+SEEN_COMPATIBILITY_SHA256="06a48bafe0714b704047b900cd7f554bdf8a332c6fd6407ded907ebad8f54777"
+SEEN_SOURCE_COMMIT="64dbdc3b86f587e89317f7a62d9278111434eb62"
+SEEN_BUILD_ID="721884f58e422ad712c763f3e75fe8fb7b215ee2"
 SEEN_CPU_BASELINE="x86-64"
 QWEN_REVISION="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 QWEN_VOCAB_URL="https://huggingface.co/Qwen/Qwen3.8-27B/resolve/$QWEN_REVISION/vocab.json?download=true"
@@ -99,7 +99,7 @@ verify_provenance() {
     [ -f "$verifier" ] && [ -x "$verifier" ] && [ ! -L "$verifier" ] ||
         return 1
     [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
-    "$verifier" "$manifest" "$root/bin/seen" 0.19.2 || return 1
+    "$verifier" "$manifest" "$root/bin/seen" 0.19.3 || return 1
     grep -Fqx -- "source_commit=$SEEN_SOURCE_COMMIT" "$manifest" || return 1
     grep -Fqx -- "compiler_build_id=$SEEN_BUILD_ID" "$manifest" || return 1
     grep -Fqx -- "cpu_baseline=$SEEN_CPU_BASELINE" "$manifest" || return 1
@@ -191,7 +191,7 @@ ensure_local_directory "$DOWNLOAD_ROOT"
 ensure_local_directory "$TOOLCHAIN_PARENT"
 ensure_local_directory "$ASSET_ROOT"
 
-archive="$DOWNLOAD_ROOT/seen-0.19.2-linux-x64.tar.gz"
+archive="$DOWNLOAD_ROOT/seen-0.19.3-linux-x64.tar.gz"
 download_verified "$SEEN_ARCHIVE_URL" "$archive" "$SEEN_ARCHIVE_SHA256"
 
 extract_root=$(mktemp -d "$CI_ROOT/toolchain.extract.XXXXXX")
@@ -209,7 +209,7 @@ cleanup_extract() {
 trap cleanup_extract EXIT
 while IFS= read -r member; do
     case "$member" in
-        seen-0.19.2-linux-x64|seen-0.19.2-linux-x64/*) ;;
+        seen-0.19.3-linux-x64|seen-0.19.3-linux-x64/*) ;;
         *) fail "release archive contains an unsafe member: $member" ;;
     esac
     case "/$member/" in
@@ -217,7 +217,7 @@ while IFS= read -r member; do
     esac
 done < <(tar -tzf "$archive")
 tar -xzf "$archive" -C "$extract_root" --no-same-owner --no-same-permissions
-extracted="$extract_root/seen-0.19.2-linux-x64"
+extracted="$extract_root/seen-0.19.3-linux-x64"
 [ -d "$extracted" ] && [ ! -L "$extracted" ] ||
     fail "release archive did not contain the expected root"
 unexpected_type=$(find "$extracted" -mindepth 1 ! -type f ! -type d -print -quit)
@@ -254,4 +254,4 @@ download_verified "$QWEN_GENERATION_URL" "$ASSET_ROOT/generation_config.json" \
 download_verified "$QWEN_MODEL_CARD_URL" "$ASSET_ROOT/README.md" \
     "$QWEN_MODEL_CARD_SHA256" "$QWEN_MODEL_CARD_BYTES"
 
-echo "PASS: exact Seen v0.19.2 toolchain and Qwen tokenizer/sampling inputs verified"
+echo "PASS: exact Seen v0.19.3 toolchain and Qwen tokenizer/sampling inputs verified"

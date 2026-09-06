@@ -1,0 +1,236 @@
+import core.error.{AsciiString}
+import core.operation_context.{OperationContext, OperationLimits}
+import fs.file.{File}
+import fs.operations.{createDirectoryPath, removeSingle}
+import fs.types.{DirectIoPolicy, OpenOptions, Path}
+import seen_qwen.formats.sqw_reader.{SqwReader, SqwReaderPolicy}
+import seen_qwen.formats.sqw_writer.{SqwWriter}
+
+let SOURCE: String = ".seen/ci/output/qwn_030b/valid.sqw"
+let CORRUPT_SOURCE: String = ".seen/ci/output/qwn_030b/wrong_magic.sqw"
+let DESTINATION: String = ".seen/ci/output/qwn_030c/promoted.sqw"
+let SECOND_DESTINATION: String = ".seen/ci/output/qwn_030c/promoted_again.sqw"
+let MODEL_LOCK_SHA256: String =
+    "824dff67e12a89b9666ef2e6a4bb096a90237bc17a9b035f17d4bc9d1087a3e7"
+let SOURCE_LOCK_SHA256: String =
+    "f88fed54ff10c432246c97e4a3e8a38808031a641e97bb445d0e746e4a04a26e"
+let CONVERSION_POLICY_SHA256: String =
+    "bc16cb12cf28751f6177dbe6f68111910fc93168f8be3d2fdd08235a1af8dd67"
+let CATALOG_SHA256: String =
+    "8b1cae64c27775fb611e9580ad544c02cfd4e85d5538b404f5c0ce9b0a3af019"
+let VALID_WHOLE_SHA256: String =
+    "6d885b6c8839b72b4da1f54cc99e96b9cccc2e7a744b0d9609444cca2939b5fd"
+let WRONG_MAGIC_WHOLE_SHA256: String =
+    "7c40742f45c0451af434f65aae95a9e1eb33db2b53516cfd4b42df98448b1705"
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun context(cancelled: Bool) r: OperationContext {
+    return OperationContext{
+        cancellation: cancelled,
+        monotonicDeadline: 0 as Int64,
+        limits: OperationLimits{
+            maxTargets: 8,
+            maxIdentityBytes: 128,
+            maxVersionBytes: 128,
+            maxManifestBytes: 16777216,
+            maxPathBytes: 4095,
+            maxGraphModules: 4096,
+            maxGraphEdges: 65536,
+            maxGraphDepth: 128,
+        },
+        traceId: AsciiString{ value: "qwn-030c" },
+    }
+}
+
+fun policy(wholeDigest: String) r: SqwReaderPolicy {
+    return SqwReaderPolicy.exact(MODEL_LOCK_SHA256, SOURCE_LOCK_SHA256,
+        CONVERSION_POLICY_SHA256, CATALOG_SHA256, wholeDigest,
+        2 as UInt32, 4)
+}
+
+fun discardPath(path: String) r: Void {
+    let parsed = Path.fromString(path)
+    if parsed.isErr() { return }
+    let _discarded = removeSingle(parsed.unwrap(), false)
+}
+
+fun ensureOutputDirectory() r: Void {
+    let parsed = Path.fromString(".seen/ci/output/qwn_030c")
+    require(parsed.isOkay(), "writer output directory path must be valid")
+    let created = createDirectoryPath(context(false), parsed.unwrap(),
+        448 as UInt64)
+    if created.isErr() {
+        require(created.unwrapErr().code == "fs.exists",
+            "create or reuse the bounded writer output directory")
+    }
+}
+
+fun readFixture(path: String) r: Array<Int> {
+    let operation = context(false)
+    let parsed = Path.fromString(path)
+    require(parsed.isOkay(), "fixture path must be valid")
+    let opened = File.open(operation, parsed.unwrap(), OpenOptions.readOnly(),
+        DirectIoPolicy.Off)
+    require(opened.isOkay(), "open bounded SQW fixture")
+    let file = opened.unwrap()
+    let metadata = file.metadata(operation)
+    require(metadata.isOkay() and metadata.unwrap().size > (0 as UInt64) and
+        metadata.unwrap().size <= (65536 as UInt64),
+        "fixture extent must remain inside the test bound")
+    let bytes = Array<Int>()
+    var fill = 0
+    while fill < (metadata.unwrap().size as Int) {
+        bytes.push(0)
+        fill = fill + 1
+    }
+    let read = file.readAt(operation, 0 as UInt64, bytes, 0, bytes.length())
+    require(read.isOkay() and read.unwrap() == bytes.length(),
+        "read the complete bounded SQW fixture")
+    require(file.close().isOkay(), "close source fixture")
+    return bytes
+}
+
+fun writeInChunks(writer: SqwWriter, bytes: Array<Int>, chunkBytes: Int)
+    r: Void {
+    var offset = 0
+    while offset < bytes.length() {
+        var count = chunkBytes
+        if count > bytes.length() - offset { count = bytes.length() - offset }
+        let chunk = Array<Int>()
+        var index = 0
+        while index < count {
+            chunk.push(bytes[offset + index])
+            index = index + 1
+        }
+        require(writer.write(chunk).isOkay(), "write bounded SQW chunk")
+        chunk.free()
+        offset = offset + count
+    }
+}
+
+fun createArtifact(source: String, destination: String, wholeDigest: String,
+    chunkBytes: Int, replaceExisting: Bool) r: SqwWriter {
+    let bytes = readFixture(source)
+    let begun = SqwWriter.begin(destination, bytes.length() as UInt64,
+        chunkBytes, replaceExisting, context(false), policy(wholeDigest))
+    require(begun.isOkay(), "create unique same-directory SQW staging owner")
+    let writer = begun.unwrap()
+    writeInChunks(writer, bytes, chunkBytes)
+    bytes.free()
+    return writer
+}
+
+fun verifyDestination(path: String) r: Void {
+    let opened = SqwReader.open(path, policy(VALID_WHOLE_SHA256))
+    require(opened.isOkay(), "promoted destination must pass the full reader")
+    let reader = opened.unwrap()
+    require(reader.length() == 2 and reader.nameAt(0).unwrap() ==
+        "lm_head.weight" and reader.nameAt(1).unwrap() ==
+        "model.language_model.embed_tokens.weight",
+        "promotion preserves deterministic first and last tensors")
+    require(reader.close().isOkay(), "close promoted destination reader")
+}
+
+fun requireSameArtifact(leftPath: String, rightPath: String) r: Void {
+    let left = readFixture(leftPath)
+    let right = readFixture(rightPath)
+    require(left.length() == right.length(),
+        "deterministic SQW artifacts must have the same extent")
+    var index = 0
+    while index < left.length() {
+        require(left[index] == right[index],
+            "chunk boundaries must not alter any promoted SQW byte")
+        index = index + 1
+    }
+    left.free(); right.free()
+}
+
+fun testPromotionAndDeterminism() r: Void {
+    discardPath(DESTINATION)
+    discardPath(SECOND_DESTINATION)
+    let first = createArtifact(SOURCE, DESTINATION, VALID_WHOLE_SHA256, 17, true)
+    require(first.length() > (4096 as UInt64),
+        "stream the complete artifact across many bounded chunks")
+    require(first.commit().unwrap(), "validate and durably promote SQW")
+    require(first.isPromoted(), "writer records the promoted state")
+    require(not first.commit().unwrap(), "repeated commit is idempotent")
+    require(not first.abort().unwrap(), "abort cannot remove a promoted artifact")
+    verifyDestination(DESTINATION)
+
+    let second = createArtifact(SOURCE, SECOND_DESTINATION,
+        VALID_WHOLE_SHA256, 1024, true)
+    require(second.commit().unwrap(), "promote identical bytes with another chunking")
+    verifyDestination(SECOND_DESTINATION)
+    requireSameArtifact(DESTINATION, SECOND_DESTINATION)
+}
+
+fun testFailedValidationPreservesDestination() r: Void {
+    let corrupt = createArtifact(CORRUPT_SOURCE, DESTINATION,
+        WRONG_MAGIC_WHOLE_SHA256, 257, true)
+    let rejected = corrupt.commit()
+    require(rejected.isErr() and rejected.unwrapErr().code == "sqw.magic",
+        "full reopen validation rejects corruption before rename")
+    require(not corrupt.isPromoted(), "rejected bytes were never promoted")
+    require(corrupt.abort().unwrap(), "remove rejected staging artifact")
+    require(not corrupt.abort().unwrap(), "rejected cleanup is idempotent")
+    verifyDestination(DESTINATION)
+}
+
+fun testBoundsCancellationAndNoReplace() r: Void {
+    let bytes = readFixture(SOURCE)
+    let incomplete = SqwWriter.begin(SECOND_DESTINATION,
+        bytes.length() as UInt64, 32, true, context(false),
+        policy(VALID_WHOLE_SHA256)).unwrap()
+    let one = Array<Int>()
+    one.push(bytes[0])
+    require(incomplete.write(one).isOkay(), "accept a bounded one-byte chunk")
+    let shortCommit = incomplete.commit()
+    require(shortCommit.isErr() and shortCommit.unwrapErr().code ==
+        "sqw.incomplete", "reject incomplete staging before sync or rename")
+    require(incomplete.abort().unwrap(), "clean incomplete staging")
+
+    let invalidChunk = SqwWriter.begin(SECOND_DESTINATION,
+        bytes.length() as UInt64, 4, true, context(false),
+        policy(VALID_WHOLE_SHA256)).unwrap()
+    let bad = Array<Int>()
+    bad.push(256)
+    require(invalidChunk.write(bad).isErr() and
+        invalidChunk.length() == (0 as UInt64),
+        "reject non-byte input without advancing writer state")
+    require(invalidChunk.abort().unwrap(), "clean invalid-chunk staging")
+
+    let cancelled = SqwWriter.begin(SECOND_DESTINATION,
+        bytes.length() as UInt64, 32, true, context(true),
+        policy(VALID_WHOLE_SHA256))
+    require(cancelled.isErr() and cancelled.unwrapErr().code == "sqw.cancelled",
+        "reject cancellation before creating a staging owner")
+    require(SqwWriter.begin(SECOND_DESTINATION,
+        0x8000000000000000 as UInt64, 32, true, context(false),
+        policy(VALID_WHOLE_SHA256)).isErr(),
+        "reject an extent with the signed-safe high bit set")
+
+    let noReplace = createArtifact(SOURCE, DESTINATION,
+        VALID_WHOLE_SHA256, 509, false)
+    let collision = noReplace.commit()
+    require(collision.isErr() and collision.unwrapErr().code == "sqw.promote",
+        "explicit no-replace policy preserves an existing destination")
+    require(noReplace.abort().unwrap(), "clean collision staging")
+    verifyDestination(DESTINATION)
+    one.free(); bad.free(); bytes.free()
+}
+
+fun main() r: Int {
+    ensureOutputDirectory()
+    testPromotionAndDeterminism()
+    testFailedValidationPreservesDestination()
+    testBoundsCancellationAndNoReplace()
+    discardPath(DESTINATION)
+    discardPath(SECOND_DESTINATION)
+    println("PASS: QWN-030C bounded deterministic SQW writer and atomic promotion")
+    return 0
+}
+
+main()
