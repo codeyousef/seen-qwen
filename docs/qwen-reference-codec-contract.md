@@ -1,4 +1,4 @@
-# Qwen BF16 and F16 reference codec contract
+# Qwen BF16, F16, and Q8 reference codec contract
 
 `seen_qwen.quant.reference_codec` is the deterministic CPU reference for the
 two initial 16-bit weight codecs. It is conversion and correctness machinery,
@@ -35,3 +35,37 @@ The implementation is native Seen and has no C/C++ ABI, CUDA dependency,
 allocation fallback, retry path, asynchronous work, or cancellation wait.
 Decoded arrays are owned by the caller and must be freed. No default
 quantization/profile choice is made by this contract.
+
+## Q8_SYM_G64
+
+`encodeQ8SymG64Buffer(values, rowElements, elementLimit)` treats the input as
+complete row-major rows and resets grouping at every row boundary. Each group
+contains at most 64 logical FP32 values. The API requires a positive row width
+and element limit, rejects incomplete rows, and checks group and scale geometry
+before allocating output.
+
+For each group, the encoder first rejects non-finite input and rounds every
+source value to binary32. It computes `max_abs` over only the group's logical
+values. An all-zero group stores FP16 zero scale and zero codes. Otherwise it
+computes the binary32 scale `max_abs / 127`, requires that scale to encode as a
+finite nonzero FP16 value, and quantizes each binary32 value against the
+computed binary32 scale. Quantization uses deterministic round-to-nearest,
+ties-to-even, then clamps to `[-127, 127]`. Code `-128` is never emitted.
+
+The payload owns one signed two's-complement byte per logical value and owns one
+FP16 scale per group. A final short group is conceptually zero-padded for group
+semantics, but the payload stores no padding bytes and retains the logical row
+width and element count. `decodeQ8SymG64Buffer` interprets each code as signed,
+rejects `-128`, rejects negative or non-finite scales, rejects nonzero codes
+paired with a zero scale, and reconstructs `float(code) * float(fp16_scale)`.
+It validates the codec identity, row geometry, payload length, scale count, and
+caller limit before allocating decoded output.
+
+`ReferenceQ8Buffer` owns both arrays. `close()` frees them, clears geometry,
+is idempotent, and invalidates future decoding. The decoded `Array<Float>` is
+owned by the caller. In addition to the shared diagnostics above, Q8 uses
+`qwen.codec.geometry` for non-canonical row, payload, or scale geometry.
+
+This is a CPU correctness reference. It defines no automatic codec selection,
+CUDA behavior, performance claim, retry, repair, padding storage, zero point,
+or fallback.
