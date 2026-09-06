@@ -1,10 +1,12 @@
 ///
-/// Deterministic finite BF16 and IEEE binary16 reference codecs.
+/// Deterministic finite BF16, IEEE binary16, and Q8_SYM_G64 reference codecs.
 ///
 /// Inputs are rounded to IEEE binary32 before conversion. Both encoders use
 /// round-to-nearest, ties-to-even. Signed zero and finite subnormals are
 /// preserved; NaN, infinity, and conversion overflow fail closed. Encoded
 /// buffers own their UInt16 payload and close deterministically/idempotently.
+/// Q8 buffers additionally own one signed byte per logical value and one FP16
+/// scale per row-major group of at most 64 values.
 ///
 /// Contract test: FEL-1419 / QWN-031A
 ///
@@ -46,6 +48,34 @@ pub class Reference16Buffer {
     fun close() r: Void {
         if this.closed { return }
         this.words.free()
+        this.closed = true
+    }
+}
+
+pub class ReferenceQ8Buffer {
+    var codec: String
+    var rowElements: UInt64
+    var logicalElements: UInt64
+    var codes: Array<UInt8>
+    var scales: Array<UInt16>
+    var closed: Bool
+
+    fun length() r: UInt64 {
+        if this.closed { return 0 as UInt64 }
+        return this.logicalElements
+    }
+
+    fun groupCount() r: UInt64 {
+        if this.closed { return 0 as UInt64 }
+        return this.scales.length() as UInt64
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.codes.free()
+        this.scales.free()
+        this.rowElements = 0 as UInt64
+        this.logicalElements = 0 as UInt64
         this.closed = true
     }
 }
@@ -377,6 +407,217 @@ pub fun decodeFloat16Buffer(buffer: Reference16Buffer,
         }
         values.push(decoded.unwrap().value)
         index = index + 1
+    }
+    return Ok<Array<Float>, ReferenceCodecError>(values)
+}
+
+fun q8GroupsPerRow(rowElements: UInt64, operation: String)
+    r: Result<UInt64, ReferenceCodecError> {
+    if rowElements == (0 as UInt64) {
+        return Err<UInt64, ReferenceCodecError>(codecError(
+            "qwen.codec.input", operation,
+            "row element count must be positive", 2))
+    }
+    if rowElements > (0xFFFFFFFFFFFFFFC0 as UInt64) {
+        return Err<UInt64, ReferenceCodecError>(codecError(
+            "qwen.codec.range", operation,
+            "row group geometry overflows UInt64", 2))
+    }
+    return Ok<UInt64, ReferenceCodecError>(
+        (rowElements + (63 as UInt64)) / (64 as UInt64))
+}
+
+fun q8ExpectedGroups(logicalElements: UInt64, rowElements: UInt64,
+    elementLimit: UInt64, operation: String)
+    r: Result<UInt64, ReferenceCodecError> {
+    if elementLimit == (0 as UInt64) {
+        return Err<UInt64, ReferenceCodecError>(codecError(
+            "qwen.codec.input", operation,
+            "element limit must be positive", 2))
+    }
+    if logicalElements > elementLimit or rowElements > elementLimit {
+        return Err<UInt64, ReferenceCodecError>(codecError(
+            "qwen.codec.limit", operation,
+            "Q8 geometry exceeds the explicit element limit", 2))
+    }
+    let groupsPerRow = q8GroupsPerRow(rowElements, operation)
+    if groupsPerRow.isErr() {
+        return Err<UInt64, ReferenceCodecError>(groupsPerRow.unwrapErr())
+    }
+    if logicalElements % rowElements != (0 as UInt64) {
+        return Err<UInt64, ReferenceCodecError>(codecError(
+            "qwen.codec.geometry", operation,
+            "logical element count must contain complete rows", 2))
+    }
+    let rows = logicalElements / rowElements
+    if rows > (0 as UInt64) and
+        groupsPerRow.unwrap() > (0xFFFFFFFFFFFFFFFF as UInt64) / rows {
+        return Err<UInt64, ReferenceCodecError>(codecError(
+            "qwen.codec.range", operation,
+            "Q8 scale geometry overflows UInt64", 2))
+    }
+    return Ok<UInt64, ReferenceCodecError>(rows * groupsPerRow.unwrap())
+}
+
+fun q8RoundEven(value: Float) r: Int {
+    let negative = value < 0.0
+    let magnitude = if negative { -value } else { value }
+    var rounded = magnitude as Int
+    let remainder = magnitude - (rounded as Float)
+    if remainder > 0.5 or (remainder == 0.5 and rounded % 2 != 0) {
+        rounded = rounded + 1
+    }
+    if negative { return -rounded }
+    return rounded
+}
+
+fun q8CodeByte(value: Int) r: UInt8 {
+    if value < 0 { return (value + 256) as UInt8 }
+    return value as UInt8
+}
+
+fun q8SignedCode(value: UInt8) r: Int {
+    let widened = value as Int
+    if widened > 127 { return widened - 256 }
+    return widened
+}
+
+pub fun encodeQ8SymG64Buffer(values: Array<Float>, rowElements: UInt64,
+    elementLimit: UInt64) r: Result<ReferenceQ8Buffer, ReferenceCodecError> {
+    let logicalElements = values.length() as UInt64
+    let expectedGroups = q8ExpectedGroups(logicalElements, rowElements,
+        elementLimit, "q8.encode-buffer")
+    if expectedGroups.isErr() {
+        return Err<ReferenceQ8Buffer, ReferenceCodecError>(
+            expectedGroups.unwrapErr())
+    }
+    let codes = Array<UInt8>()
+    let scales = Array<UInt16>()
+    let groupsPerRow = q8GroupsPerRow(rowElements,
+        "q8.encode-buffer").unwrap()
+    let rows = logicalElements / rowElements
+    var row: UInt64 = 0 as UInt64
+    while row < rows {
+        var group: UInt64 = 0 as UInt64
+        while group < groupsPerRow {
+            let first = row * rowElements + group * (64 as UInt64)
+            var count = rowElements - group * (64 as UInt64)
+            if count > (64 as UInt64) { count = 64 as UInt64 }
+            var maxAbs: Float = 0.0
+            var offset: UInt64 = 0 as UInt64
+            while offset < count {
+                let source = finiteFloat32Bits(values[(first + offset) as Int],
+                    "q8.encode-buffer")
+                if source.isErr() {
+                    codes.free(); scales.free()
+                    return Err<ReferenceQ8Buffer, ReferenceCodecError>(
+                        source.unwrapErr())
+                }
+                let rounded = values[(first + offset) as Int] as Float32
+                let magnitude = abs(rounded as Float)
+                if magnitude > maxAbs { maxAbs = magnitude }
+                offset = offset + (1 as UInt64)
+            }
+            if maxAbs == 0.0 {
+                scales.push(0 as UInt16)
+                offset = 0 as UInt64
+                while offset < count {
+                    codes.push(0 as UInt8)
+                    offset = offset + (1 as UInt64)
+                }
+            } else {
+                let scale = (maxAbs as Float32) / (127.0 as Float32)
+                let storedScale = encodeFloat16(scale as Float)
+                if storedScale.isErr() or storedScale.unwrap().bits ==
+                    (0 as UInt16) {
+                    codes.free(); scales.free()
+                    return Err<ReferenceQ8Buffer, ReferenceCodecError>(
+                        codecError("qwen.codec.range", "q8.encode-buffer",
+                            "nonzero Q8 group scale is not representable as finite FP16", 2))
+                }
+                scales.push(storedScale.unwrap().bits)
+                offset = 0 as UInt64
+                while offset < count {
+                    let source = values[(first + offset) as Int] as Float32
+                    var quantized = q8RoundEven(
+                        (source / scale) as Float)
+                    if quantized < -127 { quantized = -127 }
+                    if quantized > 127 { quantized = 127 }
+                    codes.push(q8CodeByte(quantized))
+                    offset = offset + (1 as UInt64)
+                }
+            }
+            group = group + (1 as UInt64)
+        }
+        row = row + (1 as UInt64)
+    }
+    return Ok<ReferenceQ8Buffer, ReferenceCodecError>(ReferenceQ8Buffer{
+        codec: "Q8_SYM_G64", rowElements: rowElements,
+        logicalElements: logicalElements, codes: codes, scales: scales,
+        closed: false
+    })
+}
+
+pub fun decodeQ8SymG64Buffer(buffer: ReferenceQ8Buffer,
+    elementLimit: UInt64) r: Result<Array<Float>, ReferenceCodecError> {
+    if buffer.closed {
+        return Err<Array<Float>, ReferenceCodecError>(codecError(
+            "qwen.codec.closed", "q8.decode-buffer",
+            "encoded buffer is closed", 11))
+    }
+    if buffer.codec != "Q8_SYM_G64" {
+        return Err<Array<Float>, ReferenceCodecError>(codecError(
+            "qwen.codec.mismatch", "q8.decode-buffer",
+            "encoded buffer codec does not match decoder", 3))
+    }
+    let expectedGroups = q8ExpectedGroups(buffer.logicalElements,
+        buffer.rowElements, elementLimit, "q8.decode-buffer")
+    if expectedGroups.isErr() {
+        return Err<Array<Float>, ReferenceCodecError>(
+            expectedGroups.unwrapErr())
+    }
+    if buffer.codes.length() as UInt64 != buffer.logicalElements or
+        buffer.scales.length() as UInt64 != expectedGroups.unwrap() {
+        return Err<Array<Float>, ReferenceCodecError>(codecError(
+            "qwen.codec.geometry", "q8.decode-buffer",
+            "Q8 payload or scale length is not canonical", 2))
+    }
+    let values = Array<Float>()
+    let groupsPerRow = q8GroupsPerRow(buffer.rowElements,
+        "q8.decode-buffer").unwrap()
+    let rows = buffer.logicalElements / buffer.rowElements
+    var row: UInt64 = 0 as UInt64
+    while row < rows {
+        var group: UInt64 = 0 as UInt64
+        while group < groupsPerRow {
+            let first = row * buffer.rowElements + group * (64 as UInt64)
+            var count = buffer.rowElements - group * (64 as UInt64)
+            if count > (64 as UInt64) { count = 64 as UInt64 }
+            let scaleBits = buffer.scales[(row * groupsPerRow + group) as Int]
+            let decodedScale = decodeFloat16(Float16{ bits: scaleBits })
+            if decodedScale.isErr() or decodedScale.unwrap().value < 0.0 {
+                values.free()
+                return Err<Array<Float>, ReferenceCodecError>(codecError(
+                    "qwen.codec.input", "q8.decode-buffer",
+                    "Q8 scale must be finite and nonnegative", 2))
+            }
+            let scale = decodedScale.unwrap().value
+            var offset: UInt64 = 0 as UInt64
+            while offset < count {
+                let quantized = q8SignedCode(
+                    buffer.codes[(first + offset) as Int])
+                if quantized == -128 or (scale == 0.0 and quantized != 0) {
+                    values.free()
+                    return Err<Array<Float>, ReferenceCodecError>(codecError(
+                        "qwen.codec.input", "q8.decode-buffer",
+                        "Q8 code is not canonical for its scale", 2))
+                }
+                values.push((quantized as Float) * scale)
+                offset = offset + (1 as UInt64)
+            }
+            group = group + (1 as UInt64)
+        }
+        row = row + (1 as UInt64)
     }
     return Ok<Array<Float>, ReferenceCodecError>(values)
 }

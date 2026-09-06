@@ -1,0 +1,202 @@
+import inference.scalars.{Float16}
+import math.math.{abs}
+import seen_qwen.quant.reference_codec.{ReferenceQ8Buffer,
+    decodeFloat16, decodeQ8SymG64Buffer, encodeQ8SymG64Buffer}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun near(actual: Float, expected: Float, tolerance: Float) r: Bool {
+    return abs(actual - expected) <= tolerance
+}
+
+fun sameQ8(left: ReferenceQ8Buffer, right: ReferenceQ8Buffer) r: Bool {
+    if left.codec != right.codec or left.rowElements != right.rowElements or
+        left.logicalElements != right.logicalElements or
+        left.codes.length() != right.codes.length() or
+        left.scales.length() != right.scales.length() {
+        return false
+    }
+    var index = 0
+    while index < left.codes.length() {
+        if left.codes[index] != right.codes[index] { return false }
+        index = index + 1
+    }
+    index = 0
+    while index < left.scales.length() {
+        if left.scales[index] != right.scales[index] { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun main() r: Int {
+    let ties = Array<Float>()
+    var index = 0
+    while index < 64 { ties.push(0.0); index = index + 1 }
+    ties[0] = 127.0
+    ties[1] = -127.0
+    ties[2] = 0.5
+    ties[3] = 1.5
+    ties[4] = 2.5
+    ties[5] = -0.5
+    ties[6] = -1.5
+    ties[7] = -2.5
+    let tiesResult = encodeQ8SymG64Buffer(ties, 64 as UInt64,
+        64 as UInt64)
+    require(tiesResult.isOkay(), "encode an exact full Q8 group")
+    let encoded = tiesResult.unwrap()
+    require(encoded.codec == "Q8_SYM_G64" and
+        encoded.length() == (64 as UInt64) and
+        encoded.groupCount() == (1 as UInt64) and
+        encoded.codes.length() == 64 and encoded.scales.length() == 1,
+        "retain canonical Q8 identity and geometry")
+    require(encoded.scales[0] == (0x3C00 as UInt16),
+        "store max_abs / 127 as FP16")
+    require(encoded.codes[0] == (127 as UInt8) and
+        encoded.codes[1] == (129 as UInt8) and
+        encoded.codes[2] == (0 as UInt8) and
+        encoded.codes[3] == (2 as UInt8) and
+        encoded.codes[4] == (2 as UInt8) and
+        encoded.codes[5] == (0 as UInt8) and
+        encoded.codes[6] == (254 as UInt8) and
+        encoded.codes[7] == (254 as UInt8),
+        "round ties to even and store signed two's-complement bytes")
+    index = 0
+    while index < encoded.codes.length() {
+        require(encoded.codes[index] != (128 as UInt8),
+            "never emit the forbidden -128 code")
+        index = index + 1
+    }
+    let decodedTies = decodeQ8SymG64Buffer(encoded, 64 as UInt64)
+    require(decodedTies.isOkay() and decodedTies.unwrap().length() == 64 and
+        decodedTies.unwrap()[0] == 127.0 and
+        decodedTies.unwrap()[1] == -127.0 and
+        decodedTies.unwrap()[3] == 2.0 and
+        decodedTies.unwrap()[6] == -2.0,
+        "dequantize each signed code with the stored FP16 scale")
+
+    let zeros = Array<Float>()
+    zeros.push(0.0); zeros.push(-0.0); zeros.push(0.0)
+    zeros.push(-0.0); zeros.push(0.0)
+    let zeroResult = encodeQ8SymG64Buffer(zeros, 5 as UInt64, 5 as UInt64)
+    require(zeroResult.isOkay() and zeroResult.unwrap().scales[0] ==
+        (0 as UInt16), "encode an all-zero partial group with zero scale")
+    index = 0
+    while index < zeroResult.unwrap().codes.length() {
+        require(zeroResult.unwrap().codes[index] == (0 as UInt8),
+            "encode only zero codes for a zero-scale group")
+        index = index + 1
+    }
+
+    let tails = Array<Float>()
+    index = 0
+    while index < 130 { tails.push(0.0); index = index + 1 }
+    tails[0] = 127.0
+    tails[64] = 2.0
+    tails[65] = 4.0
+    tails[129] = -3.0
+    let firstTail = encodeQ8SymG64Buffer(tails, 65 as UInt64,
+        130 as UInt64)
+    let secondTail = encodeQ8SymG64Buffer(tails, 65 as UInt64,
+        130 as UInt64)
+    require(firstTail.isOkay() and secondTail.isOkay() and
+        firstTail.unwrap().codes.length() == 130 and
+        firstTail.unwrap().scales.length() == 4 and
+        sameQ8(firstTail.unwrap(), secondTail.unwrap()),
+        "encode row tails without payload padding and repeat byte-for-byte")
+    let tail = firstTail.unwrap()
+    require(tail.codes[0] == (127 as UInt8) and
+        tail.codes[64] == (127 as UInt8) and
+        tail.codes[65] == (127 as UInt8) and
+        tail.codes[129] == (129 as UInt8),
+        "reset group reduction at every row and quantize both tail groups")
+    let tailScale = decodeFloat16(Float16{ bits: tail.scales[1] }).unwrap().value
+    let tailDecoded = decodeQ8SymG64Buffer(tail, 130 as UInt64)
+    require(tailDecoded.isOkay() and near(tailDecoded.unwrap()[64],
+        127.0 * tailScale, 0.000001),
+        "decode from the stored rounded FP16 tail scale")
+    tails[64] = 99.0
+    require(tail.codes[64] == (127 as UInt8),
+        "own Q8 bytes independently of caller source storage")
+
+    let badGeometry = encodeQ8SymG64Buffer(zeros, 4 as UInt64, 5 as UInt64)
+    let badLimit = encodeQ8SymG64Buffer(zeros, 5 as UInt64, 4 as UInt64)
+    let badRow = encodeQ8SymG64Buffer(zeros, 0 as UInt64, 5 as UInt64)
+    require(badGeometry.isErr() and badGeometry.unwrapErr().code ==
+        "qwen.codec.geometry" and badLimit.isErr() and
+        badLimit.unwrapErr().code == "qwen.codec.limit" and badRow.isErr() and
+        badRow.unwrapErr().code == "qwen.codec.input",
+        "reject malformed row geometry and nonpositive or exceeded bounds")
+    let empty = Array<Float>()
+    let emptyResult = encodeQ8SymG64Buffer(empty, 1 as UInt64, 1 as UInt64)
+    require(emptyResult.isOkay() and
+        emptyResult.unwrap().length() == (0 as UInt64) and
+        emptyResult.unwrap().groupCount() == (0 as UInt64),
+        "encode empty complete-row input without allocation growth")
+
+    let tiny = Array<Float>(); tiny.push(0.000000001)
+    let huge = Array<Float>(); huge.push(10000000.0)
+    require(encodeQ8SymG64Buffer(tiny, 1 as UInt64, 1 as UInt64).isErr() and
+        encodeQ8SymG64Buffer(tiny, 1 as UInt64,
+            1 as UInt64).unwrapErr().code == "qwen.codec.range" and
+        encodeQ8SymG64Buffer(huge, 1 as UInt64, 1 as UInt64).isErr(),
+        "fail closed when a nonzero FP16 scale cannot be represented")
+    var divisor = 0.0
+    let nonfinite = Array<Float>(); nonfinite.push(1.0 / divisor)
+    let rejected = encodeQ8SymG64Buffer(nonfinite, 1 as UInt64, 1 as UInt64)
+    require(rejected.isErr() and rejected.unwrapErr().code ==
+        "qwen.codec.input" and not rejected.unwrapErr().retryable,
+        "reject non-finite Q8 source values without repair or retry")
+
+    let originalCode = tail.codes[0]
+    tail.codes[0] = 128 as UInt8
+    let forbidden = decodeQ8SymG64Buffer(tail, 130 as UInt64)
+    require(forbidden.isErr() and forbidden.unwrapErr().code ==
+        "qwen.codec.input", "reject hostile -128 payload bytes")
+    tail.codes[0] = originalCode
+    let originalScale = tail.scales[0]
+    tail.scales[0] = 0xFC00 as UInt16
+    require(decodeQ8SymG64Buffer(tail, 130 as UInt64).isErr(),
+        "reject hostile non-finite or negative scales")
+    tail.scales[0] = 0 as UInt16
+    require(decodeQ8SymG64Buffer(tail, 130 as UInt64).isErr(),
+        "reject nonzero codes paired with a zero scale")
+    tail.scales[0] = originalScale
+    tail.codec = "F16"
+    require(decodeQ8SymG64Buffer(tail, 130 as UInt64).unwrapErr().code ==
+        "qwen.codec.mismatch", "reject codec mismatch without fallback")
+    tail.codec = "Q8_SYM_G64"
+    tail.logicalElements = 129 as UInt64
+    let malformed = decodeQ8SymG64Buffer(tail, 130 as UInt64)
+    require(malformed.isErr() and malformed.unwrapErr().code ==
+        "qwen.codec.geometry", "reject hostile logical geometry")
+    tail.logicalElements = 130 as UInt64
+    require(decodeQ8SymG64Buffer(tail, 129 as UInt64).unwrapErr().code ==
+        "qwen.codec.limit", "bound decoded allocation before producing output")
+    let shortCodes = Array<UInt8>(); shortCodes.push(0 as UInt8)
+    let missingScales = Array<UInt16>()
+    let hostile = ReferenceQ8Buffer{ codec: "Q8_SYM_G64",
+        rowElements: 1 as UInt64, logicalElements: 1 as UInt64,
+        codes: shortCodes, scales: missingScales, closed: false }
+    require(decodeQ8SymG64Buffer(hostile, 1 as UInt64).unwrapErr().code ==
+        "qwen.codec.geometry", "reject a non-canonical scale-table length")
+
+    decodedTies.unwrap().free(); zeroResult.unwrap().close()
+    tailDecoded.unwrap().free(); secondTail.unwrap().close()
+    emptyResult.unwrap().close(); hostile.close()
+    encoded.close(); encoded.close()
+    require(encoded.length() == (0 as UInt64) and
+        encoded.groupCount() == (0 as UInt64) and
+        decodeQ8SymG64Buffer(encoded, 64 as UInt64).unwrapErr().code ==
+        "qwen.codec.closed",
+        "make Q8 cleanup idempotent and reject use after close")
+    tail.close(); ties.free(); zeros.free(); tails.free()
+    tiny.free(); huge.free(); nonfinite.free(); empty.free()
+
+    println("PASS: QWN-031B deterministic Q8_SYM_G64 reference codec")
+    return 0
+}
+
+main()
