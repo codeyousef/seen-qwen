@@ -1,0 +1,113 @@
+import inference.scalars.{Float16}
+import math.math.{abs}
+import seen_qwen.quant.reference_codec.{ReferenceQ4Buffer, decodeFloat16,
+    decodeQ4SymG64Buffer, encodeQ4SymG64Buffer}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun near(actual: Float, expected: Float, tolerance: Float) r: Bool {
+    return abs(actual - expected) <= tolerance
+}
+
+fun sameQ4(left: ReferenceQ4Buffer, right: ReferenceQ4Buffer) r: Bool {
+    if left.rowElements != right.rowElements or
+        left.logicalElements != right.logicalElements or
+        left.bytes.length() != right.bytes.length() or
+        left.scales.length() != right.scales.length() { return false }
+    var index = 0
+    while index < left.bytes.length() {
+        if left.bytes[index] != right.bytes[index] { return false }
+        index = index + 1
+    }
+    index = 0
+    while index < left.scales.length() {
+        if left.scales[index] != right.scales[index] { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun main() r: Int {
+    let ties = Array<Float>(); var index = 0
+    while index < 64 { ties.push(0.0); index = index + 1 }
+    ties[0] = 7.0; ties[1] = -7.0; ties[2] = 0.5; ties[3] = 1.5
+    ties[4] = 2.5; ties[5] = -0.5; ties[6] = -1.5; ties[7] = -2.5
+    let result = encodeQ4SymG64Buffer(ties, 64 as UInt64, 64 as UInt64)
+    require(result.isOkay(), "encode an exact full Q4 group")
+    let encoded = result.unwrap()
+    require(encoded.codec == "Q4_SYM_G64" and encoded.length() ==
+        (64 as UInt64) and encoded.groupCount() == (1 as UInt64) and
+        encoded.bytes.length() == 32 and encoded.scales[0] ==
+        (0x3C00 as UInt16), "retain Q4 identity, geometry, and FP16 scale")
+    require(encoded.bytes[0] == (0x97 as UInt8) and
+        encoded.bytes[1] == (0x20 as UInt8) and
+        encoded.bytes[2] == (0x02 as UInt8) and
+        encoded.bytes[3] == (0xEE as UInt8),
+        "round ties to even and pack signed low-first nibbles")
+    let decoded = decodeQ4SymG64Buffer(encoded, 64 as UInt64)
+    require(decoded.isOkay() and decoded.unwrap()[0] == 7.0 and
+        decoded.unwrap()[1] == -7.0 and decoded.unwrap()[3] == 2.0 and
+        decoded.unwrap()[6] == -2.0, "dequantize with the stored scale")
+
+    let zeros = Array<Float>(); zeros.push(0.0); zeros.push(-0.0); zeros.push(0.0)
+    let zero = encodeQ4SymG64Buffer(zeros, 3 as UInt64, 3 as UInt64).unwrap()
+    require(zero.bytes.length() == 2 and zero.bytes[0] == (0 as UInt8) and
+        zero.bytes[1] == (0 as UInt8) and zero.scales[0] == (0 as UInt16),
+        "zero-scale odd tail stores only a zero padding nibble")
+
+    let tails = Array<Float>(); index = 0
+    while index < 130 { tails.push(0.0); index = index + 1 }
+    tails[0] = 7.0; tails[64] = 2.0; tails[65] = 4.0; tails[129] = -3.0
+    let first = encodeQ4SymG64Buffer(tails, 65 as UInt64, 130 as UInt64).unwrap()
+    let second = encodeQ4SymG64Buffer(tails, 65 as UInt64, 130 as UInt64).unwrap()
+    require(first.bytes.length() == 66 and first.scales.length() == 4 and
+        first.bytes[32] == (7 as UInt8) and first.bytes[65] == (9 as UInt8) and
+        sameQ4(first, second),
+        "pack each odd row tail independently and repeat byte-for-byte")
+    let tailScale = decodeFloat16(Float16{ bits: first.scales[1] }).unwrap().value
+    let tailDecoded = decodeQ4SymG64Buffer(first, 130 as UInt64).unwrap()
+    require(near(tailDecoded[64], 7.0 * tailScale, 0.000001),
+        "reconstruct a short group from its stored FP16 scale")
+    tails[64] = 99.0
+    require(first.bytes[32] == (7 as UInt8), "own payload independently")
+
+    require(encodeQ4SymG64Buffer(zeros, 2 as UInt64, 3 as UInt64).unwrapErr().code ==
+        "qwen.codec.geometry" and encodeQ4SymG64Buffer(zeros, 3 as UInt64,
+        2 as UInt64).unwrapErr().code == "qwen.codec.limit",
+        "reject incomplete rows and exceeded allocation limits")
+    var divisor = 0.0
+    let nonfinite = Array<Float>(); nonfinite.push(1.0 / divisor)
+    require(encodeQ4SymG64Buffer(nonfinite, 1 as UInt64,
+        1 as UInt64).unwrapErr().code == "qwen.codec.input",
+        "reject non-finite input without repair")
+
+    let minusEightBytes = Array<UInt8>(); minusEightBytes.push(8 as UInt8)
+    let unitScale = Array<UInt16>(); unitScale.push(0x3C00 as UInt16)
+    let minusEight = ReferenceQ4Buffer{ codec: "Q4_SYM_G64",
+        rowElements: 1 as UInt64, logicalElements: 1 as UInt64,
+        bytes: minusEightBytes, scales: unitScale, closed: false }
+    require(decodeQ4SymG64Buffer(minusEight, 1 as UInt64).unwrap()[0] == -8.0,
+        "decode the normative -8 code")
+    first.bytes[32] = 0x17 as UInt8
+    require(decodeQ4SymG64Buffer(first, 130 as UInt64).unwrapErr().code ==
+        "qwen.codec.input", "reject nonzero row-tail padding nibble")
+    first.bytes[32] = 7 as UInt8
+    first.scales[0] = 0 as UInt16
+    require(decodeQ4SymG64Buffer(first, 130 as UInt64).isErr(),
+        "reject nonzero codes paired with zero scale")
+    first.scales[0] = 0x3C00 as UInt16; first.codec = "F16"
+    require(decodeQ4SymG64Buffer(first, 130 as UInt64).unwrapErr().code ==
+        "qwen.codec.mismatch", "reject codec mismatch without fallback")
+
+    decoded.unwrap().free(); tailDecoded.free(); zero.close(); second.close()
+    minusEight.close(); encoded.close(); encoded.close()
+    require(decodeQ4SymG64Buffer(encoded, 64 as UInt64).unwrapErr().code ==
+        "qwen.codec.closed", "make cleanup idempotent and reject use after close")
+    first.close(); ties.free(); zeros.free(); tails.free(); nonfinite.free()
+    println("PASS: QWN-031C normative grouped Q4_SYM_G64 reference codec")
+    return 0
+}
+
+main()

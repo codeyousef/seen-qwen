@@ -80,6 +80,34 @@ pub class ReferenceQ8Buffer {
     }
 }
 
+pub class ReferenceQ4Buffer {
+    var codec: String
+    var rowElements: UInt64
+    var logicalElements: UInt64
+    var bytes: Array<UInt8>
+    var scales: Array<UInt16>
+    var closed: Bool
+
+    fun length() r: UInt64 {
+        if this.closed { return 0 as UInt64 }
+        return this.logicalElements
+    }
+
+    fun groupCount() r: UInt64 {
+        if this.closed { return 0 as UInt64 }
+        return this.scales.length() as UInt64
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.bytes.free()
+        this.scales.free()
+        this.rowElements = 0 as UInt64
+        this.logicalElements = 0 as UInt64
+        this.closed = true
+    }
+}
+
 fun codecError(code: String, operation: String, message: String,
     exitCode: Int) r: ReferenceCodecError {
     return ReferenceCodecError{ code: code, operation: operation,
@@ -611,6 +639,210 @@ pub fun decodeQ8SymG64Buffer(buffer: ReferenceQ8Buffer,
                     return Err<Array<Float>, ReferenceCodecError>(codecError(
                         "qwen.codec.input", "q8.decode-buffer",
                         "Q8 code is not canonical for its scale", 2))
+                }
+                values.push((quantized as Float) * scale)
+                offset = offset + (1 as UInt64)
+            }
+            group = group + (1 as UInt64)
+        }
+        row = row + (1 as UInt64)
+    }
+    return Ok<Array<Float>, ReferenceCodecError>(values)
+}
+
+fun q4ExpectedBytes(logicalElements: UInt64, rowElements: UInt64,
+    operation: String) r: Result<UInt64, ReferenceCodecError> {
+    if rowElements > (0xFFFFFFFFFFFFFFFE as UInt64) {
+        return Err<UInt64, ReferenceCodecError>(codecError(
+            "qwen.codec.range", operation,
+            "Q4 row payload geometry overflows UInt64", 2))
+    }
+    let rows = logicalElements / rowElements
+    let bytesPerRow = (rowElements + (1 as UInt64)) / (2 as UInt64)
+    if rows > (0 as UInt64) and
+        bytesPerRow > (0xFFFFFFFFFFFFFFFF as UInt64) / rows {
+        return Err<UInt64, ReferenceCodecError>(codecError(
+            "qwen.codec.range", operation,
+            "Q4 payload geometry overflows UInt64", 2))
+    }
+    return Ok<UInt64, ReferenceCodecError>(rows * bytesPerRow)
+}
+
+fun q4CodeNibble(value: Int) r: UInt8 {
+    if value < 0 { return (value + 16) as UInt8 }
+    return value as UInt8
+}
+
+fun q4SignedCode(value: UInt8) r: Int {
+    let widened = value as Int
+    if widened > 7 { return widened - 16 }
+    return widened
+}
+
+pub fun encodeQ4SymG64Buffer(values: Array<Float>, rowElements: UInt64,
+    elementLimit: UInt64) r: Result<ReferenceQ4Buffer, ReferenceCodecError> {
+    let logicalElements = values.length() as UInt64
+    let expectedGroups = q8ExpectedGroups(logicalElements, rowElements,
+        elementLimit, "q4.encode-buffer")
+    if expectedGroups.isErr() {
+        return Err<ReferenceQ4Buffer, ReferenceCodecError>(
+            expectedGroups.unwrapErr())
+    }
+    let expectedBytes = q4ExpectedBytes(logicalElements, rowElements,
+        "q4.encode-buffer")
+    if expectedBytes.isErr() {
+        return Err<ReferenceQ4Buffer, ReferenceCodecError>(
+            expectedBytes.unwrapErr())
+    }
+    let bytes = Array<UInt8>()
+    let scales = Array<UInt16>()
+    let groupsPerRow = q8GroupsPerRow(rowElements,
+        "q4.encode-buffer").unwrap()
+    let rows = logicalElements / rowElements
+    var row: UInt64 = 0 as UInt64
+    while row < rows {
+        var group: UInt64 = 0 as UInt64
+        while group < groupsPerRow {
+            let first = row * rowElements + group * (64 as UInt64)
+            var count = rowElements - group * (64 as UInt64)
+            if count > (64 as UInt64) { count = 64 as UInt64 }
+            var maxAbs: Float = 0.0
+            var offset: UInt64 = 0 as UInt64
+            while offset < count {
+                let source = finiteFloat32Bits(values[(first + offset) as Int],
+                    "q4.encode-buffer")
+                if source.isErr() {
+                    bytes.free(); scales.free()
+                    return Err<ReferenceQ4Buffer, ReferenceCodecError>(
+                        source.unwrapErr())
+                }
+                let rounded = values[(first + offset) as Int] as Float32
+                let magnitude = abs(rounded as Float)
+                if magnitude > maxAbs { maxAbs = magnitude }
+                offset = offset + (1 as UInt64)
+            }
+            var scale: Float32 = 0.0 as Float32
+            if maxAbs == 0.0 {
+                scales.push(0 as UInt16)
+            } else {
+                scale = (maxAbs as Float32) / (7.0 as Float32)
+                let storedScale = encodeFloat16(scale as Float)
+                if storedScale.isErr() or storedScale.unwrap().bits ==
+                    (0 as UInt16) {
+                    bytes.free(); scales.free()
+                    return Err<ReferenceQ4Buffer, ReferenceCodecError>(
+                        codecError("qwen.codec.range", "q4.encode-buffer",
+                            "nonzero Q4 group scale is not representable as finite FP16", 2))
+                }
+                scales.push(storedScale.unwrap().bits)
+            }
+            offset = 0 as UInt64
+            while offset < count {
+                var low = 0
+                var high = 0
+                if maxAbs != 0.0 {
+                    low = q8RoundEven(((values[(first + offset) as Int] as
+                        Float32) / scale) as Float)
+                    if low < -8 { low = -8 }
+                    if low > 7 { low = 7 }
+                    if offset + (1 as UInt64) < count {
+                        high = q8RoundEven(((values[(first + offset +
+                            (1 as UInt64)) as Int] as Float32) / scale) as Float)
+                        if high < -8 { high = -8 }
+                        if high > 7 { high = 7 }
+                    }
+                }
+                bytes.push(q4CodeNibble(low) |
+                    (q4CodeNibble(high) << (4 as UInt8)))
+                offset = offset + (2 as UInt64)
+            }
+            group = group + (1 as UInt64)
+        }
+        row = row + (1 as UInt64)
+    }
+    return Ok<ReferenceQ4Buffer, ReferenceCodecError>(ReferenceQ4Buffer{
+        codec: "Q4_SYM_G64", rowElements: rowElements,
+        logicalElements: logicalElements, bytes: bytes, scales: scales,
+        closed: false
+    })
+}
+
+pub fun decodeQ4SymG64Buffer(buffer: ReferenceQ4Buffer,
+    elementLimit: UInt64) r: Result<Array<Float>, ReferenceCodecError> {
+    if buffer.closed {
+        return Err<Array<Float>, ReferenceCodecError>(codecError(
+            "qwen.codec.closed", "q4.decode-buffer",
+            "encoded buffer is closed", 11))
+    }
+    if buffer.codec != "Q4_SYM_G64" {
+        return Err<Array<Float>, ReferenceCodecError>(codecError(
+            "qwen.codec.mismatch", "q4.decode-buffer",
+            "encoded buffer codec does not match decoder", 3))
+    }
+    let expectedGroups = q8ExpectedGroups(buffer.logicalElements,
+        buffer.rowElements, elementLimit, "q4.decode-buffer")
+    if expectedGroups.isErr() {
+        return Err<Array<Float>, ReferenceCodecError>(
+            expectedGroups.unwrapErr())
+    }
+    let expectedBytes = q4ExpectedBytes(buffer.logicalElements,
+        buffer.rowElements, "q4.decode-buffer")
+    if expectedBytes.isErr() {
+        return Err<Array<Float>, ReferenceCodecError>(expectedBytes.unwrapErr())
+    }
+    if buffer.bytes.length() as UInt64 != expectedBytes.unwrap() or
+        buffer.scales.length() as UInt64 != expectedGroups.unwrap() {
+        return Err<Array<Float>, ReferenceCodecError>(codecError(
+            "qwen.codec.geometry", "q4.decode-buffer",
+            "Q4 payload or scale length is not canonical", 2))
+    }
+    let values = Array<Float>()
+    let groupsPerRow = q8GroupsPerRow(buffer.rowElements,
+        "q4.decode-buffer").unwrap()
+    let bytesPerRow = (buffer.rowElements + (1 as UInt64)) / (2 as UInt64)
+    let rows = buffer.logicalElements / buffer.rowElements
+    var row: UInt64 = 0 as UInt64
+    while row < rows {
+        if buffer.rowElements % (2 as UInt64) != (0 as UInt64) {
+            let lastByte = buffer.bytes[(row * bytesPerRow + bytesPerRow -
+                (1 as UInt64)) as Int]
+            if (lastByte >> (4 as UInt8)) != (0 as UInt8) {
+                values.free()
+                return Err<Array<Float>, ReferenceCodecError>(codecError(
+                    "qwen.codec.input", "q4.decode-buffer",
+                    "Q4 row tail padding nibble must be zero", 2))
+            }
+        }
+        var group: UInt64 = 0 as UInt64
+        while group < groupsPerRow {
+            let first = group * (64 as UInt64)
+            var count = buffer.rowElements - first
+            if count > (64 as UInt64) { count = 64 as UInt64 }
+            let scaleBits = buffer.scales[(row * groupsPerRow + group) as Int]
+            let decodedScale = decodeFloat16(Float16{ bits: scaleBits })
+            if decodedScale.isErr() or decodedScale.unwrap().value < 0.0 {
+                values.free()
+                return Err<Array<Float>, ReferenceCodecError>(codecError(
+                    "qwen.codec.input", "q4.decode-buffer",
+                    "Q4 scale must be finite and nonnegative", 2))
+            }
+            let scale = decodedScale.unwrap().value
+            var offset: UInt64 = 0 as UInt64
+            while offset < count {
+                let logical = first + offset
+                let packed = buffer.bytes[(row * bytesPerRow +
+                    logical / (2 as UInt64)) as Int]
+                let nibble = if logical % (2 as UInt64) == (0 as UInt64) {
+                    packed & (15 as UInt8)
+                } else {
+                    (packed >> (4 as UInt8)) & (15 as UInt8)
+                }
+                let quantized = q4SignedCode(nibble)
+                if scale == 0.0 and quantized != 0 {
+                    values.free()
+                    return Err<Array<Float>, ReferenceCodecError>(codecError(
+                        "qwen.codec.input", "q4.decode-buffer",
+                        "Q4 code is not canonical for its scale", 2))
                 }
                 values.push((quantized as Float) * scale)
                 offset = offset + (1 as UInt64)
