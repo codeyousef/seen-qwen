@@ -1,0 +1,103 @@
+import env.env.{getOrDefault}
+import io.file.{readText}
+import seen_qwen.converter.conversion_plan.{QwenConversionPlan,
+    buildQwen38ConversionPlan}
+import seen_qwen.converter.shard_stream.{auditQwen38ShardStream}
+import seen_qwen.model.config.{Qwen38Config, parseQwen38Config}
+import seen_qwen.model.tensor_catalog.{QwenTensorCatalog,
+    parseQwenTensorCatalog}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun planFor(config: Qwen38Config, catalog: QwenTensorCatalog,
+    windowBytes: UInt64) r: QwenConversionPlan {
+    return buildQwen38ConversionPlan(config, catalog,
+        4294967296 as UInt64, windowBytes, 134217728 as UInt64,
+        1048576 as UInt64, 1048576 as UInt64, 268435456 as UInt64,
+        68719476736 as UInt64).unwrap()
+}
+
+fun main() r: Int {
+    let config = parseQwen38Config(
+        readText("tests/fixtures/qwen3_8_config.json")).unwrap()
+    let catalog = parseQwenTensorCatalog(
+        readText("tests/fixtures/qwen3_8_model.safetensors.index.json")).unwrap()
+    let plan = planFor(config, catalog, 67108864 as UInt64)
+    let sourceRoot = getOrDefault("QWN_032B_SOURCE_ROOT",
+        ".seen/ci/output/qwn_032b_source")
+
+    let audited = auditQwen38ShardStream(sourceRoot, plan, catalog)
+    require(audited.isOkay(), "audit the complete sparse 18-shard source")
+    let summary = audited.unwrap()
+    require(summary.shardCount == 18 and summary.tensorCount == 1199 and
+        summary.textTensorCount == 851 and summary.mtpTensorCount == 15 and
+        summary.excludedVisionTensorCount == 333,
+        "classify every pinned tensor exactly once")
+    require(summary.mappedTensorCount == 866 and
+        summary.visionPayloadWindows == (0 as UInt64),
+        "map only required text and MTP tensor payloads")
+    require(summary.mappedWindowCount > (0 as UInt64) and
+        summary.mappedWindowCount <= (131072 as UInt64) and
+        summary.maximumMappedWindowBytes <= plan.sourceWindowBytes,
+        "keep every payload mapping within the admitted window bounds")
+    require(summary.totalTensorBytes == (55562855904 as UInt64) and
+        summary.mappedBytes + summary.excludedVisionBytes ==
+            summary.totalTensorBytes,
+        "account for included and excluded bytes without reading vision data")
+    require(summary.maximumOpenShards == 1 and
+        summary.maximumInFlightTensors == 1,
+        "stream with exactly one shard and tensor window live")
+    if sourceRoot == ".seen/ci/output/qwn_032b_source" {
+        require(summary.boundaryByteXor == 0,
+            "touch each sparse included window boundary")
+    }
+    require(summary.validate().isOkay(), "validate the complete stream summary")
+
+    summary.visionPayloadWindows = 1 as UInt64
+    require(summary.validate().unwrapErr().code == "qwen.stream.invalid-state",
+        "reject forged evidence that claims a vision payload mapping")
+    summary.visionPayloadWindows = 0 as UInt64
+    require(summary.validate().isOkay(), "accept restored stream evidence")
+    summary.mappedBytes = summary.mappedBytes + (1 as UInt64)
+    require(summary.validate().unwrapErr().code == "qwen.stream.invalid-state",
+        "reject forged included and excluded byte accounting")
+    summary.mappedBytes = summary.mappedBytes - (1 as UInt64)
+
+    let tinyWindowPlan = planFor(config, catalog, 262144 as UInt64)
+    let tooManyWindows = auditQwen38ShardStream(
+        ".seen/ci/output/qwn_032b_source", tinyWindowPlan, catalog)
+    require(tooManyWindows.unwrapErr().code == "qwen.stream.limit" and
+        tooManyWindows.unwrapErr().field == "mapped_window_count",
+        "reject excessive mapping work before opening a shard")
+    tinyWindowPlan.close()
+
+    require(auditQwen38ShardStream("", plan, catalog).unwrapErr().code ==
+        "qwen.stream.path", "reject an empty source root")
+    require(auditQwen38ShardStream(".seen/ci/output/qwn_032b_missing",
+        plan, catalog).unwrapErr().code == "qwen.stream.shard",
+        "reject an absent required shard")
+    require(auditQwen38ShardStream(".seen/ci/output/qwn_032b_mismatch",
+        plan, catalog).unwrapErr().code == "qwen.stream.shard-mismatch",
+        "reject a tensor stored in a shard other than its index assignment")
+    require(auditQwen38ShardStream(".seen/ci/output/qwn_032b_unknown",
+        plan, catalog).unwrapErr().code == "qwen.stream.unknown-tensor",
+        "reject an unknown tensor before mapping its payload")
+    require(auditQwen38ShardStream(".seen/ci/output/qwn_032b_zero",
+        plan, catalog).unwrapErr().code == "qwen.stream.geometry",
+        "reject a zero-length pinned tensor before mapping its payload")
+
+    summary.close(); summary.close()
+    require(summary.validate().unwrapErr().code == "qwen.stream.closed" and
+        summary.validate().unwrapErr().exitCode == 11,
+        "make summary cleanup idempotent and reject use after close")
+    plan.close(); catalog.close()
+    require(auditQwen38ShardStream(".seen/ci/output/qwn_032b_source",
+        plan, catalog).unwrapErr().code == "qwen.stream.invalid-state",
+        "reject closed planning inputs before opening a shard")
+    println("PASS: QWN-032B bounded shard streaming and vision exclusion")
+    return 0
+}
+
+main()

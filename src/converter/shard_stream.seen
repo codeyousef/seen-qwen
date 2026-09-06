@@ -1,0 +1,488 @@
+///
+/// Bounded, deterministic shard traversal for the pinned Qwen3.8-27B source.
+///
+/// One shard and one tensor window may be live at a time. Vision metadata is
+/// validated against the pinned catalog, but vision payload bytes are never
+/// mapped. Conversion, checksums, journaling, and SQW promotion are later
+/// QWN-032 leaves.
+///
+
+import core.result.{Result}
+import formats.safetensors.{SafeTensorFile, SafeTensorPolicy,
+    closeSafeTensorPolicy}
+import inference.scalars.{checkedAdd64}
+import seen_qwen.converter.conversion_plan.{QwenConversionPlan}
+import seen_qwen.model.tensor_catalog.{QwenTensorCatalog}
+
+let QWEN_STREAM_SHARD_COUNT: Int = 18
+let QWEN_STREAM_TENSOR_COUNT: Int = 1199
+let QWEN_STREAM_TEXT_COUNT: Int = 851
+let QWEN_STREAM_MTP_COUNT: Int = 15
+let QWEN_STREAM_VISION_COUNT: Int = 333
+let QWEN_STREAM_MAX_WINDOWS: UInt64 = 131072 as UInt64
+
+pub class QwenShardStreamError {
+    var code: String
+    var field: String
+    var message: String
+    var exitCode: Int
+    var retryable: Bool
+}
+
+fun shardStreamError(code: String, field: String, message: String)
+    r: QwenShardStreamError {
+    let exitCode = if code == "qwen.stream.closed" or
+        code == "qwen.stream.invalid-state" { 11 } else { 2 }
+    return QwenShardStreamError{ code: code, field: field,
+        message: message, exitCode: exitCode, retryable: false }
+}
+
+pub class QwenShardStreamSummary {
+    var shardCount: Int
+    var tensorCount: Int
+    var textTensorCount: Int
+    var mtpTensorCount: Int
+    var excludedVisionTensorCount: Int
+    var mappedTensorCount: Int
+    var mappedWindowCount: UInt64
+    var mappedBytes: UInt64
+    var excludedVisionBytes: UInt64
+    var totalTensorBytes: UInt64
+    var maximumMappedWindowBytes: UInt64
+    var maximumOpenShards: Int
+    var maximumInFlightTensors: Int
+    var visionPayloadWindows: UInt64
+    var boundaryByteXor: Int
+    var closed: Bool
+
+    fun validate() r: Result<Bool, QwenShardStreamError> {
+        if this.closed {
+            return Err<Bool, QwenShardStreamError>(shardStreamError(
+                "qwen.stream.closed", "summary", "stream summary is closed"))
+        }
+        if this.shardCount != QWEN_STREAM_SHARD_COUNT or
+            this.tensorCount != QWEN_STREAM_TENSOR_COUNT or
+            this.textTensorCount != QWEN_STREAM_TEXT_COUNT or
+            this.mtpTensorCount != QWEN_STREAM_MTP_COUNT or
+            this.excludedVisionTensorCount != QWEN_STREAM_VISION_COUNT or
+            this.mappedTensorCount != QWEN_STREAM_TEXT_COUNT +
+                QWEN_STREAM_MTP_COUNT or
+            this.maximumOpenShards != 1 or
+            this.maximumInFlightTensors != 1 or
+            this.visionPayloadWindows != (0 as UInt64) or
+            this.totalTensorBytes != (55562855904 as UInt64) or
+            this.mappedBytes == (0 as UInt64) or
+            this.excludedVisionBytes == (0 as UInt64) or
+            this.mappedBytes > this.totalTensorBytes or
+            this.excludedVisionBytes > this.totalTensorBytes or
+            this.mappedBytes != this.totalTensorBytes -
+                this.excludedVisionBytes or
+            this.mappedWindowCount == (0 as UInt64) or
+            this.mappedWindowCount > QWEN_STREAM_MAX_WINDOWS or
+            this.maximumMappedWindowBytes == (0 as UInt64) or
+            this.boundaryByteXor < 0 or this.boundaryByteXor > 255 {
+            return Err<Bool, QwenShardStreamError>(shardStreamError(
+                "qwen.stream.invalid-state", "summary",
+                "stream summary invariants were modified"))
+        }
+        return Ok<Bool, QwenShardStreamError>(true)
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.shardCount = 0
+        this.tensorCount = 0
+        this.textTensorCount = 0
+        this.mtpTensorCount = 0
+        this.excludedVisionTensorCount = 0
+        this.mappedTensorCount = 0
+        this.mappedWindowCount = 0 as UInt64
+        this.mappedBytes = 0 as UInt64
+        this.excludedVisionBytes = 0 as UInt64
+        this.totalTensorBytes = 0 as UInt64
+        this.maximumMappedWindowBytes = 0 as UInt64
+        this.maximumOpenShards = 0
+        this.maximumInFlightTensors = 0
+        this.visionPayloadWindows = 0 as UInt64
+        this.boundaryByteXor = 0
+        this.closed = true
+    }
+}
+
+fun qwenStreamShardName(index: Int) r: String {
+    if index == 0 { return "model-00001-of-00018.safetensors" }
+    if index == 1 { return "model-00002-of-00018.safetensors" }
+    if index == 2 { return "model-00003-of-00018.safetensors" }
+    if index == 3 { return "model-00004-of-00018.safetensors" }
+    if index == 4 { return "model-00005-of-00018.safetensors" }
+    if index == 5 { return "model-00006-of-00018.safetensors" }
+    if index == 6 { return "model-00007-of-00018.safetensors" }
+    if index == 7 { return "model-00008-of-00018.safetensors" }
+    if index == 8 { return "model-00009-of-00018.safetensors" }
+    if index == 9 { return "model-00010-of-00018.safetensors" }
+    if index == 10 { return "model-00011-of-00018.safetensors" }
+    if index == 11 { return "model-00012-of-00018.safetensors" }
+    if index == 12 { return "model-00013-of-00018.safetensors" }
+    if index == 13 { return "model-00014-of-00018.safetensors" }
+    if index == 14 { return "model-00015-of-00018.safetensors" }
+    if index == 15 { return "model-00016-of-00018.safetensors" }
+    if index == 16 { return "model-00017-of-00018.safetensors" }
+    return "model-00018-of-00018.safetensors"
+}
+
+fun qwenStreamCatalogIndex(catalog: QwenTensorCatalog, name: String)
+    r: Result<Int, QwenShardStreamError> {
+    var index = 0
+    while index < catalog.length() {
+        let candidate = catalog.nameAt(index)
+        if candidate.isErr() {
+            return Err<Int, QwenShardStreamError>(shardStreamError(
+                "qwen.stream.invalid-state", "catalog",
+                "catalog became invalid during shard traversal"))
+        }
+        if candidate.unwrap() == name {
+            return Ok<Int, QwenShardStreamError>(index)
+        }
+        index = index + 1
+    }
+    return Err<Int, QwenShardStreamError>(shardStreamError(
+        "qwen.stream.unknown-tensor", "tensor_name",
+        "a shard contains a tensor outside the pinned catalog"))
+}
+
+fun qwenStreamAdd(total: UInt64, value: UInt64, field: String)
+    r: Result<UInt64, QwenShardStreamError> {
+    let added = checkedAdd64(total, value)
+    if added.isNone() {
+        return Err<UInt64, QwenShardStreamError>(shardStreamError(
+            "qwen.stream.overflow", field, "stream byte accounting overflowed"))
+    }
+    return Ok<UInt64, QwenShardStreamError>(added.unwrap())
+}
+
+fun qwenStreamWindowAdmission(plan: QwenConversionPlan)
+    r: Result<UInt64, QwenShardStreamError> {
+    if plan.sourceWindowBytes == (0 as UInt64) {
+        return Err<UInt64, QwenShardStreamError>(shardStreamError(
+            "qwen.stream.limit", "source_window_bytes",
+            "source window must be positive"))
+    }
+    let fullWindows = plan.sourceTotalBytes / plan.sourceWindowBytes
+    let remainderWindow = if plan.sourceTotalBytes % plan.sourceWindowBytes ==
+        (0 as UInt64) { 0 as UInt64 } else { 1 as UInt64 }
+    let projected = qwenStreamAdd(fullWindows, remainderWindow,
+        "mapped_window_count")
+    if projected.isErr() {
+        return Err<UInt64, QwenShardStreamError>(projected.unwrapErr())
+    }
+    let withTensorTails = qwenStreamAdd(projected.unwrap(),
+        plan.includedTensorCount, "mapped_window_count")
+    if withTensorTails.isErr() or
+        withTensorTails.unwrap() > QWEN_STREAM_MAX_WINDOWS {
+        return Err<UInt64, QwenShardStreamError>(shardStreamError(
+            "qwen.stream.limit", "mapped_window_count",
+            "source window would require too many mapping operations"))
+    }
+    return Ok<UInt64, QwenShardStreamError>(withTensorTails.unwrap())
+}
+
+pub fun auditQwen38ShardStream(sourceRoot: String, plan: QwenConversionPlan,
+    catalog: QwenTensorCatalog)
+    r: Result<QwenShardStreamSummary, QwenShardStreamError> {
+    if sourceRoot.length() == 0 {
+        return Err<QwenShardStreamSummary, QwenShardStreamError>(
+            shardStreamError("qwen.stream.path", "source_root",
+                "source root is required"))
+    }
+    if plan.validate().isErr() or catalog.length() != QWEN_STREAM_TENSOR_COUNT {
+        return Err<QwenShardStreamSummary, QwenShardStreamError>(
+            shardStreamError("qwen.stream.invalid-state", "inputs",
+                "streaming requires live pinned plan and catalog inputs"))
+    }
+    let admittedWindows = qwenStreamWindowAdmission(plan)
+    if admittedWindows.isErr() {
+        return Err<QwenShardStreamSummary, QwenShardStreamError>(
+            admittedWindows.unwrapErr())
+    }
+
+    let seen = Array<Int>()
+    var fillIndex = 0
+    while fillIndex < QWEN_STREAM_TENSOR_COUNT {
+        seen.push(0)
+        fillIndex = fillIndex + 1
+    }
+    var tensorCount = 0
+    var textCount = 0
+    var mtpCount = 0
+    var visionCount = 0
+    var mappedTensorCount = 0
+    var mappedWindowCount: UInt64 = 0 as UInt64
+    var mappedBytes: UInt64 = 0 as UInt64
+    var visionBytes: UInt64 = 0 as UInt64
+    var totalBytes: UInt64 = 0 as UInt64
+    var maximumWindow: UInt64 = 0 as UInt64
+    var boundaryXor = 0
+    var shardIndex = 0
+    while shardIndex < QWEN_STREAM_SHARD_COUNT {
+        let shardName = qwenStreamShardName(shardIndex)
+        let policy = SafeTensorPolicy.modelWeights()
+        policy.maxTensors = QWEN_STREAM_TENSOR_COUNT as UInt64
+        let opened = SafeTensorFile.open(sourceRoot + "/" + shardName, policy)
+        closeSafeTensorPolicy(policy)
+        if opened.isErr() {
+            seen.free()
+            return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                shardStreamError("qwen.stream.shard", shardName,
+                    "failed to open and validate a required source shard"))
+        }
+        let file = opened.unwrap()
+        var metadataIndex = 0
+        while metadataIndex < file.metadata.names.length() {
+            let name = file.metadata.names[metadataIndex]
+            let catalogIndex = qwenStreamCatalogIndex(catalog, name)
+            if catalogIndex.isErr() {
+                let rejectedClose = file.close()
+                if rejectedClose.isErr() {
+                    abort("qwen.stream.cleanup: failed to close rejected shard")
+                }
+                seen.free()
+                return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                    catalogIndex.unwrapErr())
+            }
+            let pinnedIndex = catalogIndex.unwrap()
+            let expectedShard = catalog.shardAt(pinnedIndex)
+            if expectedShard.isErr() or expectedShard.unwrap() != shardName {
+                let mismatchClose = file.close()
+                if mismatchClose.isErr() {
+                    abort("qwen.stream.cleanup: failed to close mismatched shard")
+                }
+                seen.free()
+                return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                    shardStreamError("qwen.stream.shard-mismatch", "tensor_name",
+                        "tensor is present in a shard other than its index assignment"))
+            }
+            if seen[pinnedIndex] != 0 {
+                let duplicateClose = file.close()
+                if duplicateClose.isErr() {
+                    abort("qwen.stream.cleanup: failed to close duplicate shard")
+                }
+                seen.free()
+                return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                    shardStreamError("qwen.stream.duplicate", "tensor_name",
+                        "tensor was encountered more than once"))
+            }
+            seen[pinnedIndex] = 1
+            tensorCount = tensorCount + 1
+            let geometry = file.metadata.tensors[metadataIndex]
+            if geometry.dataLength == (0 as UInt64) {
+                let geometryClose = file.close()
+                if geometryClose.isErr() {
+                    abort("qwen.stream.cleanup: failed to close zero tensor shard")
+                }
+                seen.free()
+                return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                    shardStreamError("qwen.stream.geometry", "tensor",
+                        "pinned source tensors must have positive byte length"))
+            }
+            let totalAdded = qwenStreamAdd(totalBytes, geometry.dataLength,
+                "total_tensor_bytes")
+            if totalAdded.isErr() {
+                let overflowClose = file.close()
+                if overflowClose.isErr() {
+                    abort("qwen.stream.cleanup: failed to close overflow shard")
+                }
+                seen.free()
+                return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                    totalAdded.unwrapErr())
+            }
+            totalBytes = totalAdded.unwrap()
+            let category = catalog.categoryAt(pinnedIndex)
+            if category.isErr() {
+                let categoryClose = file.close()
+                if categoryClose.isErr() {
+                    abort("qwen.stream.cleanup: failed to close invalid shard")
+                }
+                seen.free()
+                return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                    shardStreamError("qwen.stream.invalid-state", "catalog",
+                        "catalog category became unavailable"))
+            }
+            if category.unwrap() == "vision" {
+                visionCount = visionCount + 1
+                let visionAdded = qwenStreamAdd(visionBytes,
+                    geometry.dataLength, "excluded_vision_bytes")
+                if visionAdded.isErr() {
+                    let visionClose = file.close()
+                    if visionClose.isErr() {
+                        abort("qwen.stream.cleanup: failed to close vision shard")
+                    }
+                    seen.free()
+                    return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                        visionAdded.unwrapErr())
+                }
+                visionBytes = visionAdded.unwrap()
+            } else {
+                if category.unwrap() == "text" {
+                    textCount = textCount + 1
+                } else if category.unwrap() == "mtp" {
+                    mtpCount = mtpCount + 1
+                } else {
+                    let unknownClose = file.close()
+                    if unknownClose.isErr() {
+                        abort("qwen.stream.cleanup: failed to close unknown shard")
+                    }
+                    seen.free()
+                    return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                        shardStreamError("qwen.stream.unknown-category",
+                            "tensor_name",
+                            "catalog returned an unsupported tensor category"))
+                }
+                mappedTensorCount = mappedTensorCount + 1
+                var cursor: UInt64 = 0 as UInt64
+                while cursor < geometry.dataLength {
+                    let remaining = geometry.dataLength - cursor
+                    let chunk = if remaining < plan.sourceWindowBytes {
+                        remaining
+                    } else { plan.sourceWindowBytes }
+                    mappedWindowCount = mappedWindowCount + (1 as UInt64)
+                    if mappedWindowCount > admittedWindows.unwrap() or
+                        mappedWindowCount > QWEN_STREAM_MAX_WINDOWS {
+                        let limitClose = file.close()
+                        if limitClose.isErr() {
+                            abort("qwen.stream.cleanup: failed to close limited shard")
+                        }
+                        seen.free()
+                        return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                            shardStreamError("qwen.stream.limit",
+                                "mapped_window_count",
+                                "runtime window count exceeded admission"))
+                    }
+                    let mapped = file.file.window(geometry.dataOffset + cursor,
+                        chunk)
+                    if mapped.isErr() {
+                        let mapClose = file.close()
+                        if mapClose.isErr() {
+                            abort("qwen.stream.cleanup: failed to close unmapped shard")
+                        }
+                        seen.free()
+                        return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                            shardStreamError("qwen.stream.map", "tensor_name",
+                                "failed to map a bounded tensor slice"))
+                    }
+                    let window = mapped.unwrap()
+                    if window.validate().isErr() {
+                        let closeInvalidWindow = window.close()
+                        if closeInvalidWindow.isErr() {
+                            abort("qwen.stream.cleanup: failed to release invalid window")
+                        }
+                        let invalidClose = file.close()
+                        if invalidClose.isErr() {
+                            abort("qwen.stream.cleanup: failed to close invalid shard")
+                        }
+                        seen.free()
+                        return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                            shardStreamError("qwen.stream.map", "tensor_name",
+                                "mapped tensor slice failed validation"))
+                    }
+                    let firstByte = (ptr_deref_i8(window.data as Int) as Int) &
+                        255
+                    let lastByte = (ptr_deref_i8((window.data as Int) +
+                        (window.length as Int) - 1) as Int) & 255
+                    boundaryXor = boundaryXor ^ firstByte
+                    boundaryXor = boundaryXor ^ lastByte
+                    let discarded = window.discardPages()
+                    if discarded.isErr() {
+                        let closeUndiscardedWindow = window.close()
+                        if closeUndiscardedWindow.isErr() {
+                            abort("qwen.stream.cleanup: failed to release undiscarded window")
+                        }
+                        let discardFailureClose = file.close()
+                        if discardFailureClose.isErr() {
+                            abort("qwen.stream.cleanup: failed to close discard shard")
+                        }
+                        seen.free()
+                        return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                            shardStreamError("qwen.stream.map", "tensor_window",
+                                "failed to discard consumed tensor pages"))
+                    }
+                    let closeWindow = window.close()
+                    if closeWindow.isErr() {
+                        let windowFailureClose = file.close()
+                        if windowFailureClose.isErr() {
+                            abort("qwen.stream.cleanup: failed to close window shard")
+                        }
+                        seen.free()
+                        return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                            shardStreamError("qwen.stream.cleanup", "tensor_name",
+                                "failed to close a mapped tensor slice"))
+                    }
+                    let mappedAdded = qwenStreamAdd(mappedBytes, chunk,
+                        "mapped_bytes")
+                    if mappedAdded.isErr() {
+                        let mappedOverflowClose = file.close()
+                        if mappedOverflowClose.isErr() {
+                            abort("qwen.stream.cleanup: failed to close mapped shard")
+                        }
+                        seen.free()
+                        return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                            mappedAdded.unwrapErr())
+                    }
+                    mappedBytes = mappedAdded.unwrap()
+                    if chunk > maximumWindow { maximumWindow = chunk }
+                    cursor = cursor + chunk
+                }
+            }
+            metadataIndex = metadataIndex + 1
+        }
+        let closedFile = file.close()
+        if closedFile.isErr() {
+            seen.free()
+            return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                shardStreamError("qwen.stream.cleanup", "shard",
+                    "failed to close a source shard deterministically"))
+        }
+        shardIndex = shardIndex + 1
+    }
+
+    var seenIndex = 0
+    while seenIndex < seen.length() {
+        if seen[seenIndex] != 1 {
+            seen.free()
+            return Err<QwenShardStreamSummary, QwenShardStreamError>(
+                shardStreamError("qwen.stream.missing", "tensor",
+                    "a pinned tensor was absent from its assigned shard"))
+        }
+        seenIndex = seenIndex + 1
+    }
+    seen.free()
+    if tensorCount != QWEN_STREAM_TENSOR_COUNT or
+        textCount != QWEN_STREAM_TEXT_COUNT or
+        mtpCount != QWEN_STREAM_MTP_COUNT or
+        visionCount != QWEN_STREAM_VISION_COUNT or
+        totalBytes != plan.sourceTotalBytes or
+        mappedTensorCount != plan.includedTensorCount as Int or
+        visionCount != plan.excludedVisionTensorCount as Int {
+        return Err<QwenShardStreamSummary, QwenShardStreamError>(
+            shardStreamError("qwen.stream.identity", "source",
+                "source shard contents differ from the pinned conversion identity"))
+    }
+    let summary = QwenShardStreamSummary{
+        shardCount: shardIndex, tensorCount: tensorCount,
+        textTensorCount: textCount, mtpTensorCount: mtpCount,
+        excludedVisionTensorCount: visionCount,
+        mappedTensorCount: mappedTensorCount,
+        mappedWindowCount: mappedWindowCount, mappedBytes: mappedBytes,
+        excludedVisionBytes: visionBytes, totalTensorBytes: totalBytes,
+        maximumMappedWindowBytes: maximumWindow,
+        maximumOpenShards: 1, maximumInFlightTensors: 1,
+        visionPayloadWindows: 0 as UInt64, boundaryByteXor: boundaryXor,
+        closed: false,
+    }
+    let validSummary = summary.validate()
+    if validSummary.isErr() {
+        summary.close()
+        return Err<QwenShardStreamSummary, QwenShardStreamError>(
+            validSummary.unwrapErr())
+    }
+    return Ok<QwenShardStreamSummary, QwenShardStreamError>(summary)
+}
