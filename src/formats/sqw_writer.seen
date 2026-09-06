@@ -1,0 +1,277 @@
+///
+/// Bounded sequential SQW v1 staging and durable atomic promotion.
+///
+/// The caller produces canonical SQW bytes. This owner writes only bounded
+/// chunks, reopens the complete staged artifact through SqwReader, and does
+/// not rename it into place until every format, identity, and digest check
+/// succeeds.
+///
+
+import core.operation_context.{OperationContext}
+import core.result.{Result}
+import fs.file.{File}
+import fs.operations.{createTemporaryBeside, removeSingle, renamePath}
+import fs.path.{dirname}
+import fs.types.{DirectIoPolicy, OpenOptions, Path}
+import seen_qwen.formats.sqw.{SqwError, sqwCheckedAdd}
+import seen_qwen.formats.sqw_reader.{SqwReader, SqwReaderPolicy}
+
+let SQW_WRITER_ACTIVE: Int = 1
+let SQW_WRITER_FAILED: Int = 2
+let SQW_WRITER_DURABILITY_PENDING: Int = 3
+let SQW_WRITER_PROMOTED: Int = 4
+let SQW_WRITER_CLOSED: Int = 5
+let SQW_WRITER_MAX_CHUNK_BYTES: Int = 1048576
+
+fun sqwWriterError(code: String, field: String, message: String) r: SqwError {
+    return SqwError{ code: code, field: field, message: message }
+}
+
+fun sqwWriterContextOkay(context: OperationContext) r: Bool {
+    return not context.cancellation and context.monotonicDeadline >= 0 and
+        context.limits.maxPathBytes > 0 and context.limits.maxPathBytes <= 4095
+}
+
+fun sqwWriterBytesOkay(bytes: Array<Int>) r: Bool {
+    var index = 0
+    while index < bytes.length() {
+        if bytes[index] < 0 or bytes[index] > 255 { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun sqwWriterDirectoryOptions() r: OpenOptions {
+    return OpenOptions{
+        read: true, write: false, create: false, truncate: false,
+        append: false, exclusive: false, directory: true, noFollow: true
+    }
+}
+
+// Temporary validation and directory handles cannot be transferred through a
+// SqwError. Fail-stop on a close anomaly instead of returning after silently
+// losing the cleanup owner. Writer-owned staging handles remain retryable.
+fun sqwCloseValidationReader(borrow reader: SqwReader) r: Void {
+    let closed = reader.close()
+    if closed.isErr() {
+        abort("sqw.close: staged SQW validation reader cleanup failed")
+    }
+}
+
+fun sqwCloseDirectory(borrow directory: File) r: Void {
+    let closed = directory.close()
+    if closed.isErr() {
+        abort("sqw.close: destination directory cleanup failed")
+    }
+}
+
+@move
+pub class SqwWriter {
+    var context: OperationContext
+    var destination: Path
+    var staging: Path
+    var file: File
+    var readerPolicy: SqwReaderPolicy
+    var expectedBytes: UInt64
+    var writtenBytes: UInt64
+    var maxChunkBytes: Int
+    var replaceExisting: Bool
+    var state: Int
+    var fileOpen: Bool
+    var stagingExists: Bool
+
+    static fun begin(destination: String, expectedBytes: UInt64,
+        maxChunkBytes: Int, replaceExisting: Bool,
+        context: OperationContext, readerPolicy: SqwReaderPolicy)
+        r: Result<SqwWriter, SqwError> {
+        if destination.length() == 0 or
+            destination.length() > context.limits.maxPathBytes {
+            return Err<SqwWriter, SqwError>(sqwWriterError("sqw.path",
+                "destination", "SQW destination path is outside its bound"))
+        }
+        if not sqwWriterContextOkay(context) {
+            return Err<SqwWriter, SqwError>(sqwWriterError("sqw.cancelled",
+                "context", "SQW writer context is cancelled or invalid"))
+        }
+        if expectedBytes == (0 as UInt64) or
+            (expectedBytes & (0x8000000000000000 as UInt64)) !=
+                (0 as UInt64) {
+            return Err<SqwWriter, SqwError>(sqwWriterError("sqw.writer_limit",
+                "expected_bytes", "expected SQW extent is outside the signed-safe bound"))
+        }
+        if maxChunkBytes < 1 or maxChunkBytes > SQW_WRITER_MAX_CHUNK_BYTES {
+            return Err<SqwWriter, SqwError>(sqwWriterError("sqw.writer_limit",
+                "chunk", "SQW writer chunks must be bounded to 1 MiB"))
+        }
+        let destinationPath = Path.fromString(destination)
+        if destinationPath.isErr() {
+            return Err<SqwWriter, SqwError>(sqwWriterError("sqw.path",
+                "destination", "SQW destination path is invalid"))
+        }
+        let temporary = createTemporaryBeside(context, destinationPath.unwrap())
+        if temporary.isErr() {
+            return Err<SqwWriter, SqwError>(sqwWriterError("sqw.stage",
+                "staging", "failed to create a unique same-directory staging artifact"))
+        }
+        let owned = temporary.unwrap()
+        return Ok<SqwWriter, SqwError>(SqwWriter{
+            context: context,
+            destination: destinationPath.unwrap(),
+            staging: owned.path,
+            file: owned.file,
+            readerPolicy: readerPolicy,
+            expectedBytes: expectedBytes,
+            writtenBytes: 0 as UInt64,
+            maxChunkBytes: maxChunkBytes,
+            replaceExisting: replaceExisting,
+            state: SQW_WRITER_ACTIVE,
+            fileOpen: true,
+            stagingExists: true,
+        })
+    }
+
+    fun length() r: UInt64 { return this.writtenBytes }
+
+    fun isPromoted() r: Bool {
+        return this.state == SQW_WRITER_DURABILITY_PENDING or
+            this.state == SQW_WRITER_PROMOTED
+    }
+
+    fun write(bytes: Array<Int>) r: Result<Bool, SqwError> {
+        if this.state != SQW_WRITER_ACTIVE or not this.fileOpen {
+            return Err<Bool, SqwError>(sqwWriterError("sqw.writer_state",
+                "write", "SQW writer is not accepting bytes"))
+        }
+        if not sqwWriterContextOkay(this.context) {
+            this.state = SQW_WRITER_FAILED
+            return Err<Bool, SqwError>(sqwWriterError("sqw.cancelled",
+                "write", "SQW write was cancelled before I/O"))
+        }
+        if bytes.length() < 1 or bytes.length() > this.maxChunkBytes or
+            not sqwWriterBytesOkay(bytes) {
+            return Err<Bool, SqwError>(sqwWriterError("sqw.chunk", "write",
+                "SQW chunk is empty, oversized, or contains a non-byte value"))
+        }
+        let next = sqwCheckedAdd(this.writtenBytes,
+            bytes.length() as UInt64)
+        if next.isErr() or next.unwrap() > this.expectedBytes {
+            return Err<Bool, SqwError>(sqwWriterError("sqw.writer_limit",
+                "write", "SQW chunk exceeds the declared artifact extent"))
+        }
+        let written = this.file.writeAllAt(this.context, this.writtenBytes, bytes)
+        if written.isErr() or written.unwrap() != bytes.length() {
+            this.state = SQW_WRITER_FAILED
+            return Err<Bool, SqwError>(sqwWriterError("sqw.write", "staging",
+                "failed to write the complete bounded SQW chunk"))
+        }
+        this.writtenBytes = next.unwrap()
+        return Ok<Bool, SqwError>(true)
+    }
+
+    fun syncPromotedDirectory() r: Result<Bool, SqwError> {
+        if not sqwWriterContextOkay(this.context) {
+            return Err<Bool, SqwError>(sqwWriterError("sqw.cancelled",
+                "durability", "SQW directory durability was cancelled"))
+        }
+        let parentPath = Path.fromString(dirname(this.destination.asString()))
+        if parentPath.isErr() {
+            return Err<Bool, SqwError>(sqwWriterError("sqw.durability",
+                "destination", "failed to resolve the destination directory"))
+        }
+        let opened = File.open(this.context, parentPath.unwrap(),
+            sqwWriterDirectoryOptions(), DirectIoPolicy.Off)
+        if opened.isErr() {
+            return Err<Bool, SqwError>(sqwWriterError("sqw.durability",
+                "destination", "failed to open the destination directory"))
+        }
+        let directory = opened.unwrap()
+        let synced = directory.sync(this.context, false)
+        sqwCloseDirectory(directory)
+        if synced.isErr() {
+            return Err<Bool, SqwError>(sqwWriterError("sqw.durability",
+                "destination", "failed to durably sync the destination directory"))
+        }
+        return Ok<Bool, SqwError>(true)
+    }
+
+    fun commit() r: Result<Bool, SqwError> {
+        if this.state == SQW_WRITER_PROMOTED { return Ok<Bool, SqwError>(false) }
+        if this.state == SQW_WRITER_DURABILITY_PENDING {
+            let retry = this.syncPromotedDirectory()
+            if retry.isErr() { return retry }
+            this.state = SQW_WRITER_PROMOTED
+            return Ok<Bool, SqwError>(true)
+        }
+        if this.state != SQW_WRITER_ACTIVE or not this.fileOpen {
+            return Err<Bool, SqwError>(sqwWriterError("sqw.writer_state",
+                "commit", "SQW writer cannot commit from its current state"))
+        }
+        if not sqwWriterContextOkay(this.context) {
+            this.state = SQW_WRITER_FAILED
+            return Err<Bool, SqwError>(sqwWriterError("sqw.cancelled",
+                "commit", "SQW commit was cancelled before promotion"))
+        }
+        if this.writtenBytes != this.expectedBytes {
+            return Err<Bool, SqwError>(sqwWriterError("sqw.incomplete",
+                "staging", "staged SQW extent does not match the declared extent"))
+        }
+        let synced = this.file.sync(this.context, false)
+        if synced.isErr() {
+            this.state = SQW_WRITER_FAILED
+            return Err<Bool, SqwError>(sqwWriterError("sqw.sync", "staging",
+                "failed to durably sync the staged SQW artifact"))
+        }
+        let closed = this.file.close()
+        if closed.isErr() {
+            this.state = SQW_WRITER_FAILED
+            return Err<Bool, SqwError>(sqwWriterError("sqw.close", "staging",
+                "failed to close the staged SQW artifact"))
+        }
+        this.fileOpen = false
+
+        let validated = SqwReader.open(this.staging.asString(), this.readerPolicy)
+        if validated.isErr() {
+            this.state = SQW_WRITER_FAILED
+            return Err<Bool, SqwError>(validated.unwrapErr())
+        }
+        let reader = validated.unwrap()
+        sqwCloseValidationReader(reader)
+        let renamed = renamePath(this.staging, this.destination,
+            not this.replaceExisting)
+        if renamed.isErr() {
+            this.state = SQW_WRITER_FAILED
+            return Err<Bool, SqwError>(sqwWriterError("sqw.promote",
+                "destination", "atomic SQW promotion failed"))
+        }
+        this.stagingExists = false
+        this.state = SQW_WRITER_DURABILITY_PENDING
+        let durable = this.syncPromotedDirectory()
+        if durable.isErr() { return durable }
+        this.state = SQW_WRITER_PROMOTED
+        return Ok<Bool, SqwError>(true)
+    }
+
+    fun abort() r: Result<Bool, SqwError> {
+        if this.isPromoted() or this.state == SQW_WRITER_CLOSED {
+            return Ok<Bool, SqwError>(false)
+        }
+        if this.fileOpen {
+            let closed = this.file.close()
+            if closed.isErr() {
+                return Err<Bool, SqwError>(sqwWriterError("sqw.close",
+                    "staging", "failed to close staged SQW cleanup owner"))
+            }
+            this.fileOpen = false
+        }
+        if this.stagingExists {
+            let removed = removeSingle(this.staging, false)
+            if removed.isErr() {
+                return Err<Bool, SqwError>(sqwWriterError("sqw.cleanup",
+                    "staging", "failed to remove the rejected staged SQW artifact"))
+            }
+            this.stagingExists = false
+        }
+        this.state = SQW_WRITER_CLOSED
+        return Ok<Bool, SqwError>(true)
+    }
+}

@@ -64,14 +64,14 @@ class CiContractTests(unittest.TestCase):
 
     def test_inputs_match_dependency_and_oracle_locks(self) -> None:
         identities = (
-            "336baa3ac728bf0887deaf119f405313527409d9",
-            "9f3b3514509f98524bc15af1a1bfe1bc13e28b35",
-            "e830da3fb246fd03e64d203dd7291e0b38390b211bbc794a9793b80fa6b901aa",
-            "e7dc3fab02292a7c04303e5d1574d7f87bfcbe72b6827364c2f3588192134d95",
-            "5c10cc61d3578becbe270c1fc9480f3d8605822ee9898f1ee3ea630a51a087e3",
-            "87a388555b5fbdb236d916efa69f87734c9615fa4849914a054cd0b12d92a13b",
-            "8de71225c7600093df230129fbd71d9ec2f8b5b5a59fe9b4ec59305e977cbc4f",
-            "f5fe5bebb9a6d533f65f0726026b6a2e2e7b82d8ef0ed7be9c21899edd9ad313",
+            "64dbdc3b86f587e89317f7a62d9278111434eb62",
+            "3579c7dfbaf2f7fc6fd2eaddfa2fb549f2648adc",
+            "3c717c50b9b9ccedc720d758cd5f48a3ac903b407f87bddd30816aaf994f8b92",
+            "95d35317179f08ee4106ad47e9a02ce9cd8f680aac6d01efc4f292026731ad0f",
+            "57d795fc96f10716bec75712fc3ebeaf4b2bb7ea5f6d34dec02a156384190eb1",
+            "9f33249d6e7b97c48fdf81806dbe642455de1ebe88c476489ff9930b6c776053",
+            "884197e1bc68e59ac986ebb3a4a82b9f3484b8d392d87fda429c458d03ada40f",
+            "06a48bafe0714b704047b900cd7f554bdf8a332c6fd6407ded907ebad8f54777",
             "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
             "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
             "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
@@ -84,28 +84,28 @@ class CiContractTests(unittest.TestCase):
 
     def test_seen_release_provenance_is_exact_and_current(self) -> None:
         compiler_sha256 = (
-            "e7dc3fab02292a7c04303e5d1574d7f87bfcbe72b6827364c2f3588192134d95"
+            "95d35317179f08ee4106ad47e9a02ce9cd8f680aac6d01efc4f292026731ad0f"
         )
         archive_sha256 = (
-            "e830da3fb246fd03e64d203dd7291e0b38390b211bbc794a9793b80fa6b901aa"
+            "3c717c50b9b9ccedc720d758cd5f48a3ac903b407f87bddd30816aaf994f8b92"
         )
-        source_commit = "336baa3ac728bf0887deaf119f405313527409d9"
-        build_id = "5c05b97f921349ef603908cabf0531e09c071acb"
+        source_commit = "64dbdc3b86f587e89317f7a62d9278111434eb62"
+        build_id = "721884f58e422ad712c763f3e75fe8fb7b215ee2"
 
         for lock_entry in (
-            '# release_tag = "v0.19.2"',
+            '# release_tag = "v0.19.3"',
             f'# certified_commit = "{source_commit}"',
             f'# linux_x64_archive_sha256 = "{archive_sha256}"',
             f'# packaged_compiler_sha256 = "{compiler_sha256}"',
             f'# compiler_build_id = "{build_id}"',
-            "compiler=0.19.2",
+            "compiler=0.19.3",
             "target=linux-x86_64",
             "cpu=x86-64",
         ):
             self.assertIn(lock_entry, self.lock)
 
         for prepare_entry in (
-            "releases/download/v0.19.2/seen-0.19.2-linux-x64.tar.gz",
+            "releases/download/v0.19.3/seen-0.19.3-linux-x64.tar.gz",
             archive_sha256,
             compiler_sha256,
             source_commit,
@@ -124,9 +124,9 @@ class CiContractTests(unittest.TestCase):
             self.assertIn(prepare_entry, self.prepare)
 
         for inner_entry in (
-            "seen-0.19.2-linux-x64",
+            "seen-0.19.3-linux-x64",
             compiler_sha256,
-            "Seen 0.19.2",
+            "Seen 0.19.3",
             "--target-cpu=x86-64",
         ):
             self.assertIn(inner_entry, self.inner)
@@ -249,6 +249,7 @@ class CiContractTests(unittest.TestCase):
             "qwn_025b_full_model_oracle_test",
             "qwn_030a_sqw_contract_test",
             "qwn_030b_sqw_reader_test",
+            "qwn_030c_sqw_writer_test",
             "qwn_031a_reference_codec_test",
             "test_sampling_profiles.py",
             "test_hybrid_mini_contract.py",
@@ -262,6 +263,7 @@ class CiContractTests(unittest.TestCase):
             "test_official_full_model_oracles.py",
             "test_sqw_contract.py",
             "test_sqw_reader.py",
+            "test_sqw_writer.py",
             "test_qwen_tokenizer_oracles.py",
             "seen-pkg",
             "outside_objects_before",
