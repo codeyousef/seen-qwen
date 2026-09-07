@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://seenlang.dev/schemas/qwen-policy-resolver-oracle-v1.json",
+  "title": "Seen Qwen bounded quantization-policy resolver oracle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "ordering", "profile", "hard_bounds", "tensors", "rules", "expected"],
+  "properties": {
+    "schema": {"const": "seen-qwen-policy-resolver-oracle-v1"},
+    "version": {"const": 1},
+    "ordering": {"const": "declared-rule-order"},
+    "profile": {"$ref": "#/$defs/token"},
+    "hard_bounds": {"$ref": "#/$defs/bounds"},
+    "tensors": {"type": "array", "minItems": 1, "maxItems": 2048, "items": {"$ref": "#/$defs/tensor"}},
+    "rules": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"$ref": "#/$defs/rule"}},
+    "expected": {"type": "array", "minItems": 1, "maxItems": 2048, "items": {"$ref": "#/$defs/resolution"}}
+  },
+  "$defs": {
+    "token": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$"},
+    "selector": {"type": "string", "maxLength": 1024, "pattern": "^[A-Za-z0-9._-]*$"},
+    "bounds": {
+      "type": "object", "additionalProperties": false,
+      "required": ["max_tensors", "max_rules", "max_layer_index"],
+      "properties": {
+        "max_tensors": {"const": 2048},
+        "max_rules": {"const": 4096},
+        "max_layer_index": {"const": 63}
+      }
+    },
+    "tensor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "layer_index", "layer_type", "semantic_role", "outlier_bucket"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[A-Za-z0-9._-]+$"},
+        "layer_index": {"type": "integer", "minimum": -1, "maximum": 63},
+        "layer_type": {"$ref": "#/$defs/token"},
+        "semantic_role": {"$ref": "#/$defs/token"},
+        "outlier_bucket": {"$ref": "#/$defs/token"}
+      }
+    },
+    "rule": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "codec", "tensor_name", "layer_start", "layer_end", "layer_type", "semantic_role", "outlier_bucket"],
+      "properties": {
+        "id": {"$ref": "#/$defs/token"},
+        "codec": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$"},
+        "tensor_name": {"$ref": "#/$defs/selector"},
+        "layer_start": {"type": "integer", "minimum": -1, "maximum": 63},
+        "layer_end": {"type": "integer", "minimum": -1, "maximum": 63},
+        "layer_type": {"$ref": "#/$defs/selector"},
+        "semantic_role": {"$ref": "#/$defs/selector"},
+        "outlier_bucket": {"$ref": "#/$defs/selector"}
+      }
+    },
+    "resolution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["tensor_name", "rule_index", "rule_id", "codec"],
+      "properties": {
+        "tensor_name": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[A-Za-z0-9._-]+$"},
+        "rule_index": {"type": "integer", "minimum": 0, "maximum": 4095},
+        "rule_id": {"$ref": "#/$defs/token"},
+        "codec": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$"}
+      }
+    }
+  }
+}

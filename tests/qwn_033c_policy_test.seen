@@ -1,0 +1,162 @@
+import seen_qwen.quant.policy.{QwenPolicyTensor, QwenQuantizationRule,
+    resolveQuantizationPolicy}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun tensor(name: String, layerIndex: Int, layerType: String,
+    role: String, bucket: String) r: QwenPolicyTensor {
+    return QwenPolicyTensor{ name: name, layerIndex: layerIndex,
+        layerType: layerType, semanticRole: role, outlierBucket: bucket }
+}
+
+fun rule(id: String, codec: String, name: String, firstLayer: Int,
+    lastLayer: Int, layerType: String, role: String, bucket: String)
+    r: QwenQuantizationRule {
+    return QwenQuantizationRule{ id: id, codec: codec, tensorName: name,
+        layerStart: firstLayer, layerEnd: lastLayer, layerType: layerType,
+        semanticRole: role, outlierBucket: bucket }
+}
+
+fun main() r: Int {
+    let tensors = Array<QwenPolicyTensor>()
+    tensors.push(tensor("lm_head.weight", -1, "global", "lm-head", "critical"))
+    tensors.push(tensor("model.language_model.layers.0.self_attn.q_proj.weight",
+        0, "attention", "attention-q", "high"))
+    tensors.push(tensor("model.language_model.layers.32.linear_attn.A_log",
+        32, "gdn", "gdn-state", "medium"))
+    tensors.push(tensor("model.language_model.embed_tokens.weight", -1,
+        "global", "embeddings", "low"))
+    tensors.push(tensor("mtp.fc.weight", -1, "mtp", "mtp", "low"))
+
+    let rules = Array<QwenQuantizationRule>()
+    rules.push(rule("exact-lm-head", "F16", "lm_head.weight", -1, -1,
+        "", "", ""))
+    rules.push(rule("early-attention-q-high", "Q8_SYM_G64", "", 0, 15,
+        "attention", "attention-q", "high"))
+    rules.push(rule("gdn-state", "F32", "", 16, 63, "gdn",
+        "gdn-state", ""))
+    rules.push(rule("embeddings", "BF16", "", -1, -1, "",
+        "embeddings", ""))
+    rules.push(rule("low-outlier", "Q4_SYM_G64", "", -1, -1, "", "",
+        "low"))
+    rules.push(rule("declared-catch-all", "Q8_SYM_G64", "", -1, -1,
+        "", "", ""))
+
+    let first = resolveQuantizationPolicy("synthetic-resolver-test", tensors,
+        rules, 5, 6)
+    let second = resolveQuantizationPolicy("synthetic-resolver-test", tensors,
+        rules, 5, 6)
+    require(first.isOkay() and second.isOkay(),
+        "resolve a bounded explicit synthetic policy twice")
+    let resolved = first.unwrap()
+    let repeated = second.unwrap()
+    require(resolved.length() == 5 and repeated.length() == 5,
+        "preserve exactly one resolution per input tensor")
+    let expectedCodecs = Array<String>()
+    expectedCodecs.push("F16"); expectedCodecs.push("Q8_SYM_G64")
+    expectedCodecs.push("F32"); expectedCodecs.push("BF16")
+    expectedCodecs.push("Q4_SYM_G64")
+    let expectedRules = Array<Int>()
+    expectedRules.push(0); expectedRules.push(1); expectedRules.push(2)
+    expectedRules.push(3); expectedRules.push(4)
+    var index = 0
+    while index < resolved.length() {
+        let value = resolved.at(index).unwrap()
+        let again = repeated.at(index).unwrap()
+        require(value.tensorIndex == index and value.ruleIndex ==
+            expectedRules[index] and value.codec == expectedCodecs[index],
+            "match every selector dimension in declared rule order")
+        require(value.tensorName == again.tensorName and
+            value.ruleId == again.ruleId and value.codec == again.codec and
+            value.ruleIndex == again.ruleIndex,
+            "repeat the complete resolution deterministically")
+        index = index + 1
+    }
+    require(resolved.at(-1).unwrapErr().code == "qwen.policy.index" and
+        resolved.at(5).unwrapErr().code == "qwen.policy.index",
+        "reject result indexes outside the bounded resolution")
+
+    let orderedTensor = Array<QwenPolicyTensor>()
+    orderedTensor.push(tensor("lm_head.weight", -1, "global", "lm-head",
+        "critical"))
+    let orderedRules = Array<QwenQuantizationRule>()
+    orderedRules.push(rule("first-catch-all", "Q4_SYM_G64", "", -1, -1,
+        "", "", ""))
+    orderedRules.push(rule("later-exact", "F16", "lm_head.weight", -1, -1,
+        "", "", ""))
+    let ordered = resolveQuantizationPolicy("order-test", orderedTensor,
+        orderedRules, 1, 2).unwrap()
+    require(ordered.at(0).unwrap().ruleId == "first-catch-all" and
+        ordered.at(0).unwrap().codec == "Q4_SYM_G64",
+        "use explicit rule order without hidden specificity precedence")
+
+    let unmatchedRules = Array<QwenQuantizationRule>()
+    unmatchedRules.push(rule("only-attention", "Q8_SYM_G64", "", 0, 63,
+        "attention", "", ""))
+    require(resolveQuantizationPolicy("unmatched-test", orderedTensor,
+        unmatchedRules, 1, 1).unwrapErr().code == "qwen.policy.unmatched",
+        "fail closed instead of inventing a fallback codec")
+
+    let duplicateTensors = Array<QwenPolicyTensor>()
+    duplicateTensors.push(tensor("lm_head.weight", -1, "global", "lm-head",
+        "critical"))
+    duplicateTensors.push(tensor("lm_head.weight", -1, "global", "lm-head",
+        "critical"))
+    require(resolveQuantizationPolicy("duplicate-tensor", duplicateTensors,
+        orderedRules, 2, 2).unwrapErr().code == "qwen.policy.duplicate",
+        "reject duplicate tensor names")
+
+    let duplicateRules = Array<QwenQuantizationRule>()
+    duplicateRules.push(rule("same", "F16", "lm_head.weight", -1, -1,
+        "", "", ""))
+    duplicateRules.push(rule("same", "Q8_SYM_G64", "", -1, -1,
+        "", "", ""))
+    require(resolveQuantizationPolicy("duplicate-rule", orderedTensor,
+        duplicateRules, 1, 2).unwrapErr().code == "qwen.policy.duplicate",
+        "reject duplicate rule ids")
+    duplicateRules[1].id = "different"
+    duplicateRules[1].tensorName = "lm_head.weight"
+    require(resolveQuantizationPolicy("duplicate-selector", orderedTensor,
+        duplicateRules, 1, 2).unwrapErr().code == "qwen.policy.ambiguous",
+        "reject duplicate rule predicates")
+
+    let invalidRules = Array<QwenQuantizationRule>()
+    invalidRules.push(rule("invalid-layer", "F16", "", 8, 64, "", "", ""))
+    require(resolveQuantizationPolicy("invalid-layer", orderedTensor,
+        invalidRules, 1, 1).unwrapErr().code == "qwen.policy.bounds",
+        "reject policy ranges outside the frozen 64-layer model")
+    invalidRules[0] = rule("invalid-codec", "F16*exec", "", -1, -1,
+        "", "", "")
+    require(resolveQuantizationPolicy("invalid-codec", orderedTensor,
+        invalidRules, 1, 1).unwrapErr().code == "qwen.policy.schema" and
+        not resolveQuantizationPolicy("invalid-codec", orderedTensor,
+            invalidRules, 1, 1).unwrapErr().retryable,
+        "reject non-canonical codec expressions without retry")
+    require(resolveQuantizationPolicy("limit", tensors, rules, 4, 6)
+        .unwrapErr().code == "qwen.policy.limit" and
+        resolveQuantizationPolicy("limit", tensors, rules, 5, 4097)
+        .unwrapErr().field == "limits",
+        "enforce explicit and hard resolver cardinality limits")
+    let emptyTensors = Array<QwenPolicyTensor>()
+    require(resolveQuantizationPolicy("empty", emptyTensors, rules, 1, 6)
+        .unwrapErr().code == "qwen.policy.input",
+        "reject empty resolver input")
+
+    ordered.close(); ordered.close()
+    resolved.close(); resolved.close(); repeated.close()
+    require(resolved.closed and resolved.length() == 0 and
+        resolved.at(0).unwrapErr().code == "qwen.policy.closed" and
+        resolved.at(0).unwrapErr().exitCode == 11,
+        "close the resolution deterministically and reject use after close")
+
+    expectedCodecs.free(); expectedRules.free()
+    tensors.free(); rules.free(); orderedTensor.free(); orderedRules.free()
+    unmatchedRules.free(); duplicateTensors.free(); duplicateRules.free()
+    invalidRules.free(); emptyTensors.free()
+    println("PASS: QWN-033C bounded deterministic quantization-policy resolver")
+    return 0
+}
+
+main()
