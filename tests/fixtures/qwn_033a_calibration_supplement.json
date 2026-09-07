@@ -1,0 +1,59 @@
+{
+  "schema": "seen-qwen-calibration-supplement-v1",
+  "license": "Apache-2.0",
+  "privacy": "project-authored-no-private-user-data",
+  "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "tokenizer_oracle_sha256": "0b5c8911aa07565c03e036c54bfdf731263d983c6513344377d7d1454f3bcf0a",
+  "recipes": [
+    {
+      "id": "activation_high_variance",
+      "kind": "explicit_token_ids",
+      "role": "high-variance-activation-probe-candidate",
+      "token_count": 28,
+      "token_ids": [148739, 161785, 150021, 182946, 149650, 895, 56868, 3825, 220, 99986, 10838, 248, 222, 11555, 1822, 363, 427, 25, 1286, 313, 198, 262, 460, 220, 15, 198, 92, 198]
+    },
+    {
+      "id": "activation_low_variance",
+      "kind": "repeat_token",
+      "role": "low-variance-activation-probe-candidate",
+      "token_count": 512,
+      "token_id": 67089,
+      "repetitions": 512
+    },
+    {
+      "id": "long_document_032k",
+      "kind": "cycle_token_ids",
+      "role": "long-document",
+      "token_count": 32768,
+      "target_tokens": 32768,
+      "cycle_token_ids": [9419, 11, 1814, 0, 148739, 161785, 150021, 182946, 149650, 11555, 1822, 363, 427, 25, 1286, 313, 198, 262, 460, 220, 15, 198, 92, 198]
+    },
+    {
+      "id": "multilingual",
+      "kind": "explicit_token_ids",
+      "role": "multilingual-natural-language",
+      "token_count": 17,
+      "token_ids": [9419, 11, 1814, 0, 148739, 161785, 150021, 182946, 149650, 895, 56868, 3825, 220, 99986, 10838, 248, 222]
+    },
+    {
+      "id": "retrieval_128k",
+      "kind": "fill_and_insert",
+      "role": "long-context-retrieval",
+      "token_count": 131072,
+      "target_tokens": 131072,
+      "filler_token_id": 67089,
+      "needle_token_ids": [9419, 11, 1814, 0],
+      "needle_offsets": [0, 32768, 65536, 98304, 131068]
+    },
+    {
+      "id": "retrieval_262k",
+      "kind": "fill_and_insert",
+      "role": "native-limit-long-context-retrieval",
+      "token_count": 262144,
+      "target_tokens": 262144,
+      "filler_token_id": 67089,
+      "needle_token_ids": [9419, 11, 1814, 0],
+      "needle_offsets": [0, 65536, 131072, 196608, 262140]
+    }
+  ]
+}

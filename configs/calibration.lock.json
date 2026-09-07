@@ -1,0 +1,98 @@
+{
+  "schema": "seen-qwen-calibration-lock-v1",
+  "version": "1",
+  "classification": "calibration-input-lock",
+  "privacy": "public-and-project-authored-no-private-user-data",
+  "ordering": "lexicographic-sample-id",
+  "model": {
+    "model_id": "Qwen/Qwen3.8-27B",
+    "model_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "license": "Apache-2.0",
+    "tensor_index_sha256": "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df",
+    "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "tokenizer_oracle_sha256": "0b5c8911aa07565c03e036c54bfdf731263d983c6513344377d7d1454f3bcf0a",
+    "trust_remote_code": false
+  },
+  "sources": [
+    {
+      "id": "qwn-022b-tokenizer-oracles",
+      "kind": "checked-in-oracle",
+      "path": "tests/fixtures/qwen3_8_tokenizer_oracles.json",
+      "revision": "sha256:0b5c8911aa07565c03e036c54bfdf731263d983c6513344377d7d1454f3bcf0a",
+      "license": "Apache-2.0",
+      "bytes": "28676",
+      "sha256": "0b5c8911aa07565c03e036c54bfdf731263d983c6513344377d7d1454f3bcf0a",
+      "runtime_executable": false,
+      "private_data": false
+    },
+    {
+      "id": "qwn-025b-capture-source",
+      "kind": "project-source",
+      "path": "tools/capture_official_full_model_oracles.py",
+      "revision": "sha256:336f85c8a461bcd2496ffaae27deb8537199957cd6afce47ef62c8788db6d891",
+      "license": "Apache-2.0",
+      "bytes": "22703",
+      "sha256": "336f85c8a461bcd2496ffaae27deb8537199957cd6afce47ef62c8788db6d891",
+      "runtime_executable": false,
+      "private_data": false
+    },
+    {
+      "id": "qwn-025b-full-model-oracles",
+      "kind": "checked-in-oracle",
+      "path": "tests/fixtures/qwn_025b_full_model_oracles.json",
+      "revision": "sha256:42ba8e0b9d5adec7c5ce1708bfc60d7b9911c126af9e6703b35efd108fedc921",
+      "license": "Apache-2.0",
+      "bytes": "18753",
+      "sha256": "42ba8e0b9d5adec7c5ce1708bfc60d7b9911c126af9e6703b35efd108fedc921",
+      "runtime_executable": false,
+      "private_data": false
+    },
+    {
+      "id": "qwn-033a-supplement",
+      "kind": "canonical-token-recipes",
+      "path": "tests/fixtures/qwn_033a_calibration_supplement.json",
+      "revision": "sha256:d40134919a871d57a039a259880ee283e75b8344a7c18b0858e41e7da4c75a30",
+      "license": "Apache-2.0",
+      "bytes": "2133",
+      "sha256": "d40134919a871d57a039a259880ee283e75b8344a7c18b0858e41e7da4c75a30",
+      "runtime_executable": false,
+      "private_data": false
+    }
+  ],
+  "samples": [
+    {"id": "activation_high_variance", "source_id": "qwn-033a-supplement", "payload_kind": "canonical-token-recipe", "payload_sha256": "e3204b1fd15249349e57b5102557bbe58bad0628b726094fb04619db745de1af", "token_count": 28, "role": "high-variance-activation-probe-candidate"},
+    {"id": "activation_low_variance", "source_id": "qwn-033a-supplement", "payload_kind": "canonical-token-recipe", "payload_sha256": "9b1d8921e853403cff6545f0e6c2d7d652b608df44ee8c55b2cf5d3f0908502c", "token_count": 512, "role": "low-variance-activation-probe-candidate"},
+    {"id": "arabic", "source_id": "qwn-025b-full-model-oracles", "payload_kind": "rendered-utf8", "payload_sha256": "76fa0b638e0b62d18b691e8d33e44410c499b646149a32c830e4046bac38483a", "token_count": 25, "role": "arabic-natural-language"},
+    {"id": "code", "source_id": "qwn-025b-full-model-oracles", "payload_kind": "rendered-utf8", "payload_sha256": "c8bc3d8b6ab1696bde9a22fbb8e8f2b8de88a2394a1641edd10dd86bcac285a7", "token_count": 25, "role": "seen-code"},
+    {"id": "english", "source_id": "qwn-025b-full-model-oracles", "payload_kind": "rendered-utf8", "payload_sha256": "19227ef5fe487bb46292a17442fc3e11de0302f74e34399064f379f8cef89eb7", "token_count": 22, "role": "natural-language"},
+    {"id": "long_document_032k", "source_id": "qwn-033a-supplement", "payload_kind": "canonical-token-recipe", "payload_sha256": "7c324409e22a936535cd803c620e080aa13002909620f0f6e5cc22967197ab17", "token_count": 32768, "role": "long-document"},
+    {"id": "long_repeated", "source_id": "qwn-025b-full-model-oracles", "payload_kind": "rendered-utf8", "payload_sha256": "567dc1c65ec04fca5fb6bafa4044f48dcc0994a400bb21b66d65046169e655e0", "token_count": 74, "role": "ordered-structure"},
+    {"id": "minimal", "source_id": "qwn-025b-full-model-oracles", "payload_kind": "rendered-utf8", "payload_sha256": "422679356522fe3125048c90cb8a3fc3c36033d365781caedd2e02644de1ce1e", "token_count": 12, "role": "minimal-natural-language"},
+    {"id": "multilingual", "source_id": "qwn-033a-supplement", "payload_kind": "canonical-token-recipe", "payload_sha256": "d4178ca337b1eb5d6452aa98f38c05bc2ff2087be13747a2c2c7843227fb5d8a", "token_count": 17, "role": "multilingual-natural-language"},
+    {"id": "retrieval_128k", "source_id": "qwn-033a-supplement", "payload_kind": "canonical-token-recipe", "payload_sha256": "411fd2ba51a6738c34430aefe0a7f1284b98a4b3a58287fd4f2c85888eae8218", "token_count": 131072, "role": "long-context-retrieval"},
+    {"id": "retrieval_262k", "source_id": "qwn-033a-supplement", "payload_kind": "canonical-token-recipe", "payload_sha256": "992bee7053b140dde6f4d526be23e356e0b111c91c13309b39777accc6b6c62b", "token_count": 262144, "role": "native-limit-long-context-retrieval"},
+    {"id": "thinking_off", "source_id": "qwn-025b-full-model-oracles", "payload_kind": "rendered-utf8", "payload_sha256": "8f71c30fea2c80bfa6401d4a58828783b9d8419a18853a2604c6a8eef0c7b4b6", "token_count": 32, "role": "thinking-disabled"},
+    {"id": "thinking_on", "source_id": "qwn-025b-full-model-oracles", "payload_kind": "rendered-utf8", "payload_sha256": "59840d9141ddf32e05affa2ca71b097f99d0e898dbcdba9c845194c907753fa7", "token_count": 60, "role": "thinking-enabled"},
+    {"id": "tool_chat", "source_id": "qwn-025b-full-model-oracles", "payload_kind": "rendered-utf8", "payload_sha256": "dc45575551a2a7c04fa2b6da3fbaeaadb41cf31adaf3a5562a783c5cbbddd031", "token_count": 82, "role": "tool-context"}
+  ],
+  "bounds": {
+    "source_count": 4,
+    "sample_count": 14,
+    "aggregate_tokens": 426873,
+    "max_sample_tokens": 262144,
+    "max_generated_bytes": "8388608",
+    "workers": 1
+  },
+  "coverage": {
+    "natural_language": true,
+    "code": true,
+    "arabic": true,
+    "multilingual": true,
+    "long_document": true,
+    "long_context_retrieval": true,
+    "thinking_enabled": true,
+    "thinking_disabled": true,
+    "high_variance_activation_probe": true,
+    "low_variance_activation_probe": true
+  }
+}

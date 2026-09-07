@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://seenlang.org/schemas/qwen-calibration-lock-v1.json",
+  "title": "Seen Qwen calibration corpus lock v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "classification", "privacy", "ordering", "model", "sources", "samples", "bounds", "coverage"],
+  "properties": {
+    "schema": {"const": "seen-qwen-calibration-lock-v1"},
+    "version": {"const": "1"},
+    "classification": {"const": "calibration-input-lock"},
+    "privacy": {"const": "public-and-project-authored-no-private-user-data"},
+    "ordering": {"const": "lexicographic-sample-id"},
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_id", "model_revision", "license", "tensor_index_sha256", "tokenizer_revision", "tokenizer_oracle_sha256", "trust_remote_code"],
+      "properties": {
+        "model_id": {"const": "Qwen/Qwen3.8-27B"},
+        "model_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "license": {"const": "Apache-2.0"},
+        "tensor_index_sha256": {"$ref": "#/$defs/sha256"},
+        "tokenizer_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "tokenizer_oracle_sha256": {"$ref": "#/$defs/sha256"},
+        "trust_remote_code": {"const": false}
+      }
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {"$ref": "#/$defs/source"}
+    },
+    "samples": {
+      "type": "array",
+      "minItems": 14,
+      "maxItems": 14,
+      "items": {"$ref": "#/$defs/sample"}
+    },
+    "bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_count", "sample_count", "aggregate_tokens", "max_sample_tokens", "max_generated_bytes", "workers"],
+      "properties": {
+        "source_count": {"const": 4},
+        "sample_count": {"const": 14},
+        "aggregate_tokens": {"const": 426873},
+        "max_sample_tokens": {"const": 262144},
+        "max_generated_bytes": {"const": "8388608"},
+        "workers": {"const": 1}
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["natural_language", "code", "arabic", "multilingual", "long_document", "long_context_retrieval", "thinking_enabled", "thinking_disabled", "high_variance_activation_probe", "low_variance_activation_probe"],
+      "properties": {
+        "natural_language": {"const": true},
+        "code": {"const": true},
+        "arabic": {"const": true},
+        "multilingual": {"const": true},
+        "long_document": {"const": true},
+        "long_context_retrieval": {"const": true},
+        "thinking_enabled": {"const": true},
+        "thinking_disabled": {"const": true},
+        "high_variance_activation_probe": {"const": true},
+        "low_variance_activation_probe": {"const": true}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "path", "revision", "license", "bytes", "sha256", "runtime_executable", "private_data"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+        "kind": {"enum": ["checked-in-oracle", "project-source", "canonical-token-recipes"]},
+        "path": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^(configs|tests/fixtures|tools)/[A-Za-z0-9._/-]+$"},
+        "revision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "license": {"const": "Apache-2.0"},
+        "bytes": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "runtime_executable": {"const": false},
+        "private_data": {"const": false}
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source_id", "payload_kind", "payload_sha256", "token_count", "role"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_]{0,63}$"},
+        "source_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+        "payload_kind": {"enum": ["rendered-utf8", "canonical-token-recipe"]},
+        "payload_sha256": {"$ref": "#/$defs/sha256"},
+        "token_count": {"type": "integer", "minimum": 1, "maximum": 262144},
+        "role": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9][a-z0-9-]*$"}
+      }
+    }
+  }
+}

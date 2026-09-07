@@ -1,0 +1,534 @@
+///
+/// Closed, bounded calibration-corpus lock for Qwen3.8-27B.
+///
+/// The lock admits only the already certified QWN-022B/QWN-025B corpus and
+/// project-authored deterministic token recipes. It contains no private data,
+/// executable expressions, network locations, or runtime fallback policy.
+/// Borrowed sample/source strings remain valid only while the returned lock
+/// owns its strict-JSON document.
+///
+
+import core.result.{Result}
+import crypto.sha256.{sha256}
+import json.parser.{JsonParseResult, destroyJsonParseResult}
+import json.strict.{StrictJsonLimits, parseStrictJson}
+import json.value.{JsonValue}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+let QWEN_CALIBRATION_SAMPLE_COUNT: Int = 14
+let QWEN_CALIBRATION_SOURCE_COUNT: Int = 4
+let QWEN_CALIBRATION_AGGREGATE_TOKENS: Int = 426873
+let QWEN_CALIBRATION_MAX_SAMPLE_TOKENS: Int = 262144
+
+pub class QwenCalibrationError {
+    var code: String
+    var field: String
+    var message: String
+}
+
+fun calibrationError(code: String, field: String, message: String)
+    r: QwenCalibrationError {
+    return QwenCalibrationError{ code: code, field: field, message: message }
+}
+
+fun calibrationField(object: JsonValue, field: String) r: JsonValue? {
+    if not object.isObject() { return null }
+    var index = 0
+    while index < object.length() {
+        let key = object.keyAt(index)
+        let value = object.valueAt(index)
+        if key.isNone() or value.isNone() { return null }
+        if key.unwrap() == field { return value.unwrap() }
+        index = index + 1
+    }
+    return null
+}
+
+fun calibrationExactFields(object: JsonValue, fields: Array<String>) r: Bool {
+    if not object.isObject() or object.length() != fields.length() {
+        return false
+    }
+    var index = 0
+    while index < object.length() {
+        let key = object.keyAt(index)
+        let value = object.valueAt(index)
+        if key.isNone() or value.isNone() { return false }
+        var known = false
+        var fieldIndex = 0
+        while fieldIndex < fields.length() {
+            if key.unwrap() == fields[fieldIndex] { known = true }
+            fieldIndex = fieldIndex + 1
+        }
+        if not known { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun calibrationStringEquals(object: JsonValue, field: String,
+    expected: String) r: Bool {
+    let value = calibrationField(object, field)
+    return not value.isNone() and value.unwrap().isString() and
+        value.unwrap().getString() == expected
+}
+
+fun calibrationBoolEquals(object: JsonValue, field: String,
+    expected: Bool) r: Bool {
+    let value = calibrationField(object, field)
+    return not value.isNone() and value.unwrap().isBool() and
+        value.unwrap().getBool() == expected
+}
+
+fun calibrationIntEquals(object: JsonValue, field: String,
+    expected: Int) r: Bool {
+    let value = calibrationField(object, field)
+    return not value.isNone() and value.unwrap().isNumber() and
+        value.unwrap().getNumber() == expected.toFloat() and
+        value.unwrap().getInt() == expected
+}
+
+fun calibrationDigestValid(value: String) r: Bool {
+    if value.length() != 64 { return false }
+    var index = 0
+    while index < value.length() {
+        let byte = value.byteAt(index)
+        let digit = byte >= 48 and byte <= 57
+        let lower = byte >= 97 and byte <= 102
+        if not digit and not lower { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun rootFields() r: Array<String> {
+    let fields = Array<String>()
+    fields.push("schema"); fields.push("version")
+    fields.push("classification"); fields.push("privacy")
+    fields.push("ordering"); fields.push("model")
+    fields.push("sources"); fields.push("samples")
+    fields.push("bounds"); fields.push("coverage")
+    return fields
+}
+
+fun modelFields() r: Array<String> {
+    let fields = Array<String>()
+    fields.push("model_id"); fields.push("model_revision")
+    fields.push("license"); fields.push("tensor_index_sha256")
+    fields.push("tokenizer_revision")
+    fields.push("tokenizer_oracle_sha256")
+    fields.push("trust_remote_code")
+    return fields
+}
+
+fun sourceFields() r: Array<String> {
+    let fields = Array<String>()
+    fields.push("id"); fields.push("kind"); fields.push("path")
+    fields.push("revision"); fields.push("license"); fields.push("bytes")
+    fields.push("sha256"); fields.push("runtime_executable")
+    fields.push("private_data")
+    return fields
+}
+
+fun sampleFields() r: Array<String> {
+    let fields = Array<String>()
+    fields.push("id"); fields.push("source_id")
+    fields.push("payload_kind"); fields.push("payload_sha256")
+    fields.push("token_count"); fields.push("role")
+    return fields
+}
+
+fun boundsFields() r: Array<String> {
+    let fields = Array<String>()
+    fields.push("source_count"); fields.push("sample_count")
+    fields.push("aggregate_tokens"); fields.push("max_sample_tokens")
+    fields.push("max_generated_bytes"); fields.push("workers")
+    return fields
+}
+
+fun coverageFields() r: Array<String> {
+    let fields = Array<String>()
+    fields.push("natural_language"); fields.push("code")
+    fields.push("arabic"); fields.push("multilingual")
+    fields.push("long_document"); fields.push("long_context_retrieval")
+    fields.push("thinking_enabled"); fields.push("thinking_disabled")
+    fields.push("high_variance_activation_probe")
+    fields.push("low_variance_activation_probe")
+    return fields
+}
+
+fun expectedSourceIds() r: Array<String> {
+    let values = Array<String>()
+    values.push("qwn-022b-tokenizer-oracles")
+    values.push("qwn-025b-capture-source")
+    values.push("qwn-025b-full-model-oracles")
+    values.push("qwn-033a-supplement")
+    return values
+}
+
+fun expectedSourceKinds() r: Array<String> {
+    let values = Array<String>()
+    values.push("checked-in-oracle"); values.push("project-source")
+    values.push("checked-in-oracle"); values.push("canonical-token-recipes")
+    return values
+}
+
+fun expectedSourcePaths() r: Array<String> {
+    let values = Array<String>()
+    values.push("tests/fixtures/qwen3_8_tokenizer_oracles.json")
+    values.push("tools/capture_official_full_model_oracles.py")
+    values.push("tests/fixtures/qwn_025b_full_model_oracles.json")
+    values.push("tests/fixtures/qwn_033a_calibration_supplement.json")
+    return values
+}
+
+fun expectedSourceBytes() r: Array<String> {
+    let values = Array<String>()
+    values.push("28676"); values.push("22703")
+    values.push("18753"); values.push("2133")
+    return values
+}
+
+fun expectedSourceDigests() r: Array<String> {
+    let values = Array<String>()
+    values.push("0b5c8911aa07565c03e036c54bfdf731263d983c6513344377d7d1454f3bcf0a")
+    values.push("336f85c8a461bcd2496ffaae27deb8537199957cd6afce47ef62c8788db6d891")
+    values.push("42ba8e0b9d5adec7c5ce1708bfc60d7b9911c126af9e6703b35efd108fedc921")
+    values.push("d40134919a871d57a039a259880ee283e75b8344a7c18b0858e41e7da4c75a30")
+    return values
+}
+
+fun expectedSampleIds() r: Array<String> {
+    let values = Array<String>()
+    values.push("activation_high_variance")
+    values.push("activation_low_variance")
+    values.push("arabic"); values.push("code"); values.push("english")
+    values.push("long_document_032k"); values.push("long_repeated")
+    values.push("minimal"); values.push("multilingual")
+    values.push("retrieval_128k"); values.push("retrieval_262k")
+    values.push("thinking_off"); values.push("thinking_on")
+    values.push("tool_chat")
+    return values
+}
+
+fun expectedSampleSources() r: Array<String> {
+    let values = Array<String>()
+    values.push("qwn-033a-supplement"); values.push("qwn-033a-supplement")
+    values.push("qwn-025b-full-model-oracles")
+    values.push("qwn-025b-full-model-oracles")
+    values.push("qwn-025b-full-model-oracles")
+    values.push("qwn-033a-supplement")
+    values.push("qwn-025b-full-model-oracles")
+    values.push("qwn-025b-full-model-oracles")
+    values.push("qwn-033a-supplement"); values.push("qwn-033a-supplement")
+    values.push("qwn-033a-supplement")
+    values.push("qwn-025b-full-model-oracles")
+    values.push("qwn-025b-full-model-oracles")
+    values.push("qwn-025b-full-model-oracles")
+    return values
+}
+
+fun expectedPayloadKinds() r: Array<String> {
+    let values = Array<String>()
+    var index = 0
+    while index < QWEN_CALIBRATION_SAMPLE_COUNT {
+        let recipe = index == 0 or index == 1 or index == 5 or index == 8 or
+            index == 9 or index == 10
+        values.push(if recipe { "canonical-token-recipe" } else {
+            "rendered-utf8"
+        })
+        index = index + 1
+    }
+    return values
+}
+
+fun expectedSampleDigests() r: Array<String> {
+    let values = Array<String>()
+    values.push("e3204b1fd15249349e57b5102557bbe58bad0628b726094fb04619db745de1af")
+    values.push("9b1d8921e853403cff6545f0e6c2d7d652b608df44ee8c55b2cf5d3f0908502c")
+    values.push("76fa0b638e0b62d18b691e8d33e44410c499b646149a32c830e4046bac38483a")
+    values.push("c8bc3d8b6ab1696bde9a22fbb8e8f2b8de88a2394a1641edd10dd86bcac285a7")
+    values.push("19227ef5fe487bb46292a17442fc3e11de0302f74e34399064f379f8cef89eb7")
+    values.push("7c324409e22a936535cd803c620e080aa13002909620f0f6e5cc22967197ab17")
+    values.push("567dc1c65ec04fca5fb6bafa4044f48dcc0994a400bb21b66d65046169e655e0")
+    values.push("422679356522fe3125048c90cb8a3fc3c36033d365781caedd2e02644de1ce1e")
+    values.push("d4178ca337b1eb5d6452aa98f38c05bc2ff2087be13747a2c2c7843227fb5d8a")
+    values.push("411fd2ba51a6738c34430aefe0a7f1284b98a4b3a58287fd4f2c85888eae8218")
+    values.push("992bee7053b140dde6f4d526be23e356e0b111c91c13309b39777accc6b6c62b")
+    values.push("8f71c30fea2c80bfa6401d4a58828783b9d8419a18853a2604c6a8eef0c7b4b6")
+    values.push("59840d9141ddf32e05affa2ca71b097f99d0e898dbcdba9c845194c907753fa7")
+    values.push("dc45575551a2a7c04fa2b6da3fbaeaadb41cf31adaf3a5562a783c5cbbddd031")
+    return values
+}
+
+fun expectedSampleTokens() r: Array<Int> {
+    let values = Array<Int>()
+    values.push(28); values.push(512); values.push(25); values.push(25)
+    values.push(22); values.push(32768); values.push(74); values.push(12)
+    values.push(17); values.push(131072); values.push(262144)
+    values.push(32); values.push(60); values.push(82)
+    return values
+}
+
+fun expectedSampleRoles() r: Array<String> {
+    let values = Array<String>()
+    values.push("high-variance-activation-probe-candidate")
+    values.push("low-variance-activation-probe-candidate")
+    values.push("arabic-natural-language"); values.push("seen-code")
+    values.push("natural-language"); values.push("long-document")
+    values.push("ordered-structure"); values.push("minimal-natural-language")
+    values.push("multilingual-natural-language")
+    values.push("long-context-retrieval")
+    values.push("native-limit-long-context-retrieval")
+    values.push("thinking-disabled"); values.push("thinking-enabled")
+    values.push("tool-context")
+    return values
+}
+
+pub class QwenCalibrationLock {
+    var document: JsonParseResult
+    var lockSha256: String
+    var sampleCount: Int
+    var aggregateTokens: Int
+    var closed: Bool
+
+    fun sampleIdAt(index: Int) r: Result<String, QwenCalibrationError> {
+        if this.closed {
+            return Err<String, QwenCalibrationError>(calibrationError(
+                "qwen.calibration.closed", "lock", "calibration lock is closed"))
+        }
+        if index < 0 or index >= this.sampleCount {
+            return Err<String, QwenCalibrationError>(calibrationError(
+                "qwen.calibration.bounds", "sample", "sample index is outside the lock"))
+        }
+        let root = this.document.value.unwrap()
+        let samples = calibrationField(root, "samples").unwrap()
+        let sample = samples.getAt(index).unwrap()
+        return Ok<String, QwenCalibrationError>(
+            calibrationField(sample, "id").unwrap().getString())
+    }
+
+    fun sourceIdAt(index: Int) r: Result<String, QwenCalibrationError> {
+        if this.closed {
+            return Err<String, QwenCalibrationError>(calibrationError(
+                "qwen.calibration.closed", "lock", "calibration lock is closed"))
+        }
+        if index < 0 or index >= QWEN_CALIBRATION_SOURCE_COUNT {
+            return Err<String, QwenCalibrationError>(calibrationError(
+                "qwen.calibration.bounds", "source", "source index is outside the lock"))
+        }
+        let root = this.document.value.unwrap()
+        let sources = calibrationField(root, "sources").unwrap()
+        let source = sources.getAt(index).unwrap()
+        return Ok<String, QwenCalibrationError>(
+            calibrationField(source, "id").unwrap().getString())
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        destroyJsonParseResult(this.document, true)
+        seen_string_release_owned(this.lockSha256)
+        this.sampleCount = 0
+        this.aggregateTokens = 0
+        this.closed = true
+    }
+}
+
+fun validateModel(root: JsonValue) r: Bool {
+    let value = calibrationField(root, "model")
+    if value.isNone() { return false }
+    let fields = modelFields()
+    let exact = calibrationExactFields(value.unwrap(), fields)
+    fields.free()
+    if not exact { return false }
+    let model = value.unwrap()
+    return calibrationStringEquals(model, "model_id", "Qwen/Qwen3.8-27B") and
+        calibrationStringEquals(model, "model_revision",
+            "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0") and
+        calibrationStringEquals(model, "license", "Apache-2.0") and
+        calibrationStringEquals(model, "tensor_index_sha256",
+            "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df") and
+        calibrationStringEquals(model, "tokenizer_revision",
+            "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0") and
+        calibrationStringEquals(model, "tokenizer_oracle_sha256",
+            "0b5c8911aa07565c03e036c54bfdf731263d983c6513344377d7d1454f3bcf0a") and
+        calibrationBoolEquals(model, "trust_remote_code", false)
+}
+
+fun validateSources(root: JsonValue) r: Bool {
+    let value = calibrationField(root, "sources")
+    if value.isNone() or not value.unwrap().isArray() or
+        value.unwrap().length() != QWEN_CALIBRATION_SOURCE_COUNT {
+        return false
+    }
+    let ids = expectedSourceIds(); let kinds = expectedSourceKinds()
+    let paths = expectedSourcePaths(); let byteCounts = expectedSourceBytes()
+    let digests = expectedSourceDigests()
+    var valid = true
+    var index = 0
+    while index < QWEN_CALIBRATION_SOURCE_COUNT and valid {
+        let entryValue = value.unwrap().getAt(index)
+        let fields = sourceFields()
+        let exact = not entryValue.isNone() and
+            calibrationExactFields(entryValue.unwrap(), fields)
+        fields.free()
+        if not exact { valid = false } else {
+            let entry = entryValue.unwrap()
+            let revision = "sha256:" + digests[index]
+            valid = calibrationStringEquals(entry, "id", ids[index]) and
+                calibrationStringEquals(entry, "kind", kinds[index]) and
+                calibrationStringEquals(entry, "path", paths[index]) and
+                calibrationStringEquals(entry, "revision", revision) and
+                calibrationStringEquals(entry, "license", "Apache-2.0") and
+                calibrationStringEquals(entry, "bytes", byteCounts[index]) and
+                calibrationStringEquals(entry, "sha256", digests[index]) and
+                calibrationBoolEquals(entry, "runtime_executable", false) and
+                calibrationBoolEquals(entry, "private_data", false)
+            seen_string_release_owned(revision)
+        }
+        index = index + 1
+    }
+    ids.free(); kinds.free(); paths.free(); byteCounts.free(); digests.free()
+    return valid
+}
+
+fun validateSamples(root: JsonValue) r: Bool {
+    let value = calibrationField(root, "samples")
+    if value.isNone() or not value.unwrap().isArray() or
+        value.unwrap().length() != QWEN_CALIBRATION_SAMPLE_COUNT {
+        return false
+    }
+    let ids = expectedSampleIds(); let sources = expectedSampleSources()
+    let kinds = expectedPayloadKinds(); let digests = expectedSampleDigests()
+    let tokens = expectedSampleTokens(); let roles = expectedSampleRoles()
+    var valid = true
+    var total = 0
+    var index = 0
+    while index < QWEN_CALIBRATION_SAMPLE_COUNT and valid {
+        let entryValue = value.unwrap().getAt(index)
+        let fields = sampleFields()
+        let exact = not entryValue.isNone() and
+            calibrationExactFields(entryValue.unwrap(), fields)
+        fields.free()
+        if not exact { valid = false } else {
+            let entry = entryValue.unwrap()
+            let digestValue = calibrationField(entry, "payload_sha256")
+            valid = calibrationStringEquals(entry, "id", ids[index]) and
+                calibrationStringEquals(entry, "source_id", sources[index]) and
+                calibrationStringEquals(entry, "payload_kind", kinds[index]) and
+                not digestValue.isNone() and digestValue.unwrap().isString() and
+                calibrationDigestValid(digestValue.unwrap().getString()) and
+                calibrationStringEquals(entry, "payload_sha256", digests[index]) and
+                calibrationIntEquals(entry, "token_count", tokens[index]) and
+                calibrationStringEquals(entry, "role", roles[index])
+            total = total + tokens[index]
+        }
+        index = index + 1
+    }
+    ids.free(); sources.free(); kinds.free(); digests.free(); tokens.free()
+    roles.free()
+    return valid and total == QWEN_CALIBRATION_AGGREGATE_TOKENS
+}
+
+fun validateBoundsAndCoverage(root: JsonValue) r: Bool {
+    let boundsValue = calibrationField(root, "bounds")
+    let coverageValue = calibrationField(root, "coverage")
+    if boundsValue.isNone() or coverageValue.isNone() { return false }
+    let boundedFields = boundsFields()
+    let boundedExact = calibrationExactFields(boundsValue.unwrap(), boundedFields)
+    boundedFields.free()
+    let coveredFields = coverageFields()
+    let coveredExact = calibrationExactFields(coverageValue.unwrap(), coveredFields)
+    coveredFields.free()
+    if not boundedExact or not coveredExact { return false }
+    let bounds = boundsValue.unwrap()
+    if not calibrationIntEquals(bounds, "source_count", 4) or
+        not calibrationIntEquals(bounds, "sample_count", 14) or
+        not calibrationIntEquals(bounds, "aggregate_tokens", 426873) or
+        not calibrationIntEquals(bounds, "max_sample_tokens", 262144) or
+        not calibrationStringEquals(bounds, "max_generated_bytes", "8388608") or
+        not calibrationIntEquals(bounds, "workers", 1) {
+        return false
+    }
+    let coverage = coverageValue.unwrap()
+    let names = coverageFields()
+    var index = 0
+    var valid = true
+    while index < names.length() and valid {
+        valid = calibrationBoolEquals(coverage, names[index], true)
+        index = index + 1
+    }
+    names.free()
+    return valid
+}
+
+pub fun parseQwenCalibrationLock(text: String)
+    r: Result<QwenCalibrationLock, QwenCalibrationError> {
+    if text.length() < 2 or text.length() > 65536 {
+        return Err<QwenCalibrationLock, QwenCalibrationError>(calibrationError(
+            "qwen.calibration.bounds", "lock", "calibration lock is empty or exceeds 64 KiB"))
+    }
+    let parsed = parseStrictJson(text, StrictJsonLimits{
+        maxInputBytes: 65536, maxDepth: 12, maxValues: 1024,
+        maxStringBytes: 512,
+    })
+    if parsed.isErr() {
+        return Err<QwenCalibrationLock, QwenCalibrationError>(calibrationError(
+            "qwen.calibration.json", "lock", "calibration lock is not strict bounded JSON"))
+    }
+    let document = parsed.unwrap()
+    if document.value.isNone() or not document.value.unwrap().isObject() {
+        destroyJsonParseResult(document, true)
+        return Err<QwenCalibrationLock, QwenCalibrationError>(calibrationError(
+            "qwen.calibration.schema", "lock", "calibration lock root must be an object"))
+    }
+    let root = document.value.unwrap()
+    let fields = rootFields()
+    let exact = calibrationExactFields(root, fields)
+    fields.free()
+    if not exact {
+        destroyJsonParseResult(document, true)
+        return Err<QwenCalibrationLock, QwenCalibrationError>(calibrationError(
+            "qwen.calibration.schema", "lock", "calibration lock fields differ from the closed v1 schema"))
+    }
+    if not calibrationStringEquals(root, "schema",
+            "seen-qwen-calibration-lock-v1") or
+        not calibrationStringEquals(root, "version", "1") or
+        not calibrationStringEquals(root, "classification",
+            "calibration-input-lock") or
+        not calibrationStringEquals(root, "privacy",
+            "public-and-project-authored-no-private-user-data") or
+        not calibrationStringEquals(root, "ordering",
+            "lexicographic-sample-id") or not validateModel(root) {
+        destroyJsonParseResult(document, true)
+        return Err<QwenCalibrationLock, QwenCalibrationError>(calibrationError(
+            "qwen.calibration.compatibility", "identity", "calibration identity differs from the frozen contract"))
+    }
+    if not validateSources(root) {
+        destroyJsonParseResult(document, true)
+        return Err<QwenCalibrationLock, QwenCalibrationError>(calibrationError(
+            "qwen.calibration.provenance", "sources", "source provenance is missing, reordered, runtime-executable, private, or incompatible"))
+    }
+    if not validateSamples(root) {
+        destroyJsonParseResult(document, true)
+        return Err<QwenCalibrationLock, QwenCalibrationError>(calibrationError(
+            "qwen.calibration.corpus", "samples", "samples are missing, duplicate, reordered, corrupt, or outside bounds"))
+    }
+    if not validateBoundsAndCoverage(root) {
+        destroyJsonParseResult(document, true)
+        return Err<QwenCalibrationLock, QwenCalibrationError>(calibrationError(
+            "qwen.calibration.coverage", "coverage", "corpus bounds or required coverage differ from the frozen contract"))
+    }
+    let digest = sha256(text)
+    if digest.isErr() {
+        destroyJsonParseResult(document, true)
+        return Err<QwenCalibrationLock, QwenCalibrationError>(calibrationError(
+            "qwen.calibration.checksum", "lock", "failed to hash the validated calibration lock"))
+    }
+    return Ok<QwenCalibrationLock, QwenCalibrationError>(QwenCalibrationLock{
+        document: document, lockSha256: digest.unwrap(),
+        sampleCount: QWEN_CALIBRATION_SAMPLE_COUNT,
+        aggregateTokens: QWEN_CALIBRATION_AGGREGATE_TOKENS,
+        closed: false,
+    })
+}
