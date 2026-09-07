@@ -28,5 +28,6 @@ file. Journal cleanup is idempotent.
 
 The journal proves only compatibility and completed evidence. It never makes a
 partial SQW artifact trusted or promotable. Independent full-file readback,
-durability, and atomic artifact promotion remain QWN-032D responsibilities.
-This CPU-only contract initializes neither Python nor CUDA.
+durability, and atomic artifact promotion are defined by
+`docs/qwen-conversion-finalization-contract.md`. This CPU-only contract
+initializes neither Python nor CUDA.

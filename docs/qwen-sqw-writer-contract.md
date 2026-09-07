@@ -46,6 +46,14 @@ a failed state; the caller must explicitly call `abort()`.
 
 ## Validation and promotion
 
+QWN-032D may call `seal()` before `commit()` to durably sync and close a
+complete staging file for an independent readback pass. `sealedPath()` is
+available only while that owner remains sealed and still owns the staging
+pathname. Sealing is idempotent, accepts no more writes, and never promotes the
+artifact. `commit()` accepts either an active complete writer or a sealed
+writer; in both cases it still performs its own full `SqwReader` reopen before
+the atomic rename.
+
 `commit()` succeeds only after exactly `expectedBytes` have been written. It:
 
 1. fully syncs the staging file;
