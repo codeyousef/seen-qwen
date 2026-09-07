@@ -1,0 +1,73 @@
+{
+  "schema": "seen-qwen-sensitivity-oracle-v1",
+  "version": 1,
+  "ordering": "lexicographic-record-id",
+  "model_id": "Qwen/Qwen3.8-27B",
+  "model_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "calibration_lock_sha256": "b72f162aa04c62c6796c5c0822bbb823a569b0324477a19077dc42a7d0c5b98e",
+  "element_limit": 4,
+  "activation_records": [
+    {
+      "id": "activation_high_variance",
+      "values": [-4.0, -1.0, 0.0, 3.0],
+      "expected": {
+        "count": 4,
+        "minimum": -4.0,
+        "maximum": 3.0,
+        "maximum_absolute": 4.0,
+        "mean": -0.5,
+        "mean_absolute": 2.0,
+        "root_mean_square": 2.5495097567963922
+      }
+    },
+    {
+      "id": "activation_low_variance",
+      "values": [0.5, 0.5, 0.5, 0.5],
+      "expected": {
+        "count": 4,
+        "minimum": 0.5,
+        "maximum": 0.5,
+        "maximum_absolute": 0.5,
+        "mean": 0.5,
+        "mean_absolute": 0.5,
+        "root_mean_square": 0.5
+      }
+    }
+  ],
+  "comparison_records": [
+    {
+      "id": "layer_00_output",
+      "kind": "layer-output",
+      "reference": [1.0, -2.0, 3.0, 0.0],
+      "candidate": [1.0, -1.5, 2.5, 0.0],
+      "expected": {
+        "count": 4,
+        "maximum_absolute_error": 0.5,
+        "mean_absolute_error": 0.25,
+        "root_mean_square_error": 0.3535533905932738,
+        "relative_l2_error": 0.1889822365046136,
+        "relative_l2_defined": true,
+        "cosine_similarity": 0.9971764649527379,
+        "cosine_defined": true,
+        "exact": false
+      }
+    },
+    {
+      "id": "tensor_zero_reference",
+      "kind": "tensor-quantization",
+      "reference": [0.0, 0.0],
+      "candidate": [0.0, 0.0],
+      "expected": {
+        "count": 2,
+        "maximum_absolute_error": 0.0,
+        "mean_absolute_error": 0.0,
+        "root_mean_square_error": 0.0,
+        "relative_l2_error": 0.0,
+        "relative_l2_defined": false,
+        "cosine_similarity": 0.0,
+        "cosine_defined": false,
+        "exact": true
+      }
+    }
+  ]
+}
