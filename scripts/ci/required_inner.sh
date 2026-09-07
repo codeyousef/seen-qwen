@@ -112,7 +112,8 @@ python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.
     tests/test_sqw_reader.py tests/test_sqw_writer.py \
     tests/test_q8_reference_codec.py tests/test_q4_reference_codec.py \
     tests/test_conversion_plan.py tests/test_shard_stream.py \
-    tests/test_conversion_evidence.py tests/test_calibration_lock.py
+    tests/test_conversion_evidence.py tests/test_conversion_finalizer.py \
+    tests/test_calibration_lock.py
 "$SEEN_PACKAGE_CLIENT" audit --lock Seen.lock
 "$SEEN_COMPILER" check tests/qwn_023b_hybrid_mini_assets_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_023a_hybrid_mini_contract_test.seen --frozen
@@ -131,6 +132,7 @@ python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.
 "$SEEN_COMPILER" check tests/qwn_032a_conversion_plan_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_032b_shard_stream_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_032c_conversion_evidence_test.seen --frozen
+"$SEEN_COMPILER" check tests/qwn_032d_conversion_finalizer_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_033a_calibration_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022d_sampling_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022b_tokenizer_test.seen --frozen
@@ -225,6 +227,11 @@ python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.
     --release --lto=thin --target-cpu=x86-64 --no-cache \
     --jobs 1 --opt-jobs 1 --no-fork --frozen
 "$OUTPUT_ROOT/qwn_032c_conversion_evidence_test"
+"$SEEN_COMPILER" compile tests/qwn_032d_conversion_finalizer_test.seen \
+    "$OUTPUT_ROOT/qwn_032d_conversion_finalizer_test" \
+    --release --lto=thin --target-cpu=x86-64 --no-cache \
+    --jobs 1 --opt-jobs 1 --no-fork --frozen
+"$OUTPUT_ROOT/qwn_032d_conversion_finalizer_test"
 "$SEEN_COMPILER" compile tests/qwn_033a_calibration_test.seen \
     "$OUTPUT_ROOT/qwn_033a_calibration_test" \
     --release --lto=thin --target-cpu=x86-64 --no-cache \

@@ -19,7 +19,7 @@ let HASH_C: String =
 let BAD_HASH: String =
     "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
 let COMPATIBILITY_SHA256: String =
-    "06a48bafe0714b704047b900cd7f554bdf8a332c6fd6407ded907ebad8f54777"
+    "f39aebda1fdafc20d04b6c6a0072a491afea3f8f9ab836fd173ead0d1fe1ea33"
 
 fun require(condition: Bool, message: String) r: Void {
     if not condition { abort(message) }

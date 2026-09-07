@@ -21,6 +21,7 @@ let SQW_WRITER_FAILED: Int = 2
 let SQW_WRITER_DURABILITY_PENDING: Int = 3
 let SQW_WRITER_PROMOTED: Int = 4
 let SQW_WRITER_CLOSED: Int = 5
+let SQW_WRITER_SEALED: Int = 6
 let SQW_WRITER_MAX_CHUNK_BYTES: Int = 1048576
 
 fun sqwWriterError(code: String, field: String, message: String) r: SqwError {
@@ -137,6 +138,48 @@ pub class SqwWriter {
             this.state == SQW_WRITER_PROMOTED
     }
 
+    fun seal() r: Result<Bool, SqwError> {
+        if this.state == SQW_WRITER_SEALED {
+            return Ok<Bool, SqwError>(false)
+        }
+        if this.state != SQW_WRITER_ACTIVE or not this.fileOpen {
+            return Err<Bool, SqwError>(sqwWriterError("sqw.writer_state",
+                "seal", "SQW writer cannot seal from its current state"))
+        }
+        if not sqwWriterContextOkay(this.context) {
+            this.state = SQW_WRITER_FAILED
+            return Err<Bool, SqwError>(sqwWriterError("sqw.cancelled",
+                "seal", "SQW sealing was cancelled before durability"))
+        }
+        if this.writtenBytes != this.expectedBytes {
+            return Err<Bool, SqwError>(sqwWriterError("sqw.incomplete",
+                "staging", "staged SQW extent does not match the declared extent"))
+        }
+        let synced = this.file.sync(this.context, false)
+        if synced.isErr() {
+            this.state = SQW_WRITER_FAILED
+            return Err<Bool, SqwError>(sqwWriterError("sqw.sync", "staging",
+                "failed to durably sync the staged SQW artifact"))
+        }
+        let closed = this.file.close()
+        if closed.isErr() {
+            this.state = SQW_WRITER_FAILED
+            return Err<Bool, SqwError>(sqwWriterError("sqw.close", "staging",
+                "failed to close the staged SQW artifact"))
+        }
+        this.fileOpen = false
+        this.state = SQW_WRITER_SEALED
+        return Ok<Bool, SqwError>(true)
+    }
+
+    fun sealedPath() r: Result<String, SqwError> {
+        if this.state != SQW_WRITER_SEALED or not this.stagingExists {
+            return Err<String, SqwError>(sqwWriterError("sqw.writer_state",
+                "staging", "sealed SQW staging path is unavailable"))
+        }
+        return Ok<String, SqwError>(this.staging.asString())
+    }
+
     fun write(bytes: Array<Int>) r: Result<Bool, SqwError> {
         if this.state != SQW_WRITER_ACTIVE or not this.fileOpen {
             return Err<Bool, SqwError>(sqwWriterError("sqw.writer_state",
@@ -202,32 +245,20 @@ pub class SqwWriter {
             this.state = SQW_WRITER_PROMOTED
             return Ok<Bool, SqwError>(true)
         }
-        if this.state != SQW_WRITER_ACTIVE or not this.fileOpen {
+        if this.state != SQW_WRITER_ACTIVE and
+            this.state != SQW_WRITER_SEALED {
             return Err<Bool, SqwError>(sqwWriterError("sqw.writer_state",
                 "commit", "SQW writer cannot commit from its current state"))
+        }
+        if this.state == SQW_WRITER_ACTIVE {
+            let sealed = this.seal()
+            if sealed.isErr() { return sealed }
         }
         if not sqwWriterContextOkay(this.context) {
             this.state = SQW_WRITER_FAILED
             return Err<Bool, SqwError>(sqwWriterError("sqw.cancelled",
                 "commit", "SQW commit was cancelled before promotion"))
         }
-        if this.writtenBytes != this.expectedBytes {
-            return Err<Bool, SqwError>(sqwWriterError("sqw.incomplete",
-                "staging", "staged SQW extent does not match the declared extent"))
-        }
-        let synced = this.file.sync(this.context, false)
-        if synced.isErr() {
-            this.state = SQW_WRITER_FAILED
-            return Err<Bool, SqwError>(sqwWriterError("sqw.sync", "staging",
-                "failed to durably sync the staged SQW artifact"))
-        }
-        let closed = this.file.close()
-        if closed.isErr() {
-            this.state = SQW_WRITER_FAILED
-            return Err<Bool, SqwError>(sqwWriterError("sqw.close", "staging",
-                "failed to close the staged SQW artifact"))
-        }
-        this.fileOpen = false
 
         let validated = SqwReader.open(this.staging.asString(), this.readerPolicy)
         if validated.isErr() {

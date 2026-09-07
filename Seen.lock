@@ -1,5 +1,5 @@
 version = 2
-manifest_sha256 = "b55c5adb0f7c1a083a4798fbbe61f1719dc8e1102bf2cb377590355e3e93d56a"
+manifest_sha256 = "9f912f8367beeff0113baf4b417d66bc9544db88b94640bfa8365c5dd70fb2a9"
 
 # Audited Seen release toolchain identity (paths are intentionally excluded).
 # release_tag = "v0.19.4"
