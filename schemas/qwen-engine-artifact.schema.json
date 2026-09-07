@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://seenlang.dev/schemas/qwen-engine-artifact-v1.json",
+  "title": "Seen Qwen Offline Engine Artifact v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "maturity", "engine_id",
+    "model_lock_sha256", "source_lock_sha256", "format", "model",
+    "quantization", "tokenizer", "intended_backend", "memory",
+    "compatible_profiles", "created_by", "checksums_file"
+  ],
+  "properties": {
+    "schema": {"const": "seen-qwen-engine-artifact-v1"},
+    "version": {"const": 1},
+    "maturity": {"const": "offline-validated"},
+    "engine_id": {"$ref": "#/$defs/sha256"},
+    "model_lock_sha256": {"$ref": "#/$defs/sha256"},
+    "source_lock_sha256": {"$ref": "#/$defs/sha256"},
+    "format": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sqw_version", "weights_file", "weights_sha256", "sqw_whole_sha256", "tensor_count", "weights_bytes"],
+      "properties": {
+        "sqw_version": {"const": "1.0"},
+        "weights_file": {"const": "weights.sqw"},
+        "weights_sha256": {"$ref": "#/$defs/sha256"},
+        "sqw_whole_sha256": {"$ref": "#/$defs/sha256"},
+        "tensor_count": {"const": 866},
+        "weights_bytes": {"$ref": "#/$defs/u64"}
+      }
+    },
+    "model": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "revision", "contract", "layers", "vocab_size", "native_context", "text_tensors", "mtp_tensors", "vision_tensors"],
+      "properties": {
+        "id": {"const": "Qwen/Qwen3.8-27B"},
+        "revision": {"const": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"},
+        "contract": {"const": "seen-qwen38-text-v1"},
+        "layers": {"const": 64},
+        "vocab_size": {"const": 248320},
+        "native_context": {"const": 262144},
+        "text_tensors": {"const": 851},
+        "mtp_tensors": {"const": 15},
+        "vision_tensors": {"const": 0}
+      }
+    },
+    "quantization": {
+      "type": "object", "additionalProperties": false,
+      "required": ["policy_id", "policy_sha256", "source_dtype", "runtime_codec", "tensor_count", "lossy", "quality_approved", "fallback"],
+      "properties": {
+        "policy_id": {"const": "bf16-bringup-v1"},
+        "policy_sha256": {"$ref": "#/$defs/sha256"},
+        "source_dtype": {"const": "BF16"},
+        "runtime_codec": {"const": "BF16"},
+        "tensor_count": {"const": 866},
+        "lossy": {"const": false},
+        "quality_approved": {"const": false},
+        "fallback": {"const": "prohibited"}
+      }
+    },
+    "tokenizer": {
+      "type": "array", "minItems": 7, "maxItems": 7,
+      "items": {"$ref": "#/$defs/asset"}
+    },
+    "intended_backend": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "target", "bound"],
+      "properties": {
+        "kind": {"const": "cuda"},
+        "target": {"const": "sm_89"},
+        "bound": {"const": false}
+      }
+    },
+    "memory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["weight_bytes", "persistent_state_bytes", "max_profile_bytes", "status"],
+      "properties": {
+        "weight_bytes": {"$ref": "#/$defs/u64"},
+        "persistent_state_bytes": {"const": "0"},
+        "max_profile_bytes": {"const": "0"},
+        "status": {"const": "not-runtime-sized"}
+      }
+    },
+    "compatible_profiles": {"type": "array", "maxItems": 0},
+    "created_by": {
+      "type": "object", "additionalProperties": false,
+      "required": ["seen_version", "seen_commit", "compiler_sha256", "compatibility_sha256", "cpu_baseline"],
+      "properties": {
+        "seen_version": {"const": "0.19.4"},
+        "seen_commit": {"const": "a05932e231e33c7512be3432e9d88a938466f820"},
+        "compiler_sha256": {"const": "44a90884a9ff188718ed839aed4c8d692c8c520216c6a7b072ca6d0d35aa7fbc"},
+        "compatibility_sha256": {"const": "f39aebda1fdafc20d04b6c6a0072a491afea3f8f9ab836fd173ead0d1fe1ea33"},
+        "cpu_baseline": {"const": "x86-64"}
+      }
+    },
+    "checksums_file": {"const": "checksums.sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "u64": {"type": "string", "pattern": "^(0|[1-9][0-9]{0,18})$"},
+    "asset": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": {"enum": ["README.md", "chat_template.jinja", "config.json", "generation_config.json", "merges.txt", "tokenizer_config.json", "vocab.json"]},
+        "bytes": {"$ref": "#/$defs/u64"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

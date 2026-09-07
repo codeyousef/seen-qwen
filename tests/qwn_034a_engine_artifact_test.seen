@@ -1,0 +1,56 @@
+import io.file.{readText}
+import seen_qwen.artifact.engine_artifact.{parseQwenEngineArtifact}
+import str.string.{replaceFirst}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun main() r: Int {
+    let text = readText("tests/fixtures/qwn_034a_engine_artifact.json")
+    let parsed = parseQwenEngineArtifact(text)
+    require(parsed.isOkay(), "accept the complete closed offline artifact manifest")
+    let artifact = parsed.unwrap()
+    require(artifact.engineId().unwrap() ==
+        "71fcf096f84a2a9940fe0d31497ddf6970bf15db5640c990348472903f1cd870",
+        "recompute the content-addressed engine identity")
+    require(artifact.weightBytes().unwrap() == "54641399999",
+        "retain the exact decimal weight extent")
+
+    let wrongId = replaceFirst(text,
+        "71fcf096f84a2a9940fe0d31497ddf6970bf15db5640c990348472903f1cd870",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    require(parseQwenEngineArtifact(wrongId).unwrapErr().code ==
+        "qwen.artifact.identity", "reject an engine identity mismatch")
+    let wrongPolicy = replaceFirst(text, "bf16-bringup-v1", "q4-hidden-policy")
+    require(parseQwenEngineArtifact(wrongPolicy).unwrapErr().code ==
+        "qwen.artifact.compatibility", "reject an undeclared quantization policy")
+    let wrongAsset = replaceFirst(text, "tokenizer_config.json", "tokenizer-config.json")
+    require(parseQwenEngineArtifact(wrongAsset).unwrapErr().code ==
+        "qwen.artifact.compatibility", "reject a changed locked asset path")
+    let extra = replaceFirst(text, "{\"checksums_file\":",
+        "{\"unknown\":true,\"checksums_file\":")
+    require(parseQwenEngineArtifact(extra).unwrapErr().code ==
+        "qwen.artifact.schema", "reject unknown root fields")
+    let duplicate = replaceFirst(text, "{\"checksums_file\":",
+        "{\"checksums_file\":\"checksums.sha256\",\"checksums_file\":")
+    require(parseQwenEngineArtifact(duplicate).unwrapErr().code ==
+        "qwen.artifact.json", "reject duplicate JSON keys")
+    var oversized = ""
+    var repeat = 0
+    while repeat < 421 {
+        oversized = oversized + text
+        repeat = repeat + 1
+    }
+    require(parseQwenEngineArtifact(oversized).unwrapErr().code ==
+        "qwen.artifact.limit", "bound the manifest at one MiB")
+
+    artifact.close(); artifact.close()
+    require(artifact.engineId().unwrapErr().code == "qwen.artifact.closed" and
+        artifact.weightBytes().unwrapErr().exitCode == 11,
+        "close deterministically and reject borrowed-value access afterward")
+    println("PASS: QWN-034A closed offline engine artifact manifest")
+    return 0
+}
+
+main()

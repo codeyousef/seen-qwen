@@ -1,0 +1,426 @@
+///
+/// Strict offline engine-artifact manifest for the first complete Qwen3.8-27B
+/// text and MTP SQW. The parsed JSON document owns every returned string.
+/// Runtime CUDA/profile certification is intentionally absent at this stage.
+///
+
+import core.result.{Result}
+import crypto.sha256.{sha256}
+import json.parser.{JsonParseResult, destroyJsonParseResult}
+import json.strict.{StrictJsonLimits, parseStrictJson}
+import json.value.{JsonValue}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+pub class QwenEngineArtifactError {
+    var code: String
+    var field: String
+    var message: String
+    var exitCode: Int
+    var retryable: Bool
+}
+
+fun artifactError(code: String, field: String, message: String)
+    r: QwenEngineArtifactError {
+    let exitCode = if code == "qwen.artifact.closed" { 11 } else { 2 }
+    return QwenEngineArtifactError{ code: code, field: field,
+        message: message, exitCode: exitCode, retryable: false }
+}
+
+fun artifactField(object: JsonValue, field: String) r: JsonValue? {
+    if not object.isObject() { return null }
+    var index = 0
+    while index < object.length() {
+        let key = object.keyAt(index)
+        let value = object.valueAt(index)
+        if key.isNone() or value.isNone() { return null }
+        if key.unwrap() == field { return value.unwrap() }
+        index = index + 1
+    }
+    return null
+}
+
+fun artifactExactFields(object: JsonValue, fields: Array<String>) r: Bool {
+    if not object.isObject() or object.length() != fields.length() {
+        return false
+    }
+    var index = 0
+    while index < object.length() {
+        let key = object.keyAt(index)
+        let value = object.valueAt(index)
+        if key.isNone() or value.isNone() { return false }
+        var found = false
+        var fieldIndex = 0
+        while fieldIndex < fields.length() {
+            if key.unwrap() == fields[fieldIndex] { found = true }
+            fieldIndex = fieldIndex + 1
+        }
+        if not found { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun rootFields() r: Array<String> {
+    let values = Array<String>()
+    values.push("schema"); values.push("version"); values.push("maturity")
+    values.push("engine_id"); values.push("model_lock_sha256")
+    values.push("source_lock_sha256"); values.push("format")
+    values.push("model"); values.push("quantization")
+    values.push("tokenizer"); values.push("intended_backend")
+    values.push("memory"); values.push("compatible_profiles")
+    values.push("created_by"); values.push("checksums_file")
+    return values
+}
+
+fun formatFields() r: Array<String> {
+    let values = Array<String>()
+    values.push("sqw_version"); values.push("weights_file")
+    values.push("weights_sha256"); values.push("sqw_whole_sha256")
+    values.push("tensor_count"); values.push("weights_bytes")
+    return values
+}
+
+fun modelFields() r: Array<String> {
+    let values = Array<String>()
+    values.push("id"); values.push("revision"); values.push("contract")
+    values.push("layers"); values.push("vocab_size")
+    values.push("native_context"); values.push("text_tensors")
+    values.push("mtp_tensors"); values.push("vision_tensors")
+    return values
+}
+
+fun quantFields() r: Array<String> {
+    let values = Array<String>()
+    values.push("policy_id"); values.push("policy_sha256")
+    values.push("source_dtype"); values.push("runtime_codec")
+    values.push("tensor_count"); values.push("lossy")
+    values.push("quality_approved"); values.push("fallback")
+    return values
+}
+
+fun assetFields() r: Array<String> {
+    let values = Array<String>()
+    values.push("path"); values.push("bytes"); values.push("sha256")
+    return values
+}
+
+fun backendFields() r: Array<String> {
+    let values = Array<String>()
+    values.push("kind"); values.push("target"); values.push("bound")
+    return values
+}
+
+fun memoryFields() r: Array<String> {
+    let values = Array<String>()
+    values.push("weight_bytes"); values.push("persistent_state_bytes")
+    values.push("max_profile_bytes"); values.push("status")
+    return values
+}
+
+fun createdByFields() r: Array<String> {
+    let values = Array<String>()
+    values.push("seen_version"); values.push("seen_commit")
+    values.push("compiler_sha256"); values.push("compatibility_sha256")
+    values.push("cpu_baseline")
+    return values
+}
+
+fun stringEquals(object: JsonValue, field: String, expected: String) r: Bool {
+    let value = artifactField(object, field)
+    return not value.isNone() and value.unwrap().isString() and
+        value.unwrap().getString() == expected
+}
+
+fun intEquals(object: JsonValue, field: String, expected: Int) r: Bool {
+    let value = artifactField(object, field)
+    return not value.isNone() and value.unwrap().isNumber() and
+        value.unwrap().getNumber() == expected.toFloat() and
+        value.unwrap().getInt() == expected
+}
+
+fun boolEquals(object: JsonValue, field: String, expected: Bool) r: Bool {
+    let value = artifactField(object, field)
+    return not value.isNone() and value.unwrap().isBool() and
+        value.unwrap().getBool() == expected
+}
+
+fun digestValid(value: String) r: Bool {
+    if value.length() != 64 { return false }
+    var index = 0
+    while index < value.length() {
+        let byte = value.byteAt(index)
+        if not (byte >= 48 and byte <= 57) and
+            not (byte >= 97 and byte <= 102) { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun decimalValid(value: String, allowZero: Bool) r: Bool {
+    if value.length() < 1 or value.length() > 19 { return false }
+    if value.length() > 1 and value.byteAt(0) == 48 { return false }
+    if not allowZero and value == "0" { return false }
+    var index = 0
+    while index < value.length() {
+        let byte = value.byteAt(index)
+        if byte < 48 or byte > 57 { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun digestFieldValid(object: JsonValue, field: String) r: Bool {
+    let value = artifactField(object, field)
+    return not value.isNone() and value.unwrap().isString() and
+        digestValid(value.unwrap().getString())
+}
+
+fun decimalFieldValid(object: JsonValue, field: String, allowZero: Bool)
+    r: Bool {
+    let value = artifactField(object, field)
+    return not value.isNone() and value.unwrap().isString() and
+        decimalValid(value.unwrap().getString(), allowZero)
+}
+
+fun validateFormat(root: JsonValue) r: Bool {
+    let maybe = artifactField(root, "format")
+    if maybe.isNone() { return false }
+    let object = maybe.unwrap(); let fields = formatFields()
+    let exact = artifactExactFields(object, fields); fields.free()
+    return exact and stringEquals(object, "sqw_version", "1.0") and
+        stringEquals(object, "weights_file", "weights.sqw") and
+        digestFieldValid(object, "weights_sha256") and
+        digestFieldValid(object, "sqw_whole_sha256") and
+        intEquals(object, "tensor_count", 866) and
+        decimalFieldValid(object, "weights_bytes", false)
+}
+
+fun validateModel(root: JsonValue) r: Bool {
+    let maybe = artifactField(root, "model")
+    if maybe.isNone() { return false }
+    let object = maybe.unwrap(); let fields = modelFields()
+    let exact = artifactExactFields(object, fields); fields.free()
+    return exact and stringEquals(object, "id", "Qwen/Qwen3.8-27B") and
+        stringEquals(object, "revision",
+            "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0") and
+        stringEquals(object, "contract", "seen-qwen38-text-v1") and
+        intEquals(object, "layers", 64) and
+        intEquals(object, "vocab_size", 248320) and
+        intEquals(object, "native_context", 262144) and
+        intEquals(object, "text_tensors", 851) and
+        intEquals(object, "mtp_tensors", 15) and
+        intEquals(object, "vision_tensors", 0)
+}
+
+fun validateQuantization(root: JsonValue) r: Bool {
+    let maybe = artifactField(root, "quantization")
+    if maybe.isNone() { return false }
+    let object = maybe.unwrap(); let fields = quantFields()
+    let exact = artifactExactFields(object, fields); fields.free()
+    return exact and stringEquals(object, "policy_id", "bf16-bringup-v1") and
+        digestFieldValid(object, "policy_sha256") and
+        stringEquals(object, "source_dtype", "BF16") and
+        stringEquals(object, "runtime_codec", "BF16") and
+        intEquals(object, "tensor_count", 866) and
+        boolEquals(object, "lossy", false) and
+        boolEquals(object, "quality_approved", false) and
+        stringEquals(object, "fallback", "prohibited")
+}
+
+fun expectedAssetPaths() r: Array<String> {
+    let values = Array<String>()
+    values.push("README.md"); values.push("chat_template.jinja")
+    values.push("config.json"); values.push("generation_config.json")
+    values.push("merges.txt"); values.push("tokenizer_config.json")
+    values.push("vocab.json")
+    return values
+}
+
+fun expectedAssetBytes() r: Array<String> {
+    let values = Array<String>()
+    values.push("65012"); values.push("8952"); values.push("4312")
+    values.push("202"); values.push("3353259"); values.push("17928")
+    values.push("6722759")
+    return values
+}
+
+fun expectedAssetDigests() r: Array<String> {
+    let values = Array<String>()
+    values.push("57e4bdb258ee1a7d2635c5174ebd4e56abe392505cdb5f8bbb356b0dc4293641")
+    values.push("c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041")
+    values.push("191e0af232104ed8b65258cf3fb2b842e288008baca7633c11b82a1ac7203aab")
+    values.push("e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e")
+    values.push("a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d")
+    values.push("b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27")
+    values.push("ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003")
+    return values
+}
+
+fun validateTokenizer(root: JsonValue) r: Bool {
+    let maybe = artifactField(root, "tokenizer")
+    if maybe.isNone() or not maybe.unwrap().isArray() or
+        maybe.unwrap().length() != 7 { return false }
+    let paths = expectedAssetPaths(); let sizes = expectedAssetBytes()
+    let digests = expectedAssetDigests()
+    var valid = true; var index = 0
+    while index < 7 and valid {
+        let entry = maybe.unwrap().getAt(index)
+        if entry.isNone() { valid = false; break }
+        let fields = assetFields()
+        let exact = artifactExactFields(entry.unwrap(), fields)
+        fields.free()
+        valid = exact and stringEquals(entry.unwrap(), "path", paths[index]) and
+            stringEquals(entry.unwrap(), "bytes", sizes[index]) and
+            stringEquals(entry.unwrap(), "sha256", digests[index])
+        index = index + 1
+    }
+    paths.free(); sizes.free(); digests.free()
+    return valid
+}
+
+fun validateBackendMemoryAndCreator(root: JsonValue) r: Bool {
+    let backendMaybe = artifactField(root, "intended_backend")
+    let memoryMaybe = artifactField(root, "memory")
+    let creatorMaybe = artifactField(root, "created_by")
+    let profilesMaybe = artifactField(root, "compatible_profiles")
+    if backendMaybe.isNone() or memoryMaybe.isNone() or
+        creatorMaybe.isNone() or profilesMaybe.isNone() or
+        not profilesMaybe.unwrap().isArray() or
+        profilesMaybe.unwrap().length() != 0 { return false }
+    let backend = backendMaybe.unwrap(); let backendNames = backendFields()
+    let backendExact = artifactExactFields(backend, backendNames)
+    backendNames.free()
+    let memory = memoryMaybe.unwrap(); let memoryNames = memoryFields()
+    let memoryExact = artifactExactFields(memory, memoryNames)
+    memoryNames.free()
+    let creator = creatorMaybe.unwrap(); let creatorNames = createdByFields()
+    let creatorExact = artifactExactFields(creator, creatorNames)
+    creatorNames.free()
+    return backendExact and stringEquals(backend, "kind", "cuda") and
+        stringEquals(backend, "target", "sm_89") and
+        boolEquals(backend, "bound", false) and memoryExact and
+        decimalFieldValid(memory, "weight_bytes", false) and
+        stringEquals(memory, "persistent_state_bytes", "0") and
+        stringEquals(memory, "max_profile_bytes", "0") and
+        stringEquals(memory, "status", "not-runtime-sized") and
+        creatorExact and stringEquals(creator, "seen_version", "0.19.4") and
+        stringEquals(creator, "seen_commit",
+            "a05932e231e33c7512be3432e9d88a938466f820") and
+        stringEquals(creator, "compiler_sha256",
+            "44a90884a9ff188718ed839aed4c8d692c8c520216c6a7b072ca6d0d35aa7fbc") and
+        stringEquals(creator, "compatibility_sha256",
+            "f39aebda1fdafc20d04b6c6a0072a491afea3f8f9ab836fd173ead0d1fe1ea33") and
+        stringEquals(creator, "cpu_baseline", "x86-64")
+}
+
+fun computeEngineId(root: JsonValue) r: Result<String, QwenEngineArtifactError> {
+    let format = artifactField(root, "format").unwrap()
+    let quant = artifactField(root, "quantization").unwrap()
+    let material = "seen-qwen-engine-artifact-v1\n" +
+        "model_lock_sha256=" + artifactField(root, "model_lock_sha256").unwrap().getString() + "\n" +
+        "source_lock_sha256=" + artifactField(root, "source_lock_sha256").unwrap().getString() + "\n" +
+        "weights_sha256=" + artifactField(format, "weights_sha256").unwrap().getString() + "\n" +
+        "policy_sha256=" + artifactField(quant, "policy_sha256").unwrap().getString() + "\n" +
+        "compiler_sha256=44a90884a9ff188718ed839aed4c8d692c8c520216c6a7b072ca6d0d35aa7fbc\n"
+    let hashed = sha256(material)
+    seen_string_release_owned(material)
+    if hashed.isErr() {
+        return Err<String, QwenEngineArtifactError>(artifactError(
+            "qwen.artifact.checksum", "engine_id", "failed to hash engine identity"))
+    }
+    return Ok<String, QwenEngineArtifactError>(hashed.unwrap())
+}
+
+pub class QwenEngineArtifact {
+    var document: JsonParseResult
+    var manifestSha256: String
+    var closed: Bool
+
+    fun engineId() r: Result<String, QwenEngineArtifactError> {
+        if this.closed {
+            return Err<String, QwenEngineArtifactError>(artifactError(
+                "qwen.artifact.closed", "artifact", "engine artifact is closed"))
+        }
+        return Ok<String, QwenEngineArtifactError>(artifactField(
+            this.document.value.unwrap(), "engine_id").unwrap().getString())
+    }
+
+    fun weightBytes() r: Result<String, QwenEngineArtifactError> {
+        if this.closed {
+            return Err<String, QwenEngineArtifactError>(artifactError(
+                "qwen.artifact.closed", "artifact", "engine artifact is closed"))
+        }
+        let format = artifactField(this.document.value.unwrap(), "format").unwrap()
+        return Ok<String, QwenEngineArtifactError>(
+            artifactField(format, "weights_bytes").unwrap().getString())
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        destroyJsonParseResult(this.document, true)
+        seen_string_release_owned(this.manifestSha256)
+        this.closed = true
+    }
+}
+
+pub fun parseQwenEngineArtifact(text: String)
+    r: Result<QwenEngineArtifact, QwenEngineArtifactError> {
+    if text.length() < 2 or text.length() > 1048576 {
+        return Err<QwenEngineArtifact, QwenEngineArtifactError>(artifactError(
+            "qwen.artifact.limit", "manifest", "manifest is empty or exceeds 1 MiB"))
+    }
+    let parsed = parseStrictJson(text, StrictJsonLimits{
+        maxInputBytes: 1048576, maxDepth: 12, maxValues: 512,
+        maxStringBytes: 4096,
+    })
+    if parsed.isErr() {
+        return Err<QwenEngineArtifact, QwenEngineArtifactError>(artifactError(
+            "qwen.artifact.json", "manifest", "manifest is not strict bounded JSON"))
+    }
+    let document = parsed.unwrap()
+    if document.value.isNone() or not document.value.unwrap().isObject() {
+        destroyJsonParseResult(document, true)
+        return Err<QwenEngineArtifact, QwenEngineArtifactError>(artifactError(
+            "qwen.artifact.schema", "manifest", "manifest root must be an object"))
+    }
+    let root = document.value.unwrap(); let fields = rootFields()
+    let exact = artifactExactFields(root, fields); fields.free()
+    if not exact or not stringEquals(root, "schema",
+            "seen-qwen-engine-artifact-v1") or
+        not intEquals(root, "version", 1) or
+        not stringEquals(root, "maturity", "offline-validated") or
+        not digestFieldValid(root, "engine_id") or
+        not digestFieldValid(root, "model_lock_sha256") or
+        not digestFieldValid(root, "source_lock_sha256") or
+        not stringEquals(root, "checksums_file", "checksums.sha256") {
+        destroyJsonParseResult(document, true)
+        return Err<QwenEngineArtifact, QwenEngineArtifactError>(artifactError(
+            "qwen.artifact.schema", "manifest", "root identity differs from the closed v1 contract"))
+    }
+    if not validateFormat(root) or not validateModel(root) or
+        not validateQuantization(root) or not validateTokenizer(root) or
+        not validateBackendMemoryAndCreator(root) {
+        destroyJsonParseResult(document, true)
+        return Err<QwenEngineArtifact, QwenEngineArtifactError>(artifactError(
+            "qwen.artifact.compatibility", "manifest", "artifact components or maturity are incompatible"))
+    }
+    let expected = computeEngineId(root)
+    if expected.isErr() or expected.unwrap() !=
+        artifactField(root, "engine_id").unwrap().getString() {
+        if expected.isOkay() { seen_string_release_owned(expected.unwrap()) }
+        destroyJsonParseResult(document, true)
+        return Err<QwenEngineArtifact, QwenEngineArtifactError>(artifactError(
+            "qwen.artifact.identity", "engine_id", "engine identity does not match content identities"))
+    }
+    seen_string_release_owned(expected.unwrap())
+    let digest = sha256(text)
+    if digest.isErr() {
+        destroyJsonParseResult(document, true)
+        return Err<QwenEngineArtifact, QwenEngineArtifactError>(artifactError(
+            "qwen.artifact.checksum", "manifest", "failed to hash validated manifest"))
+    }
+    return Ok<QwenEngineArtifact, QwenEngineArtifactError>(QwenEngineArtifact{
+        document: document, manifestSha256: digest.unwrap(), closed: false,
+    })
+}
