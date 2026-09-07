@@ -1,0 +1,100 @@
+import io.file.{readText}
+import seen_qwen.quant.calibration.{parseQwenCalibrationLock}
+import str.string.{replaceFirst}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+let LOCK_SHA256: String =
+    "b72f162aa04c62c6796c5c0822bbb823a569b0324477a19077dc42a7d0c5b98e"
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun expectError(text: String, code: String, message: String) r: Void {
+    let result = parseQwenCalibrationLock(text)
+    require(result.isErr() and result.unwrapErr().code == code, message)
+}
+
+fun main() r: Int {
+    let text = readText("configs/calibration.lock.json")
+    let parsed = parseQwenCalibrationLock(text)
+    require(parsed.isOkay(), "parse the exact bounded calibration lock")
+    let lock = parsed.unwrap()
+    require(lock.lockSha256 == LOCK_SHA256 and lock.sampleCount == 14 and
+        lock.aggregateTokens == 426873,
+        "match calibration lock identity and bounded token geometry")
+
+    let first = lock.sampleIdAt(0)
+    let middle = lock.sampleIdAt(7)
+    let last = lock.sampleIdAt(13)
+    require(first.isOkay() and first.unwrap() == "activation_high_variance" and
+        middle.isOkay() and middle.unwrap() == "minimal" and
+        last.isOkay() and last.unwrap() == "tool_chat",
+        "retain the strict JSON owner while borrowed sample IDs are used")
+    require(lock.sourceIdAt(0).unwrap() == "qwn-022b-tokenizer-oracles" and
+        lock.sourceIdAt(3).unwrap() == "qwn-033a-supplement",
+        "retain ordered source provenance")
+    require(lock.sampleIdAt(-1).unwrapErr().code == "qwen.calibration.bounds" and
+        lock.sampleIdAt(14).unwrapErr().code == "qwen.calibration.bounds" and
+        lock.sourceIdAt(4).unwrapErr().code == "qwen.calibration.bounds",
+        "reject source and sample indices outside exact bounds")
+    lock.close(); lock.close()
+    require(lock.sampleIdAt(0).unwrapErr().code == "qwen.calibration.closed",
+        "close deterministically and reject borrowed access after cleanup")
+
+    let duplicate = replaceFirst(text,
+        "\"schema\": \"seen-qwen-calibration-lock-v1\",",
+        "\"schema\": \"seen-qwen-calibration-lock-v1\", \"schema\": \"evil\",")
+    expectError(duplicate, "qwen.calibration.json",
+        "reject duplicate JSON keys")
+    let extra = replaceFirst(text,
+        "\"version\": \"1\",",
+        "\"version\": \"1\", \"unknown\": true,")
+    expectError(extra, "qwen.calibration.schema",
+        "reject unknown root fields")
+    let incompatible = replaceFirst(text,
+        "Qwen/Qwen3.8-27B", "Qwen/Qwen3.8-27B-remote")
+    expectError(incompatible, "qwen.calibration.compatibility",
+        "reject an incompatible model identity")
+    let executable = replaceFirst(text,
+        "\"runtime_executable\": false", "\"runtime_executable\": true")
+    expectError(executable, "qwen.calibration.provenance",
+        "reject executable calibration input")
+    let privateData = replaceFirst(text,
+        "\"private_data\": false", "\"private_data\": true")
+    expectError(privateData, "qwen.calibration.provenance",
+        "reject unapproved private data")
+    let reordered = replaceFirst(text,
+        "\"id\": \"activation_high_variance\"",
+        "\"id\": \"activation_low_variance\"")
+    expectError(reordered, "qwen.calibration.corpus",
+        "reject duplicate or reordered samples")
+    let oversized = replaceFirst(text,
+        "\"token_count\": 262144", "\"token_count\": 262145")
+    expectError(oversized, "qwen.calibration.corpus",
+        "reject a sample beyond the native context bound")
+    let missingCoverage = replaceFirst(text,
+        "\"long_context_retrieval\": true",
+        "\"long_context_retrieval\": false")
+    expectError(missingCoverage, "qwen.calibration.coverage",
+        "reject missing required calibration coverage")
+    let truncated = text.substring(0, text.length() - 2)
+    expectError(truncated, "qwen.calibration.json",
+        "reject a truncated calibration lock")
+
+    seen_string_release_owned(duplicate)
+    seen_string_release_owned(extra)
+    seen_string_release_owned(incompatible)
+    seen_string_release_owned(executable)
+    seen_string_release_owned(privateData)
+    seen_string_release_owned(reordered)
+    seen_string_release_owned(oversized)
+    seen_string_release_owned(missingCoverage)
+    seen_string_release_owned(truncated)
+    seen_string_release_owned(text)
+    println("PASS: QWN-033A frozen calibration corpus and provenance lock")
+    return 0
+}
+
+main()
