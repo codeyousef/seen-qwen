@@ -27,6 +27,7 @@ modules = [
     "src/quant/sensitivity.seen",
     "src/quant/reference_codec.seen",
     "src/tokenizer/tokenizer.seen",
+    "src/artifact/engine_artifact.seen",
 ]
 
 [build]

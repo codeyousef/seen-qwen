@@ -1,0 +1,13 @@
+schema = "seen-qwen-quantization-policy-v1"
+
+[policy.bf16-bringup-v1]
+maturity = "offline-correctness"
+tensor_scope = "required-text-and-mtp"
+source_dtype = "BF16"
+runtime_codec = "BF16"
+ordering = "canonical-utf8-tensor-name"
+lossy = false
+quality_approved = false
+runtime_profile = false
+fallback = "prohibited"
+

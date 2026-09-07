@@ -82,6 +82,14 @@ class CiContractTests(unittest.TestCase):
         for identity in identities:
             self.assertIn(identity, self.prepare + self.inner + self.lock)
 
+    def test_first_engine_artifact_gate_is_required(self) -> None:
+        for required in (
+            "tests/test_engine_artifact.py",
+            "tests/qwn_034a_engine_artifact_test.seen --frozen",
+            '"$OUTPUT_ROOT/qwn_034a_engine_artifact_test"',
+        ):
+            self.assertIn(required, self.inner)
+
     def test_seen_release_provenance_is_exact_and_current(self) -> None:
         compiler_sha256 = (
             "44a90884a9ff188718ed839aed4c8d692c8c520216c6a7b072ca6d0d35aa7fbc"

@@ -114,7 +114,7 @@ python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.
     tests/test_conversion_plan.py tests/test_shard_stream.py \
     tests/test_conversion_evidence.py tests/test_conversion_finalizer.py \
     tests/test_calibration_lock.py tests/test_sensitivity_statistics.py \
-    tests/test_quantization_policy_resolver.py
+    tests/test_quantization_policy_resolver.py tests/test_engine_artifact.py
 "$SEEN_PACKAGE_CLIENT" audit --lock Seen.lock
 "$SEEN_COMPILER" check tests/qwn_023b_hybrid_mini_assets_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_023a_hybrid_mini_contract_test.seen --frozen
@@ -137,6 +137,7 @@ python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.
 "$SEEN_COMPILER" check tests/qwn_033a_calibration_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_033b_sensitivity_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_033c_policy_test.seen --frozen
+"$SEEN_COMPILER" check tests/qwn_034a_engine_artifact_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022d_sampling_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022b_tokenizer_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022c_chat_template_test.seen --frozen
@@ -250,6 +251,11 @@ python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.
     --release --lto=thin --target-cpu=x86-64 --no-cache \
     --jobs 1 --opt-jobs 1 --no-fork --frozen
 "$OUTPUT_ROOT/qwn_033c_policy_test"
+"$SEEN_COMPILER" compile tests/qwn_034a_engine_artifact_test.seen \
+    "$OUTPUT_ROOT/qwn_034a_engine_artifact_test" \
+    --release --lto=thin --target-cpu=x86-64 --no-cache \
+    --jobs 1 --opt-jobs 1 --no-fork --frozen
+"$OUTPUT_ROOT/qwn_034a_engine_artifact_test"
 "$SEEN_COMPILER" compile tests/qwn_022c_chat_template_test.seen \
     "$OUTPUT_ROOT/qwn_022c_chat_template_test" \
     --release --lto=thin --target-cpu=x86-64 --no-cache \
