@@ -463,6 +463,8 @@ pub class SqwTensorView {
 class SqwTensorRecord {
     var name: String
     var entry: SqwDirectoryEntry
+    var sourceSha256: String
+    var convertedSha256: String
 }
 
 @move
@@ -481,6 +483,8 @@ fun sqwDestroyRecords(records: Array<SqwTensorRecord>) r: Void {
     var index = 0
     while index < records.length() {
         seen_string_release_owned(records[index].name)
+        seen_string_release_owned(records[index].sourceSha256)
+        seen_string_release_owned(records[index].convertedSha256)
         records[index].entry.close()
         index = index + 1
     }
@@ -954,11 +958,11 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
             return Err<Array<SqwTensorRecord>, SqwError>(error)
         }
         seen_string_release_owned(bundleDigest.unwrap())
-        seen_string_release_owned(sourceSha256)
-        seen_string_release_owned(convertedSha256)
         payloadCursor = sqwEntryEnd(entry)
         records.push(SqwTensorRecord{
-            name: seen_string_clone_owned(name), entry: entry
+            name: seen_string_clone_owned(name), entry: entry,
+            sourceSha256: sourceSha256,
+            convertedSha256: convertedSha256,
         })
         tensorIndex = tensorIndex + 1
     }
@@ -1355,6 +1359,80 @@ pub class SqwReader {
                 "index", "tensor index is outside the validated directory"))
         }
         return Ok<String, SqwError>(this.records[index].name)
+    }
+
+    fun sourceSha256At(index: Int) r: Result<String, SqwError> {
+        if this.closed or this.closing {
+            return Err<String, SqwError>(sqwReaderError("sqw.closed",
+                "reader", "SQW reader is closed or cleanup is pending"))
+        }
+        if index < 0 or index >= this.records.length() {
+            return Err<String, SqwError>(sqwReaderError("sqw.bounds",
+                "index", "tensor index is outside the validated directory"))
+        }
+        return Ok<String, SqwError>(this.records[index].sourceSha256)
+    }
+
+    fun convertedSha256At(index: Int) r: Result<String, SqwError> {
+        if this.closed or this.closing {
+            return Err<String, SqwError>(sqwReaderError("sqw.closed",
+                "reader", "SQW reader is closed or cleanup is pending"))
+        }
+        if index < 0 or index >= this.records.length() {
+            return Err<String, SqwError>(sqwReaderError("sqw.bounds",
+                "index", "tensor index is outside the validated directory"))
+        }
+        return Ok<String, SqwError>(this.records[index].convertedSha256)
+    }
+
+    fun convertedBytesAt(index: Int) r: Result<UInt64, SqwError> {
+        if this.closed or this.closing {
+            return Err<UInt64, SqwError>(sqwReaderError("sqw.closed",
+                "reader", "SQW reader is closed or cleanup is pending"))
+        }
+        if index < 0 or index >= this.records.length() {
+            return Err<UInt64, SqwError>(sqwReaderError("sqw.bounds",
+                "index", "tensor index is outside the validated directory"))
+        }
+        let entry = this.records[index].entry
+        var total = sqwCheckedAdd(entry.dataLength, entry.scaleLength)
+        if total.isErr() { return total }
+        total = sqwCheckedAdd(total.unwrap(), entry.zeroLength)
+        if total.isErr() { return total }
+        return sqwCheckedAdd(total.unwrap(), entry.metadataLength)
+    }
+
+    fun evidenceText(maxBytes: Int) r: Result<String, SqwError> {
+        if this.closed or this.closing {
+            return Err<String, SqwError>(sqwReaderError("sqw.closed",
+                "reader", "SQW reader is closed or cleanup is pending"))
+        }
+        if maxBytes < 1 or maxBytes > 67108864 or
+            this.header.evidenceLength == (0 as UInt64) or
+            this.header.evidenceLength > (maxBytes as UInt64) {
+            return Err<String, SqwError>(sqwReaderError(
+                "sqw.evidence_range", "evidence",
+                "required evidence is absent or exceeds the caller bound"))
+        }
+        let mapped = this.file.window(this.header.evidenceOffset,
+            this.header.evidenceLength)
+        if mapped.isErr() {
+            return Err<String, SqwError>(sqwReaderError("sqw.map",
+                "evidence", "failed to map validated SQW evidence"))
+        }
+        let window = mapped.unwrap()
+        let view = seen_string_view_bytes(window.data,
+            this.header.evidenceLength as Int64)
+        let utf8 = validateJsonUtf8(view)
+        if utf8.isErr() {
+            sqwCloseTemporaryWindow(window)
+            return Err<String, SqwError>(sqwReaderError(
+                "sqw.evidence_json", "evidence",
+                "SQW evidence is not valid bounded UTF-8 JSON"))
+        }
+        let owned = seen_string_clone_owned(view)
+        sqwCloseTemporaryWindow(window)
+        return Ok<String, SqwError>(owned)
     }
 
     fun findIndex(name: String) r: Int {

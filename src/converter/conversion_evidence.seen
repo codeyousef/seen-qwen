@@ -578,6 +578,68 @@ pub class QwenResumeJournal {
         this.convertedBytes = 0 as UInt64
         this.closed = true
     }
+
+    fun entryNameAt(index: Int)
+        r: Result<String, QwenConversionEvidenceError> {
+        return qwenJournalEntryString(this, index, "name")
+    }
+
+    fun entrySourceSha256At(index: Int)
+        r: Result<String, QwenConversionEvidenceError> {
+        return qwenJournalEntryString(this, index, "source_sha256")
+    }
+
+    fun entryConvertedSha256At(index: Int)
+        r: Result<String, QwenConversionEvidenceError> {
+        return qwenJournalEntryString(this, index, "converted_sha256")
+    }
+
+    fun entryConvertedBytesAt(index: Int)
+        r: Result<UInt64, QwenConversionEvidenceError> {
+        let entry = qwenJournalOwnedEntry(this, index)
+        if entry.isErr() {
+            return Err<UInt64, QwenConversionEvidenceError>(entry.unwrapErr())
+        }
+        return qwenJournalU64(entry.unwrap(), "converted_bytes")
+    }
+}
+
+fun qwenJournalOwnedEntry(borrow journal: QwenResumeJournal, index: Int)
+    r: Result<JsonValue, QwenConversionEvidenceError> {
+    if journal.closed or index < 0 or index >= journal.completedCount or
+        journal.document.value.isNone() {
+        return Err<JsonValue, QwenConversionEvidenceError>(qwenConvertError(
+            "qwen.convert.closed", "journal",
+            "resume journal entry is unavailable"))
+    }
+    let entries = qwenJournalField(journal.document.value.unwrap(), "entries")
+    if entries.isNone() or not entries.unwrap().isArray() {
+        return Err<JsonValue, QwenConversionEvidenceError>(qwenConvertError(
+            "qwen.convert.invalid-state", "entries",
+            "validated journal entries became unavailable"))
+    }
+    let entry = entries.unwrap().getAt(index)
+    if entry.isNone() {
+        return Err<JsonValue, QwenConversionEvidenceError>(qwenConvertError(
+            "qwen.convert.invalid-state", "entry",
+            "validated journal entry became unavailable"))
+    }
+    return Ok<JsonValue, QwenConversionEvidenceError>(entry.unwrap())
+}
+
+fun qwenJournalEntryString(borrow journal: QwenResumeJournal, index: Int,
+    field: String) r: Result<String, QwenConversionEvidenceError> {
+    let entry = qwenJournalOwnedEntry(journal, index)
+    if entry.isErr() {
+        return Err<String, QwenConversionEvidenceError>(entry.unwrapErr())
+    }
+    let value = qwenJournalField(entry.unwrap(), field)
+    if value.isNone() or not value.unwrap().isString() {
+        return Err<String, QwenConversionEvidenceError>(qwenConvertError(
+            "qwen.convert.invalid-state", field,
+            "validated journal string became unavailable"))
+    }
+    return Ok<String, QwenConversionEvidenceError>(value.unwrap().getString())
 }
 
 fun qwenJournalRootFields() r: Array<String> {

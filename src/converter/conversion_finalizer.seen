@@ -1,0 +1,175 @@
+///
+/// Independent Qwen conversion readback and atomic SQW promotion.
+///
+/// A complete QWN-032C journal is checked against every validated SQW tensor
+/// after the staging file is durably sealed. Only then may the existing SQW
+/// writer perform its own full reopen and atomic same-directory promotion.
+///
+
+import core.result.{Result}
+import seen_qwen.formats.sqw.{SqwError}
+import seen_qwen.formats.sqw_reader.{SqwReader}
+import seen_qwen.formats.sqw_writer.{SqwWriter}
+import seen_qwen.converter.conversion_evidence.{QwenConversionIdentity,
+    QwenResumeJournal, validateQwenResumeJournal}
+import seen_qwen.converter.conversion_plan.{QwenConversionPlan}
+import seen_qwen.model.tensor_catalog.{QwenTensorCatalog}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+pub class QwenConversionFinalizationError {
+    var code: String
+    var field: String
+    var message: String
+    var cause: String
+    var exitCode: Int
+    var retryable: Bool
+}
+
+fun qwenFinalizeError(code: String, field: String, message: String,
+    cause: String = "") r: QwenConversionFinalizationError {
+    let retryable = cause == "sqw.durability"
+    let exitCode = if retryable { 3 } else if
+        code == "qwen.finalize.invalid-state" { 11 } else { 2 }
+    return QwenConversionFinalizationError{
+        code: code, field: field, message: message, cause: cause,
+        exitCode: exitCode, retryable: retryable,
+    }
+}
+
+fun qwenFinalizeSqwError(error: SqwError, phase: String)
+    r: QwenConversionFinalizationError {
+    return qwenFinalizeError("qwen.finalize." + phase, error.field,
+        "SQW " + phase + " failed closed", error.code)
+}
+
+fun qwenFinalizeCloseReader(borrow reader: SqwReader) r: Void {
+    let closed = reader.close()
+    if closed.isErr() {
+        abort("qwen.finalize.cleanup: independent SQW reader close failed")
+    }
+}
+
+fun qwenFinalizePolicyMatches(borrow writer: SqwWriter,
+    identity: QwenConversionIdentity, plan: QwenConversionPlan) r: Bool {
+    return writer.expectedBytes > (0 as UInt64) and
+        writer.expectedBytes <= plan.maxArtifactBytes and
+        writer.length() == writer.expectedBytes and
+        writer.maxChunkBytes > 0 and
+        (writer.maxChunkBytes as UInt64) <= plan.writerChunkBytes and
+        writer.readerPolicy.expectedModelLockSha256 ==
+            identity.modelLockSha256 and
+        writer.readerPolicy.expectedSourceLockSha256 ==
+            identity.sourceLockSha256 and
+        writer.readerPolicy.expectedConversionPolicySha256 ==
+            identity.conversionPolicySha256 and
+        writer.readerPolicy.expectedCatalogSha256 == identity.catalogSha256 and
+        writer.readerPolicy.expectedTensorCount ==
+            (plan.includedTensorCount as UInt32)
+}
+
+fun qwenFinalizeJournalMatches(borrow journal: QwenResumeJournal,
+    borrow reader: SqwReader) r: Bool {
+    if reader.length() != journal.completedCount { return false }
+    var index = 0
+    while index < journal.completedCount {
+        let journalName = journal.entryNameAt(index)
+        let journalSource = journal.entrySourceSha256At(index)
+        let journalConverted = journal.entryConvertedSha256At(index)
+        let journalBytes = journal.entryConvertedBytesAt(index)
+        let readerName = reader.nameAt(index)
+        let readerSource = reader.sourceSha256At(index)
+        let readerConverted = reader.convertedSha256At(index)
+        let readerBytes = reader.convertedBytesAt(index)
+        if journalName.isErr() or journalSource.isErr() or
+            journalConverted.isErr() or journalBytes.isErr() or
+            readerName.isErr() or readerSource.isErr() or
+            readerConverted.isErr() or readerBytes.isErr() or
+            journalName.unwrap() != readerName.unwrap() or
+            journalSource.unwrap() != readerSource.unwrap() or
+            journalConverted.unwrap() != readerConverted.unwrap() or
+            journalBytes.unwrap() != readerBytes.unwrap() {
+            return false
+        }
+        index = index + 1
+    }
+    return true
+}
+
+pub fun finalizeQwenConversion(borrow writer: SqwWriter,
+    journalText: String, identity: QwenConversionIdentity,
+    plan: QwenConversionPlan, catalog: QwenTensorCatalog)
+    r: Result<Bool, QwenConversionFinalizationError> {
+    let validated = validateQwenResumeJournal(journalText, identity,
+        plan, catalog)
+    if validated.isErr() {
+        return Err<Bool, QwenConversionFinalizationError>(qwenFinalizeError(
+            "qwen.finalize.journal", validated.unwrapErr().field,
+            "conversion journal failed strict compatibility validation",
+            validated.unwrapErr().code))
+    }
+    let journal = validated.unwrap()
+    if journal.completedCount != (plan.includedTensorCount as Int) {
+        journal.close()
+        return Err<Bool, QwenConversionFinalizationError>(qwenFinalizeError(
+            "qwen.finalize.incomplete", "completed_count",
+            "all canonical Qwen tensors require evidence before promotion"))
+    }
+    if not qwenFinalizePolicyMatches(writer, identity, plan) {
+        journal.close()
+        return Err<Bool, QwenConversionFinalizationError>(qwenFinalizeError(
+            "qwen.finalize.compatibility", "writer",
+            "SQW writer policy differs from the admitted conversion"))
+    }
+    if writer.isPromoted() {
+        journal.close()
+        let retried = writer.commit()
+        if retried.isErr() {
+            return Err<Bool, QwenConversionFinalizationError>(
+                qwenFinalizeSqwError(retried.unwrapErr(), "promote"))
+        }
+        return Ok<Bool, QwenConversionFinalizationError>(retried.unwrap())
+    }
+    let sealed = writer.seal()
+    if sealed.isErr() {
+        journal.close()
+        return Err<Bool, QwenConversionFinalizationError>(
+            qwenFinalizeSqwError(sealed.unwrapErr(), "seal"))
+    }
+    let staging = writer.sealedPath()
+    if staging.isErr() {
+        journal.close()
+        return Err<Bool, QwenConversionFinalizationError>(
+            qwenFinalizeSqwError(staging.unwrapErr(), "readback"))
+    }
+    let opened = SqwReader.open(staging.unwrap(), writer.readerPolicy)
+    if opened.isErr() {
+        journal.close()
+        return Err<Bool, QwenConversionFinalizationError>(
+            qwenFinalizeSqwError(opened.unwrapErr(), "readback"))
+    }
+    let reader = opened.unwrap()
+    let embedded = reader.evidenceText(plan.evidenceBufferBytes as Int)
+    if embedded.isErr() {
+        qwenFinalizeCloseReader(reader); journal.close()
+        return Err<Bool, QwenConversionFinalizationError>(
+            qwenFinalizeSqwError(embedded.unwrapErr(), "evidence"))
+    }
+    let textMatches = embedded.unwrap() == journalText
+    seen_string_release_owned(embedded.unwrap())
+    let tensorsMatch = textMatches and
+        qwenFinalizeJournalMatches(journal, reader)
+    qwenFinalizeCloseReader(reader)
+    journal.close()
+    if not tensorsMatch {
+        return Err<Bool, QwenConversionFinalizationError>(qwenFinalizeError(
+            "qwen.finalize.evidence", "entries",
+            "embedded journal and independently validated SQW tensors differ"))
+    }
+    let promoted = writer.commit()
+    if promoted.isErr() {
+        return Err<Bool, QwenConversionFinalizationError>(
+            qwenFinalizeSqwError(promoted.unwrapErr(), "promote"))
+    }
+    return Ok<Bool, QwenConversionFinalizationError>(promoted.unwrap())
+}

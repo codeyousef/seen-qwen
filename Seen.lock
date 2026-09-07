@@ -1,20 +1,20 @@
 version = 2
-manifest_sha256 = "034b509d4f7288e8c89eda3cd7b3abfba06456119eb50a8607af2c2f7d0adcc9"
+manifest_sha256 = "3d9fd69494d121cee73013f9f1270b3f9644c0e6f2572cba6b86cbc1407d8711"
 
 # Audited Seen release toolchain identity (paths are intentionally excluded).
-# release_tag = "v0.19.3"
-# certified_commit = "64dbdc3b86f587e89317f7a62d9278111434eb62"
-# tag_object = "3579c7dfbaf2f7fc6fd2eaddfa2fb549f2648adc"
-# release_manifest_sha256 = "57d795fc96f10716bec75712fc3ebeaf4b2bb7ea5f6d34dec02a156384190eb1"
-# release_source_digest = "9f33249d6e7b97c48fdf81806dbe642455de1ebe88c476489ff9930b6c776053"
-# linux_x64_archive_sha256 = "3c717c50b9b9ccedc720d758cd5f48a3ac903b407f87bddd30816aaf994f8b92"
-# packaged_compiler_sha256 = "95d35317179f08ee4106ad47e9a02ce9cd8f680aac6d01efc4f292026731ad0f"
-# compiler_build_id = "721884f58e422ad712c763f3e75fe8fb7b215ee2"
-# packaged_package_client_sha256 = "884197e1bc68e59ac986ebb3a4a82b9f3484b8d392d87fda429c458d03ada40f"
-# compatibility_manifest_sha256 = "06a48bafe0714b704047b900cd7f554bdf8a332c6fd6407ded907ebad8f54777"
+# release_tag = "v0.19.4"
+# certified_commit = "a05932e231e33c7512be3432e9d88a938466f820"
+# tag_object = "a265aaee9ed46ef2e0f9db7fdbc0fa43a980c3cf"
+# release_manifest_sha256 = "c31a54d63545e8b182ac0bc510f585c0ba4196bf0f70c4d44b8a14d2a3b61efb"
+# release_source_digest = "a8bfebe0197d6d7030dde4ab4c0877c208368680a0ca1d1b6d7c46d566e6272f"
+# linux_x64_archive_sha256 = "76e14fa600ca41159e2a4e515ecf8ad052a8afdb9dbd7ef1d5197d593a6a2d2e"
+# packaged_compiler_sha256 = "44a90884a9ff188718ed839aed4c8d692c8c520216c6a7b072ca6d0d35aa7fbc"
+# compiler_build_id = "0f1fbb149388f122725a5c06c810d402bd1e6e7d"
+# packaged_package_client_sha256 = "2ac68f4c4588534a8c4f3666c25caef02f0853b6ad2b8b203b269decdac25052"
+# compatibility_manifest_sha256 = "f39aebda1fdafc20d04b6c6a0072a491afea3f8f9ab836fd173ead0d1fe1ea33"
 # ci_llvm_image = "docker.io/silkeh/clang@sha256:a370fe4e8ecd284143bbfde1185bef4c1b6b72f45af4823812b9afe84cd1a14d"
 # ci_llvm_version = "21.1.8"
-# compatibility = "seen-compatibility-manifest-v1; compiler=0.19.3; layout=seen-layout-abi-v2; object-cache=seen-object-cache-abi-v3; package-interface=seen-package-interface-v2; package-object-manifest=seen-package-object-manifest-v2; prebuilt-package=seen-prebuilt-package-v2; package-client=0.19.3/SEENPKG1; runtime=runtime-v3; stdlib=0.5.0/manifest-v1; llvm-min=19; target=linux-x86_64; cpu=x86-64; determinism=installed-archive+signed-evidence"
+# compatibility = "seen-compatibility-manifest-v1; compiler=0.19.4; layout=seen-layout-abi-v2; object-cache=seen-object-cache-abi-v3; package-interface=seen-package-interface-v2; package-object-manifest=seen-package-object-manifest-v2; prebuilt-package=seen-prebuilt-package-v2; package-client=0.19.4/SEENPKG1; runtime=runtime-v3; stdlib=0.5.0/manifest-v1; llvm-min=19; target=linux-x86_64; cpu=x86-64; determinism=installed-archive+signed-evidence"
 
 [root]
 name = "seen_qwen"
