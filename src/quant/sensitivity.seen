@@ -1,0 +1,252 @@
+///
+/// Deterministic bounded calibration sensitivity and error statistics.
+///
+/// Inputs remain caller-owned. Statistics are accumulated in array order with
+/// no parallel reduction or implicit precision change. Non-finite inputs and
+/// non-finite intermediate products/sums fail closed. Undefined relative-L2
+/// and cosine values are represented only with their explicit `defined` flag
+/// false; consumers must not interpret the numeric zero as a measured value.
+///
+/// Contract test: FEL-1426 / QWN-033B
+///
+
+import core.result.{Result}
+import math.math.{abs, isfinite, sqrt}
+
+pub class QwenStatisticsError {
+    var code: String
+    var operation: String
+    var message: String
+    var exitCode: Int
+    var retryable: Bool
+}
+
+pub class QwenActivationStatistics {
+    var count: Int
+    var minimum: Float
+    var maximum: Float
+    var maximumAbsolute: Float
+    var mean: Float
+    var meanAbsolute: Float
+    var rootMeanSquare: Float
+    var closed: Bool
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.count = 0
+        this.minimum = 0.0
+        this.maximum = 0.0
+        this.maximumAbsolute = 0.0
+        this.mean = 0.0
+        this.meanAbsolute = 0.0
+        this.rootMeanSquare = 0.0
+        this.closed = true
+    }
+}
+
+pub class QwenErrorStatistics {
+    var count: Int
+    var maximumAbsoluteError: Float
+    var meanAbsoluteError: Float
+    var rootMeanSquareError: Float
+    var relativeL2Error: Float
+    var relativeL2Defined: Bool
+    var cosineSimilarity: Float
+    var cosineDefined: Bool
+    var exact: Bool
+    var closed: Bool
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.count = 0
+        this.maximumAbsoluteError = 0.0
+        this.meanAbsoluteError = 0.0
+        this.rootMeanSquareError = 0.0
+        this.relativeL2Error = 0.0
+        this.relativeL2Defined = false
+        this.cosineSimilarity = 0.0
+        this.cosineDefined = false
+        this.exact = false
+        this.closed = true
+    }
+}
+
+fun statisticsError(code: String, operation: String, message: String)
+    r: QwenStatisticsError {
+    return QwenStatisticsError{
+        code: code, operation: operation, message: message,
+        exitCode: 2, retryable: false,
+    }
+}
+
+fun validateVectorLength(length: Int, elementLimit: Int, operation: String)
+    r: QwenStatisticsError? {
+    if elementLimit <= 0 {
+        return statisticsError("qwen.statistics.input", operation,
+            "element limit must be positive")
+    }
+    if length <= 0 {
+        return statisticsError("qwen.statistics.empty", operation,
+            "statistics require at least one element")
+    }
+    if length > elementLimit {
+        return statisticsError("qwen.statistics.limit", operation,
+            "input exceeds the explicit element limit")
+    }
+    return null
+}
+
+pub fun measureActivationStatistics(values: Array<Float>, elementLimit: Int)
+    r: Result<QwenActivationStatistics, QwenStatisticsError> {
+    let lengthError = validateVectorLength(values.length(), elementLimit,
+        "activation")
+    if not lengthError.isNone() {
+        return Err<QwenActivationStatistics, QwenStatisticsError>(
+            lengthError.unwrap())
+    }
+
+    var minimum = values[0]
+    var maximum = values[0]
+    var maximumAbsolute = abs(values[0])
+    var sum = 0.0
+    var sumAbsolute = 0.0
+    var sumSquares = 0.0
+    var index = 0
+    while index < values.length() {
+        let value = values[index]
+        if not isfinite(value) {
+            return Err<QwenActivationStatistics, QwenStatisticsError>(
+                statisticsError("qwen.statistics.nonfinite", "activation",
+                    "activation input contains a non-finite value"))
+        }
+        let absolute = abs(value)
+        let squared = value * value
+        if not isfinite(absolute) or not isfinite(squared) {
+            return Err<QwenActivationStatistics, QwenStatisticsError>(
+                statisticsError("qwen.statistics.range", "activation",
+                    "activation reduction exceeds finite range"))
+        }
+        if value < minimum { minimum = value }
+        if value > maximum { maximum = value }
+        if absolute > maximumAbsolute { maximumAbsolute = absolute }
+        sum = sum + value
+        sumAbsolute = sumAbsolute + absolute
+        sumSquares = sumSquares + squared
+        if not isfinite(sum) or not isfinite(sumAbsolute) or
+            not isfinite(sumSquares) {
+            return Err<QwenActivationStatistics, QwenStatisticsError>(
+                statisticsError("qwen.statistics.range", "activation",
+                    "activation accumulation exceeds finite range"))
+        }
+        index = index + 1
+    }
+    let count = values.length()
+    let mean = sum / (count as Float)
+    let meanAbsolute = sumAbsolute / (count as Float)
+    let rootMeanSquare = sqrt(sumSquares / (count as Float))
+    if not isfinite(mean) or not isfinite(meanAbsolute) or
+        not isfinite(rootMeanSquare) {
+        return Err<QwenActivationStatistics, QwenStatisticsError>(
+            statisticsError("qwen.statistics.range", "activation",
+                "activation summary exceeds finite range"))
+    }
+    return Ok<QwenActivationStatistics, QwenStatisticsError>(
+        QwenActivationStatistics{
+            count: count, minimum: minimum, maximum: maximum,
+            maximumAbsolute: maximumAbsolute, mean: mean,
+            meanAbsolute: meanAbsolute, rootMeanSquare: rootMeanSquare,
+            closed: false,
+        })
+}
+
+pub fun measureErrorStatistics(reference: Array<Float>, candidate: Array<Float>,
+    elementLimit: Int) r: Result<QwenErrorStatistics, QwenStatisticsError> {
+    let lengthError = validateVectorLength(reference.length(), elementLimit,
+        "comparison")
+    if not lengthError.isNone() {
+        return Err<QwenErrorStatistics, QwenStatisticsError>(
+            lengthError.unwrap())
+    }
+    if candidate.length() != reference.length() {
+        return Err<QwenErrorStatistics, QwenStatisticsError>(statisticsError(
+            "qwen.statistics.geometry", "comparison",
+            "reference and candidate lengths must match exactly"))
+    }
+
+    var maximumAbsoluteError = 0.0
+    var sumAbsoluteError = 0.0
+    var sumSquaredError = 0.0
+    var referenceSquares = 0.0
+    var candidateSquares = 0.0
+    var dot = 0.0
+    var index = 0
+    while index < reference.length() {
+        let expected = reference[index]
+        let actual = candidate[index]
+        if not isfinite(expected) or not isfinite(actual) {
+            return Err<QwenErrorStatistics, QwenStatisticsError>(
+                statisticsError("qwen.statistics.nonfinite", "comparison",
+                    "comparison input contains a non-finite value"))
+        }
+        let error = actual - expected
+        let absoluteError = abs(error)
+        let squaredError = error * error
+        let expectedSquared = expected * expected
+        let actualSquared = actual * actual
+        let product = expected * actual
+        if not isfinite(error) or not isfinite(absoluteError) or
+            not isfinite(squaredError) or not isfinite(expectedSquared) or
+            not isfinite(actualSquared) or not isfinite(product) {
+            return Err<QwenErrorStatistics, QwenStatisticsError>(
+                statisticsError("qwen.statistics.range", "comparison",
+                    "comparison product exceeds finite range"))
+        }
+        if absoluteError > maximumAbsoluteError {
+            maximumAbsoluteError = absoluteError
+        }
+        sumAbsoluteError = sumAbsoluteError + absoluteError
+        sumSquaredError = sumSquaredError + squaredError
+        referenceSquares = referenceSquares + expectedSquared
+        candidateSquares = candidateSquares + actualSquared
+        dot = dot + product
+        if not isfinite(sumAbsoluteError) or not isfinite(sumSquaredError) or
+            not isfinite(referenceSquares) or not isfinite(candidateSquares) or
+            not isfinite(dot) {
+            return Err<QwenErrorStatistics, QwenStatisticsError>(
+                statisticsError("qwen.statistics.range", "comparison",
+                    "comparison accumulation exceeds finite range"))
+        }
+        index = index + 1
+    }
+
+    let count = reference.length()
+    let meanAbsoluteError = sumAbsoluteError / (count as Float)
+    let rootMeanSquareError = sqrt(sumSquaredError / (count as Float))
+    let relativeDefined = referenceSquares > 0.0
+    var relativeL2Error = 0.0
+    if relativeDefined {
+        relativeL2Error = sqrt(sumSquaredError / referenceSquares)
+    }
+    let cosineDefined = referenceSquares > 0.0 and candidateSquares > 0.0
+    var cosineSimilarity = 0.0
+    if cosineDefined {
+        cosineSimilarity = dot / sqrt(referenceSquares * candidateSquares)
+    }
+    if not isfinite(meanAbsoluteError) or not isfinite(rootMeanSquareError) or
+        not isfinite(relativeL2Error) or not isfinite(cosineSimilarity) {
+        return Err<QwenErrorStatistics, QwenStatisticsError>(statisticsError(
+            "qwen.statistics.range", "comparison",
+            "comparison summary exceeds finite range"))
+    }
+    return Ok<QwenErrorStatistics, QwenStatisticsError>(QwenErrorStatistics{
+        count: count, maximumAbsoluteError: maximumAbsoluteError,
+        meanAbsoluteError: meanAbsoluteError,
+        rootMeanSquareError: rootMeanSquareError,
+        relativeL2Error: relativeL2Error,
+        relativeL2Defined: relativeDefined,
+        cosineSimilarity: cosineSimilarity,
+        cosineDefined: cosineDefined,
+        exact: maximumAbsoluteError == 0.0,
+        closed: false,
+    })
+}

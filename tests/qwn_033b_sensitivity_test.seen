@@ -1,0 +1,128 @@
+import math.math.{abs}
+import seen_qwen.quant.sensitivity.{QwenActivationStatistics,
+    QwenErrorStatistics, measureActivationStatistics, measureErrorStatistics}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun near(actual: Float, expected: Float, tolerance: Float) r: Bool {
+    return abs(actual - expected) <= tolerance
+}
+
+fun sameActivation(left: QwenActivationStatistics,
+    right: QwenActivationStatistics) r: Bool {
+    return left.count == right.count and left.minimum == right.minimum and
+        left.maximum == right.maximum and
+        left.maximumAbsolute == right.maximumAbsolute and
+        left.mean == right.mean and left.meanAbsolute == right.meanAbsolute and
+        left.rootMeanSquare == right.rootMeanSquare
+}
+
+fun sameError(left: QwenErrorStatistics, right: QwenErrorStatistics) r: Bool {
+    return left.count == right.count and
+        left.maximumAbsoluteError == right.maximumAbsoluteError and
+        left.meanAbsoluteError == right.meanAbsoluteError and
+        left.rootMeanSquareError == right.rootMeanSquareError and
+        left.relativeL2Error == right.relativeL2Error and
+        left.relativeL2Defined == right.relativeL2Defined and
+        left.cosineSimilarity == right.cosineSimilarity and
+        left.cosineDefined == right.cosineDefined and left.exact == right.exact
+}
+
+fun main() r: Int {
+    let activation = Array<Float>()
+    activation.push(-4.0); activation.push(-1.0)
+    activation.push(0.0); activation.push(3.0)
+    let firstActivation = measureActivationStatistics(activation, 4)
+    let secondActivation = measureActivationStatistics(activation, 4)
+    require(firstActivation.isOkay() and secondActivation.isOkay(),
+        "measure bounded finite activation statistics")
+    let measured = firstActivation.unwrap()
+    require(measured.count == 4 and measured.minimum == -4.0 and
+        measured.maximum == 3.0 and measured.maximumAbsolute == 4.0 and
+        measured.mean == -0.5 and measured.meanAbsolute == 2.0 and
+        near(measured.rootMeanSquare, 2.5495097567963922, 0.000000000001),
+        "match the activation range and ordered reductions")
+    require(sameActivation(measured, secondActivation.unwrap()),
+        "repeat activation reductions bit-for-bit")
+    activation[0] = 99.0
+    require(measured.minimum == -4.0 and measured.maximumAbsolute == 4.0,
+        "retain statistics independently while caller owns source values")
+
+    let reference = Array<Float>()
+    reference.push(1.0); reference.push(-2.0)
+    reference.push(3.0); reference.push(0.0)
+    let candidate = Array<Float>()
+    candidate.push(1.0); candidate.push(-1.5)
+    candidate.push(2.5); candidate.push(0.0)
+    let firstError = measureErrorStatistics(reference, candidate, 4)
+    let secondError = measureErrorStatistics(reference, candidate, 4)
+    require(firstError.isOkay() and secondError.isOkay(),
+        "measure bounded per-tensor or per-layer comparison statistics")
+    let compared = firstError.unwrap()
+    require(compared.count == 4 and compared.maximumAbsoluteError == 0.5 and
+        compared.meanAbsoluteError == 0.25 and
+        near(compared.rootMeanSquareError, 0.3535533905932738,
+            0.000000000001) and
+        near(compared.relativeL2Error, 0.1889822365046136,
+            0.000000000001) and compared.relativeL2Defined and
+        near(compared.cosineSimilarity, 0.9971764649527379,
+            0.000000000001) and compared.cosineDefined and not compared.exact,
+        "match quantization and layer output error metrics")
+    require(sameError(compared, secondError.unwrap()),
+        "repeat comparison reductions bit-for-bit")
+
+    let zeros = Array<Float>()
+    zeros.push(0.0); zeros.push(-0.0)
+    let exactZero = measureErrorStatistics(zeros, zeros, 2)
+    require(exactZero.isOkay() and exactZero.unwrap().exact and
+        not exactZero.unwrap().relativeL2Defined and
+        not exactZero.unwrap().cosineDefined and
+        exactZero.unwrap().relativeL2Error == 0.0 and
+        exactZero.unwrap().cosineSimilarity == 0.0,
+        "label zero-norm metrics undefined without inventing a measurement")
+    let nonzero = Array<Float>(); nonzero.push(1.0); nonzero.push(0.0)
+    let zeroReference = measureErrorStatistics(zeros, nonzero, 2)
+    require(zeroReference.isOkay() and not zeroReference.unwrap().exact and
+        not zeroReference.unwrap().relativeL2Defined and
+        not zeroReference.unwrap().cosineDefined,
+        "preserve undefined flags when only the reference norm is zero")
+
+    let empty = Array<Float>()
+    require(measureActivationStatistics(empty, 1).unwrapErr().code ==
+        "qwen.statistics.empty" and
+        measureActivationStatistics(reference, 3).unwrapErr().code ==
+        "qwen.statistics.limit" and
+        measureActivationStatistics(reference, 0).unwrapErr().code ==
+        "qwen.statistics.input",
+        "reject empty, exceeded, and nonpositive bounds")
+    let short = Array<Float>(); short.push(1.0)
+    require(measureErrorStatistics(reference, short, 4).unwrapErr().code ==
+        "qwen.statistics.geometry",
+        "reject mismatched comparison geometry")
+    var divisor = 0.0
+    let nonfinite = Array<Float>(); nonfinite.push(1.0 / divisor)
+    require(measureActivationStatistics(nonfinite, 1).unwrapErr().code ==
+        "qwen.statistics.nonfinite" and
+        not measureActivationStatistics(nonfinite, 1).unwrapErr().retryable,
+        "reject non-finite input without retry or repair")
+    let huge = Array<Float>(); huge.push(1.0e300)
+    require(measureActivationStatistics(huge, 1).unwrapErr().code ==
+        "qwen.statistics.range",
+        "reject finite inputs whose reductions overflow")
+
+    measured.close(); measured.close()
+    compared.close(); compared.close()
+    require(measured.closed and measured.count == 0 and compared.closed and
+        compared.count == 0 and not compared.relativeL2Defined and
+        not compared.cosineDefined,
+        "close scalar reports deterministically and idempotently")
+
+    secondActivation.unwrap().close(); secondError.unwrap().close()
+    exactZero.unwrap().close(); zeroReference.unwrap().close()
+    activation.free(); reference.free(); candidate.free(); zeros.free()
+    nonzero.free(); empty.free(); short.free(); nonfinite.free(); huge.free()
+    print("PASS: QWN-033B deterministic bounded sensitivity and error statistics")
+    return 0
+}
