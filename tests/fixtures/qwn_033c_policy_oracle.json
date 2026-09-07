@@ -1,0 +1,117 @@
+{
+  "schema": "seen-qwen-policy-resolver-oracle-v1",
+  "version": 1,
+  "ordering": "declared-rule-order",
+  "profile": "synthetic-resolver-test",
+  "hard_bounds": {
+    "max_tensors": 2048,
+    "max_rules": 4096,
+    "max_layer_index": 63
+  },
+  "tensors": [
+    {
+      "name": "lm_head.weight",
+      "layer_index": -1,
+      "layer_type": "global",
+      "semantic_role": "lm-head",
+      "outlier_bucket": "critical"
+    },
+    {
+      "name": "model.language_model.layers.0.self_attn.q_proj.weight",
+      "layer_index": 0,
+      "layer_type": "attention",
+      "semantic_role": "attention-q",
+      "outlier_bucket": "high"
+    },
+    {
+      "name": "model.language_model.layers.32.linear_attn.A_log",
+      "layer_index": 32,
+      "layer_type": "gdn",
+      "semantic_role": "gdn-state",
+      "outlier_bucket": "medium"
+    },
+    {
+      "name": "model.language_model.embed_tokens.weight",
+      "layer_index": -1,
+      "layer_type": "global",
+      "semantic_role": "embeddings",
+      "outlier_bucket": "low"
+    },
+    {
+      "name": "mtp.fc.weight",
+      "layer_index": -1,
+      "layer_type": "mtp",
+      "semantic_role": "mtp",
+      "outlier_bucket": "low"
+    }
+  ],
+  "rules": [
+    {
+      "id": "exact-lm-head",
+      "codec": "F16",
+      "tensor_name": "lm_head.weight",
+      "layer_start": -1,
+      "layer_end": -1,
+      "layer_type": "",
+      "semantic_role": "",
+      "outlier_bucket": ""
+    },
+    {
+      "id": "early-attention-q-high",
+      "codec": "Q8_SYM_G64",
+      "tensor_name": "",
+      "layer_start": 0,
+      "layer_end": 15,
+      "layer_type": "attention",
+      "semantic_role": "attention-q",
+      "outlier_bucket": "high"
+    },
+    {
+      "id": "gdn-state",
+      "codec": "F32",
+      "tensor_name": "",
+      "layer_start": 16,
+      "layer_end": 63,
+      "layer_type": "gdn",
+      "semantic_role": "gdn-state",
+      "outlier_bucket": ""
+    },
+    {
+      "id": "embeddings",
+      "codec": "BF16",
+      "tensor_name": "",
+      "layer_start": -1,
+      "layer_end": -1,
+      "layer_type": "",
+      "semantic_role": "embeddings",
+      "outlier_bucket": ""
+    },
+    {
+      "id": "low-outlier",
+      "codec": "Q4_SYM_G64",
+      "tensor_name": "",
+      "layer_start": -1,
+      "layer_end": -1,
+      "layer_type": "",
+      "semantic_role": "",
+      "outlier_bucket": "low"
+    },
+    {
+      "id": "declared-catch-all",
+      "codec": "Q8_SYM_G64",
+      "tensor_name": "",
+      "layer_start": -1,
+      "layer_end": -1,
+      "layer_type": "",
+      "semantic_role": "",
+      "outlier_bucket": ""
+    }
+  ],
+  "expected": [
+    {"tensor_name": "lm_head.weight", "rule_index": 0, "rule_id": "exact-lm-head", "codec": "F16"},
+    {"tensor_name": "model.language_model.layers.0.self_attn.q_proj.weight", "rule_index": 1, "rule_id": "early-attention-q-high", "codec": "Q8_SYM_G64"},
+    {"tensor_name": "model.language_model.layers.32.linear_attn.A_log", "rule_index": 2, "rule_id": "gdn-state", "codec": "F32"},
+    {"tensor_name": "model.language_model.embed_tokens.weight", "rule_index": 3, "rule_id": "embeddings", "codec": "BF16"},
+    {"tensor_name": "mtp.fc.weight", "rule_index": 4, "rule_id": "low-outlier", "codec": "Q4_SYM_G64"}
+  ]
+}

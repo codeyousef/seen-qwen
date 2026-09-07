@@ -1,0 +1,301 @@
+///
+/// Deterministic bounded quantization-policy rule resolver.
+///
+/// Rules are validated completely, then matched in declared array order. An
+/// empty selector is a wildcard; a layer range is a wildcard only when both
+/// endpoints are -1. The resolver never invents a codec and never falls back
+/// when no declared rule matches.
+///
+/// Resolved string fields borrow from the caller-owned profile, tensor, and
+/// rule objects. Those inputs must remain alive and unchanged until the
+/// resolved policy is closed. The result owns only its resolution array.
+///
+/// Contract test: FEL-1427 / QWN-033C
+///
+
+import core.result.{Result}
+
+let QWEN_POLICY_MAX_TENSORS: Int = 2048
+let QWEN_POLICY_MAX_RULES: Int = 4096
+let QWEN_POLICY_MAX_TENSOR_NAME_BYTES: Int = 1024
+let QWEN_POLICY_MAX_TOKEN_BYTES: Int = 128
+let QWEN_POLICY_MAX_CODEC_BYTES: Int = 64
+let QWEN_POLICY_MAX_LAYER_INDEX: Int = 63
+
+pub class QwenPolicyError {
+    var code: String
+    var field: String
+    var message: String
+    var exitCode: Int
+    var retryable: Bool
+}
+
+fun policyError(code: String, field: String, message: String)
+    r: QwenPolicyError {
+    let exitCode = if code == "qwen.policy.closed" { 11 } else { 2 }
+    return QwenPolicyError{ code: code, field: field, message: message,
+        exitCode: exitCode, retryable: false }
+}
+
+pub class QwenPolicyTensor {
+    var name: String
+    var layerIndex: Int
+    var layerType: String
+    var semanticRole: String
+    var outlierBucket: String
+}
+
+pub class QwenQuantizationRule {
+    var id: String
+    var codec: String
+    var tensorName: String
+    var layerStart: Int
+    var layerEnd: Int
+    var layerType: String
+    var semanticRole: String
+    var outlierBucket: String
+}
+
+pub class QwenResolvedTensorPolicy {
+    var tensorIndex: Int
+    var ruleIndex: Int
+    var tensorName: String
+    var ruleId: String
+    var codec: String
+}
+
+pub class QwenResolvedQuantizationPolicy {
+    var profile: String
+    var resolutions: Array<QwenResolvedTensorPolicy>
+    var closed: Bool
+
+    fun length() r: Int {
+        if this.closed { return 0 }
+        return this.resolutions.length()
+    }
+
+    fun at(index: Int)
+        r: Result<QwenResolvedTensorPolicy, QwenPolicyError> {
+        if this.closed {
+            return Err<QwenResolvedTensorPolicy, QwenPolicyError>(policyError(
+                "qwen.policy.closed", "policy", "resolved policy is closed"))
+        }
+        if index < 0 or index >= this.resolutions.length() {
+            return Err<QwenResolvedTensorPolicy, QwenPolicyError>(policyError(
+                "qwen.policy.index", "index",
+                "resolved policy index is outside the bounded result"))
+        }
+        return Ok<QwenResolvedTensorPolicy, QwenPolicyError>(
+            this.resolutions[index])
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.resolutions.free()
+        this.closed = true
+    }
+}
+
+fun policyTokenValid(value: String, allowEmpty: Bool, maximumBytes: Int)
+    r: Bool {
+    if value.length() == 0 { return allowEmpty }
+    if value.length() > maximumBytes { return false }
+    var index = 0
+    while index < value.length() {
+        let byte = value.byteAt(index)
+        let upper = byte >= 65 and byte <= 90
+        let lower = byte >= 97 and byte <= 122
+        let digit = byte >= 48 and byte <= 57
+        if not upper and not lower and not digit and byte != 45 and
+            byte != 46 and byte != 95 {
+            return false
+        }
+        index = index + 1
+    }
+    return true
+}
+
+fun tensorValid(tensor: QwenPolicyTensor) r: QwenPolicyError? {
+    if not policyTokenValid(tensor.name, false,
+        QWEN_POLICY_MAX_TENSOR_NAME_BYTES) {
+        return policyError("qwen.policy.schema", "tensor.name",
+            "tensor name is empty, oversized, or non-canonical")
+    }
+    if tensor.layerIndex < -1 or
+        tensor.layerIndex > QWEN_POLICY_MAX_LAYER_INDEX {
+        return policyError("qwen.policy.bounds", "tensor.layer_index",
+            "tensor layer index is outside -1 or the 64-layer model")
+    }
+    if not policyTokenValid(tensor.layerType, false,
+        QWEN_POLICY_MAX_TOKEN_BYTES) or
+        not policyTokenValid(tensor.semanticRole, false,
+            QWEN_POLICY_MAX_TOKEN_BYTES) or
+        not policyTokenValid(tensor.outlierBucket, false,
+            QWEN_POLICY_MAX_TOKEN_BYTES) {
+        return policyError("qwen.policy.schema", "tensor.selector",
+            "tensor selector labels must be bounded canonical tokens")
+    }
+    return null
+}
+
+fun ruleValid(rule: QwenQuantizationRule) r: QwenPolicyError? {
+    if not policyTokenValid(rule.id, false, QWEN_POLICY_MAX_TOKEN_BYTES) {
+        return policyError("qwen.policy.schema", "rule.id",
+            "rule id is empty, oversized, or non-canonical")
+    }
+    if not policyTokenValid(rule.codec, false, QWEN_POLICY_MAX_CODEC_BYTES) {
+        return policyError("qwen.policy.schema", "rule.codec",
+            "codec id is empty, oversized, or non-canonical")
+    }
+    if not policyTokenValid(rule.tensorName, true,
+        QWEN_POLICY_MAX_TENSOR_NAME_BYTES) or
+        not policyTokenValid(rule.layerType, true,
+            QWEN_POLICY_MAX_TOKEN_BYTES) or
+        not policyTokenValid(rule.semanticRole, true,
+            QWEN_POLICY_MAX_TOKEN_BYTES) or
+        not policyTokenValid(rule.outlierBucket, true,
+            QWEN_POLICY_MAX_TOKEN_BYTES) {
+        return policyError("qwen.policy.schema", "rule.selector",
+            "rule selectors must be bounded canonical tokens or wildcards")
+    }
+    let wildcardLayer = rule.layerStart == -1 and rule.layerEnd == -1
+    let boundedLayer = rule.layerStart >= 0 and
+        rule.layerEnd >= rule.layerStart and
+        rule.layerEnd <= QWEN_POLICY_MAX_LAYER_INDEX
+    if not wildcardLayer and not boundedLayer {
+        return policyError("qwen.policy.bounds", "rule.layer_range",
+            "layer range must be -1/-1 or an ordered range within 0..63")
+    }
+    return null
+}
+
+fun sameRulePredicate(left: QwenQuantizationRule,
+    right: QwenQuantizationRule) r: Bool {
+    return left.tensorName == right.tensorName and
+        left.layerStart == right.layerStart and
+        left.layerEnd == right.layerEnd and
+        left.layerType == right.layerType and
+        left.semanticRole == right.semanticRole and
+        left.outlierBucket == right.outlierBucket
+}
+
+fun ruleMatches(rule: QwenQuantizationRule, tensor: QwenPolicyTensor)
+    r: Bool {
+    if rule.tensorName.length() > 0 and rule.tensorName != tensor.name {
+        return false
+    }
+    if rule.layerStart >= 0 and (tensor.layerIndex < rule.layerStart or
+        tensor.layerIndex > rule.layerEnd) {
+        return false
+    }
+    if rule.layerType.length() > 0 and
+        rule.layerType != tensor.layerType { return false }
+    if rule.semanticRole.length() > 0 and
+        rule.semanticRole != tensor.semanticRole { return false }
+    if rule.outlierBucket.length() > 0 and
+        rule.outlierBucket != tensor.outlierBucket { return false }
+    return true
+}
+
+fun releaseResolutions(values: Array<QwenResolvedTensorPolicy>) r: Void {
+    values.free()
+}
+
+pub fun resolveQuantizationPolicy(profile: String,
+    tensors: Array<QwenPolicyTensor>, rules: Array<QwenQuantizationRule>,
+    tensorLimit: Int, ruleLimit: Int)
+    r: Result<QwenResolvedQuantizationPolicy, QwenPolicyError> {
+    if not policyTokenValid(profile, false, QWEN_POLICY_MAX_TOKEN_BYTES) {
+        return Err<QwenResolvedQuantizationPolicy, QwenPolicyError>(policyError(
+            "qwen.policy.schema", "profile",
+            "profile id is empty, oversized, or non-canonical"))
+    }
+    if tensorLimit <= 0 or tensorLimit > QWEN_POLICY_MAX_TENSORS or
+        ruleLimit <= 0 or ruleLimit > QWEN_POLICY_MAX_RULES {
+        return Err<QwenResolvedQuantizationPolicy, QwenPolicyError>(policyError(
+            "qwen.policy.limit", "limits",
+            "explicit resolver limits must be positive and within hard caps"))
+    }
+    if tensors.length() == 0 or rules.length() == 0 {
+        return Err<QwenResolvedQuantizationPolicy, QwenPolicyError>(policyError(
+            "qwen.policy.input", "policy",
+            "resolver requires at least one tensor and one rule"))
+    }
+    if tensors.length() > tensorLimit or rules.length() > ruleLimit {
+        return Err<QwenResolvedQuantizationPolicy, QwenPolicyError>(policyError(
+            "qwen.policy.limit", "policy",
+            "policy exceeds its explicit tensor or rule limit"))
+    }
+
+    var ruleIndex = 0
+    while ruleIndex < rules.length() {
+        let invalidRule = ruleValid(rules[ruleIndex])
+        if not invalidRule.isNone() {
+            return Err<QwenResolvedQuantizationPolicy, QwenPolicyError>(
+                invalidRule.unwrap())
+        }
+        var priorRule = 0
+        while priorRule < ruleIndex {
+            if rules[priorRule].id == rules[ruleIndex].id {
+                return Err<QwenResolvedQuantizationPolicy, QwenPolicyError>(
+                    policyError("qwen.policy.duplicate", "rule.id",
+                        "rule ids must be unique"))
+            }
+            if sameRulePredicate(rules[priorRule], rules[ruleIndex]) {
+                return Err<QwenResolvedQuantizationPolicy, QwenPolicyError>(
+                    policyError("qwen.policy.ambiguous", "rule.selector",
+                        "duplicate rule predicates are forbidden"))
+            }
+            priorRule = priorRule + 1
+        }
+        ruleIndex = ruleIndex + 1
+    }
+
+    let resolutions = Array<QwenResolvedTensorPolicy>()
+    var tensorIndex = 0
+    while tensorIndex < tensors.length() {
+        let invalidTensor = tensorValid(tensors[tensorIndex])
+        if not invalidTensor.isNone() {
+            releaseResolutions(resolutions)
+            return Err<QwenResolvedQuantizationPolicy, QwenPolicyError>(
+                invalidTensor.unwrap())
+        }
+        var priorTensor = 0
+        while priorTensor < tensorIndex {
+            if tensors[priorTensor].name == tensors[tensorIndex].name {
+                releaseResolutions(resolutions)
+                return Err<QwenResolvedQuantizationPolicy, QwenPolicyError>(
+                    policyError("qwen.policy.duplicate", "tensor.name",
+                        "tensor names must be unique"))
+            }
+            priorTensor = priorTensor + 1
+        }
+
+        var matchedRule = -1
+        ruleIndex = 0
+        while ruleIndex < rules.length() and matchedRule < 0 {
+            if ruleMatches(rules[ruleIndex], tensors[tensorIndex]) {
+                matchedRule = ruleIndex
+            }
+            ruleIndex = ruleIndex + 1
+        }
+        if matchedRule < 0 {
+            releaseResolutions(resolutions)
+            return Err<QwenResolvedQuantizationPolicy, QwenPolicyError>(
+                policyError("qwen.policy.unmatched", "tensor.name",
+                    "no declared quantization rule matches the tensor"))
+        }
+        resolutions.push(QwenResolvedTensorPolicy{
+            tensorIndex: tensorIndex,
+            ruleIndex: matchedRule,
+            tensorName: tensors[tensorIndex].name,
+            ruleId: rules[matchedRule].id,
+            codec: rules[matchedRule].codec,
+        })
+        tensorIndex = tensorIndex + 1
+    }
+
+    return Ok<QwenResolvedQuantizationPolicy, QwenPolicyError>(
+        QwenResolvedQuantizationPolicy{ profile: profile,
+            resolutions: resolutions, closed: false })
+}
