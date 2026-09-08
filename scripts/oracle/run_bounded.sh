@@ -7,7 +7,7 @@ INNER="$ROOT_DIR/scripts/oracle/run_bounded_inner.sh"
 MEMORY_CEILING_BYTES=51539607552
 MEMORY_RESERVE_BYTES=8589934592
 VMEM_CEILING_BYTES=68719476736
-TASKS_MAX=16
+TASKS_MAX=${QWN_TASKS_MAX:-16}
 
 fail() {
     echo "oracle-scope: $*" >&2
@@ -22,6 +22,9 @@ case "$timeout_seconds" in *[!0-9]*|"") fail "timeout must be an integer" ;; esa
     fail "timeout must be in 1..28800 seconds"
 [ -x "$INNER" ] && [ ! -L "$INNER" ] || fail "bounded inner runner is missing or unsafe"
 command -v systemd-run >/dev/null 2>&1 || fail "systemd-run is required"
+case "$TASKS_MAX" in *[!0-9]*|"") fail "task cap must be an integer" ;; esac
+[ "$TASKS_MAX" -ge 4 ] && [ "$TASKS_MAX" -le 64 ] ||
+    fail "task cap must be in 4..64"
 
 memory_total_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
 memory_available_kib=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)

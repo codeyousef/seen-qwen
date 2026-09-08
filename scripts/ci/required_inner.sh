@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR=/workspace
-TOOLCHAIN_ROOT="$ROOT_DIR/.seen/toolchains/seen-0.19.4-linux-x64"
+TOOLCHAIN_ROOT="$ROOT_DIR/.seen/toolchains/seen-0.20.1-linux-x64"
 SEEN_COMPILER="$TOOLCHAIN_ROOT/bin/seen"
 SEEN_PACKAGE_CLIENT="$TOOLCHAIN_ROOT/bin/seen-pkg"
 COMPATIBILITY_MANIFEST="$TOOLCHAIN_ROOT/bin/compatibility-manifest.json"
@@ -66,13 +66,13 @@ for tool in opt llc llvm-as ld.lld; do
 done
 
 printf '%s  %s\n' \
-    44a90884a9ff188718ed839aed4c8d692c8c520216c6a7b072ca6d0d35aa7fbc \
+    7f823add11df162a9597d3ae225b6d3a6f48dfacd878f4ea0392b4f1435eb3fc \
     "$SEEN_COMPILER" | sha256sum -c -
 printf '%s  %s\n' \
-    2ac68f4c4588534a8c4f3666c25caef02f0853b6ad2b8b203b269decdac25052 \
+    7cc8f5c265280e04fb5e5bc182e24dbe069a58e6373d5603d47f72d69bbb4224 \
     "$SEEN_PACKAGE_CLIENT" | sha256sum -c -
 printf '%s  %s\n' \
-    f39aebda1fdafc20d04b6c6a0072a491afea3f8f9ab836fd173ead0d1fe1ea33 \
+    55c3aff948ea8a587dd5dad3bc511cc6d7fd3028b7a458240ba07542680f4603 \
     "$COMPATIBILITY_MANIFEST" | sha256sum -c -
 printf '%s  %s\n' \
     ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003 \
@@ -91,7 +91,7 @@ printf '%s  %s\n' \
 [ "$(stat -c '%s' "$ASSET_ROOT/merges.txt")" = "3353259" ] ||
     fail "merge-table byte length changed"
 
-python3 -c 'import json; p="/workspace/.seen/toolchains/seen-0.19.4-linux-x64/bin/compatibility-manifest.json"; d=json.load(open(p, encoding="utf-8")); assert d["schema"] == "seen-compatibility-manifest-v1"; assert d["release_version"] == "0.19.4"; assert d["components"]["compiler"]["version"] == "0.19.4"; assert d["components"]["package_client"] == {"protocol": "SEENPKG1", "version": "0.19.4"}; assert d["components"]["runtime"]["abi"] == "runtime-v3"; assert d["components"]["standard_library"] == {"module_manifest_version": 1, "version": "0.5.0"}; assert d["components"]["llvm"]["minimum_major"] == 19; assert d["platforms"]["linux-x86_64"] == "required"; assert d["determinism"]["certification"]["installed_archive_required"] is True; assert d["determinism"]["certification"]["signed_evidence_required"] is True'
+python3 -c 'import json; p="/workspace/.seen/toolchains/seen-0.20.1-linux-x64/bin/compatibility-manifest.json"; d=json.load(open(p, encoding="utf-8")); assert d["schema"] == "seen-compatibility-manifest-v1"; assert d["release_version"] == "0.20.1"; assert d["components"]["compiler"]["version"] == "0.20.1"; assert d["components"]["package_client"] == {"protocol": "SEENPKG1", "version": "0.20.1"}; assert d["components"]["runtime"]["abi"] == "runtime-v4"; assert d["components"]["standard_library"] == {"module_manifest_version": 1, "version": "0.5.0"}; assert d["components"]["llvm"]["minimum_major"] == 19; assert d["platforms"]["linux-x86_64"] == "required"; assert d["determinism"]["certification"]["installed_archive_required"] is True; assert d["determinism"]["certification"]["signed_evidence_required"] is True'
 
 toolchain_hash_before=$(find "$TOOLCHAIN_ROOT" -type f -print0 | sort -z |
     xargs -0 sha256sum | sha256sum | awk '{print $1}')
@@ -99,10 +99,11 @@ outside_objects_before=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o \
     -type f \( -name '*.o' -o -name '*.sig' -o -name '*.a' \) -print0 |
     sort -z | xargs -0 -r sha256sum | sha256sum | awk '{print $1}')
 
-"$SEEN_COMPILER" --version | grep -Fx 'Seen 0.19.4'
-"$SEEN_PACKAGE_CLIENT" --expect-version 0.19.4 version |
-    grep -Fx 'seen-pkg 0.19.4 (SEENPKG1)'
-python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.py \
+"$SEEN_COMPILER" --version | grep -Fx 'Seen 0.20.1'
+"$SEEN_PACKAGE_CLIENT" --expect-version 0.20.1 version |
+    grep -Fx 'seen-pkg 0.20.1 (SEENPKG1)'
+python3 -m unittest tests/test_ci_contract.py tests/test_cuda_reference_primitives.py \
+    tests/test_qwen_tokenizer_oracles.py \
     tests/test_sampling_profiles.py tests/test_hybrid_mini_contract.py \
     tests/test_hybrid_mini_assets.py tests/test_hybrid_mini_oracle.py \
     tests/test_cpu_attention_oracle.py tests/test_cpu_gdn_oracle.py \
@@ -138,6 +139,7 @@ python3 -m unittest tests/test_ci_contract.py tests/test_qwen_tokenizer_oracles.
 "$SEEN_COMPILER" check tests/qwn_033b_sensitivity_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_033c_policy_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_034a_engine_artifact_test.seen --frozen
+"$SEEN_COMPILER" check tests/qwn_040a_reference_primitives_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022d_sampling_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022b_tokenizer_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022c_chat_template_test.seen --frozen
