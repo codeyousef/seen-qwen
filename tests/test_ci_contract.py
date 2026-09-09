@@ -64,13 +64,13 @@ class CiContractTests(unittest.TestCase):
 
     def test_inputs_match_dependency_and_oracle_locks(self) -> None:
         identities = (
-            "c1c120363fd826244a7ceae4fe2a52cbfb6cf647",
-            "4553fd981957db898b377492acfa297e93c2d846",
-            "09b66d2ee83a45c0b917fc8b598e47a298f805a8",
-            "c81bfa9e75a11524318f7e568e961a4e59c05d18146c8da08af42ab9212951e9",
-            "7f823add11df162a9597d3ae225b6d3a6f48dfacd878f4ea0392b4f1435eb3fc",
-            "7cc8f5c265280e04fb5e5bc182e24dbe069a58e6373d5603d47f72d69bbb4224",
-            "55c3aff948ea8a587dd5dad3bc511cc6d7fd3028b7a458240ba07542680f4603",
+            "25b0694cbd138932594438288035ee67b5b7150a",
+            "53fe594674ea7a14cedb0cd13eef4eb4dbd14bed",
+            "f368ef9a013bbba635881e9e018658d7c21ee623",
+            "e378883a7c17a1d90e34dacc706fed6502606e2e5e26732271229d9c051b5718",
+            "c3a528a7375d34d4209e8dcfd506d603b9c46623357e6aafdd22036c02868032",
+            "eda0988c1966722e086b0ef86ffb0c4dbb502276dbca4a6d2553fb403ed93421",
+            "2b5e034c3316d01c23be99cc32e36e74f7379b24adb3c0b14b2e7f43fcf69a32",
             "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
             "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
             "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
@@ -94,31 +94,34 @@ class CiContractTests(unittest.TestCase):
         self.assertIn(
             "tests/qwn_040a_reference_primitives_test.seen --frozen", self.inner
         )
+        self.assertIn("qwn_030b_sqw_reader_test_fast", self.inner)
+        self.assertIn("qwn_040a_reference_primitives_test_fast", self.inner)
+        self.assertIn("qwn_040a_reference_primitives_test", self.inner)
 
     def test_seen_release_provenance_is_exact_and_current(self) -> None:
         compiler_sha256 = (
-            "7f823add11df162a9597d3ae225b6d3a6f48dfacd878f4ea0392b4f1435eb3fc"
+            "c3a528a7375d34d4209e8dcfd506d603b9c46623357e6aafdd22036c02868032"
         )
         archive_sha256 = (
-            "c81bfa9e75a11524318f7e568e961a4e59c05d18146c8da08af42ab9212951e9"
+            "e378883a7c17a1d90e34dacc706fed6502606e2e5e26732271229d9c051b5718"
         )
-        source_commit = "c1c120363fd826244a7ceae4fe2a52cbfb6cf647"
-        build_id = "3055cf2b7788352a6a15d960536301fd7690e063"
+        source_commit = "25b0694cbd138932594438288035ee67b5b7150a"
+        build_id = "960baffc8a640b6bc26540f82f02f763f48b8722"
 
         for lock_entry in (
-            '# release_tag = "v0.20.1"',
+            '# release_tag = "v0.20.2"',
             f'# certified_commit = "{source_commit}"',
             f'# linux_x64_archive_sha256 = "{archive_sha256}"',
             f'# packaged_compiler_sha256 = "{compiler_sha256}"',
             f'# compiler_build_id = "{build_id}"',
-            "compiler=0.20.1",
+            "compiler=0.20.2",
             "target=linux-x86_64",
             "cpu=x86-64",
         ):
             self.assertIn(lock_entry, self.lock)
 
         for prepare_entry in (
-            "releases/download/v0.20.1/seen-0.20.1-linux-x64.tar.gz",
+            "releases/download/v0.20.2/seen-0.20.2-linux-x64.tar.gz",
             archive_sha256,
             compiler_sha256,
             source_commit,
@@ -137,9 +140,9 @@ class CiContractTests(unittest.TestCase):
             self.assertIn(prepare_entry, self.prepare)
 
         for inner_entry in (
-            "seen-0.20.1-linux-x64",
+            "seen-0.20.2-linux-x64",
             compiler_sha256,
-            "Seen 0.20.1",
+            "Seen 0.20.2",
             "--target-cpu=x86-64",
         ):
             self.assertIn(inner_entry, self.inner)

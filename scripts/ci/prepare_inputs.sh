@@ -5,18 +5,15 @@ umask 022
 
 ROOT_DIR="$(cd -P -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
 CI_ROOT="$ROOT_DIR/.seen/ci"
-DOWNLOAD_ROOT="$CI_ROOT/downloads"
-TOOLCHAIN_PARENT="$ROOT_DIR/.seen/toolchains"
-TOOLCHAIN_ROOT="$TOOLCHAIN_PARENT/seen-0.20.1-linux-x64"
 ASSET_ROOT="$ROOT_DIR/.seen/oracle-assets-qwen38"
 
-SEEN_ARCHIVE_URL="https://github.com/codeyousef/SeenLang/releases/download/v0.20.1/seen-0.20.1-linux-x64.tar.gz"
-SEEN_ARCHIVE_SHA256="c81bfa9e75a11524318f7e568e961a4e59c05d18146c8da08af42ab9212951e9"
-SEEN_COMPILER_SHA256="7f823add11df162a9597d3ae225b6d3a6f48dfacd878f4ea0392b4f1435eb3fc"
-SEEN_PACKAGE_CLIENT_SHA256="7cc8f5c265280e04fb5e5bc182e24dbe069a58e6373d5603d47f72d69bbb4224"
-SEEN_COMPATIBILITY_SHA256="55c3aff948ea8a587dd5dad3bc511cc6d7fd3028b7a458240ba07542680f4603"
-SEEN_SOURCE_COMMIT="c1c120363fd826244a7ceae4fe2a52cbfb6cf647"
-SEEN_BUILD_ID="3055cf2b7788352a6a15d960536301fd7690e063"
+SEEN_ARCHIVE_URL="https://github.com/codeyousef/SeenLang/releases/download/v0.20.2/seen-0.20.2-linux-x64.tar.gz"
+SEEN_ARCHIVE_SHA256="e378883a7c17a1d90e34dacc706fed6502606e2e5e26732271229d9c051b5718"
+SEEN_COMPILER_SHA256="c3a528a7375d34d4209e8dcfd506d603b9c46623357e6aafdd22036c02868032"
+SEEN_PACKAGE_CLIENT_SHA256="eda0988c1966722e086b0ef86ffb0c4dbb502276dbca4a6d2553fb403ed93421"
+SEEN_COMPATIBILITY_SHA256="2b5e034c3316d01c23be99cc32e36e74f7379b24adb3c0b14b2e7f43fcf69a32"
+SEEN_SOURCE_COMMIT="25b0694cbd138932594438288035ee67b5b7150a"
+SEEN_BUILD_ID="960baffc8a640b6bc26540f82f02f763f48b8722"
 SEEN_CPU_BASELINE="x86-64"
 QWEN_REVISION="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 QWEN_VOCAB_URL="https://huggingface.co/Qwen/Qwen3.8-27B/resolve/$QWEN_REVISION/vocab.json?download=true"
@@ -99,7 +96,7 @@ verify_provenance() {
     [ -f "$verifier" ] && [ -x "$verifier" ] && [ ! -L "$verifier" ] ||
         return 1
     [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
-    "$verifier" "$manifest" "$root/bin/seen" 0.20.1 || return 1
+    "$verifier" "$manifest" "$root/bin/seen" 0.20.2 || return 1
     grep -Fqx -- "source_commit=$SEEN_SOURCE_COMMIT" "$manifest" || return 1
     grep -Fqx -- "compiler_build_id=$SEEN_BUILD_ID" "$manifest" || return 1
     grep -Fqx -- "cpu_baseline=$SEEN_CPU_BASELINE" "$manifest" || return 1
@@ -146,7 +143,7 @@ ensure_local_directory() {
     local resolved=""
 
     case "$path" in
-        "$ROOT_DIR/.seen"|"$ROOT_DIR/.seen/"*) ;;
+        "$ROOT_DIR/.seen"|"$ROOT_DIR/.seen/"*|"$SHARED_ROOT/.seen"|"$SHARED_ROOT/.seen/"*) ;;
         *) fail "artifact directory is outside the project-local .seen root" ;;
     esac
     if [ -e "$path" ] || [ -L "$path" ]; then
@@ -185,13 +182,22 @@ if [ "${1:-}" = "--compare-toolchain-trees" ]; then
     exit 0
 fi
 
+GIT_COMMON_DIR="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)"
+SHARED_ROOT="${GIT_COMMON_DIR%/.git}"
+TOOLCHAINS_ROOT="$SHARED_ROOT/.seen/toolchains"
+TOOLCHAIN_PARENT="$TOOLCHAINS_ROOT/seen-0.20.2"
+DOWNLOAD_ROOT="$TOOLCHAIN_PARENT/archive"
+TOOLCHAIN_ROOT="$TOOLCHAIN_PARENT/seen-0.20.2-linux-x64"
+
 ensure_local_directory "$ROOT_DIR/.seen"
 ensure_local_directory "$CI_ROOT"
-ensure_local_directory "$DOWNLOAD_ROOT"
+ensure_local_directory "$SHARED_ROOT/.seen"
+ensure_local_directory "$TOOLCHAINS_ROOT"
 ensure_local_directory "$TOOLCHAIN_PARENT"
+ensure_local_directory "$DOWNLOAD_ROOT"
 ensure_local_directory "$ASSET_ROOT"
 
-archive="$DOWNLOAD_ROOT/seen-0.20.1-linux-x64.tar.gz"
+archive="$DOWNLOAD_ROOT/seen-0.20.2-linux-x64.tar.gz"
 download_verified "$SEEN_ARCHIVE_URL" "$archive" "$SEEN_ARCHIVE_SHA256"
 
 extract_root=$(mktemp -d "$CI_ROOT/toolchain.extract.XXXXXX")
@@ -209,7 +215,7 @@ cleanup_extract() {
 trap cleanup_extract EXIT
 while IFS= read -r member; do
     case "$member" in
-        seen-0.20.1-linux-x64|seen-0.20.1-linux-x64/*) ;;
+        seen-0.20.2-linux-x64|seen-0.20.2-linux-x64/*) ;;
         *) fail "release archive contains an unsafe member: $member" ;;
     esac
     case "/$member/" in
@@ -217,7 +223,7 @@ while IFS= read -r member; do
     esac
 done < <(tar -tzf "$archive")
 tar -xzf "$archive" -C "$extract_root" --no-same-owner --no-same-permissions
-extracted="$extract_root/seen-0.20.1-linux-x64"
+extracted="$extract_root/seen-0.20.2-linux-x64"
 [ -d "$extracted" ] && [ ! -L "$extracted" ] ||
     fail "release archive did not contain the expected root"
 unexpected_type=$(find "$extracted" -mindepth 1 ! -type f ! -type d -print -quit)
@@ -254,4 +260,4 @@ download_verified "$QWEN_GENERATION_URL" "$ASSET_ROOT/generation_config.json" \
 download_verified "$QWEN_MODEL_CARD_URL" "$ASSET_ROOT/README.md" \
     "$QWEN_MODEL_CARD_SHA256" "$QWEN_MODEL_CARD_BYTES"
 
-echo "PASS: exact Seen v0.20.1 toolchain and Qwen tokenizer/sampling inputs verified"
+echo "PASS: exact Seen v0.20.2 toolchain and Qwen tokenizer/sampling inputs verified"
