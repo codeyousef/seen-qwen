@@ -132,6 +132,10 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("tests/qwn_042d_attention_prefill_test.seen --frozen", self.inner)
         self.assertIn("qwn_042d_attention_prefill_test_fast", self.inner)
         self.assertIn("qwn_042d_attention_prefill_test", self.inner)
+        self.assertIn("tests/test_cuda_attention_output_gate.py", self.inner)
+        self.assertIn("tests/qwn_042e_attention_output_gate_test.seen --frozen", self.inner)
+        self.assertIn("qwn_042e_attention_output_gate_test_fast", self.inner)
+        self.assertIn("qwn_042e_attention_output_gate_test", self.inner)
 
     def test_seen_release_provenance_is_exact_and_current(self) -> None:
         compiler_sha256 = (
