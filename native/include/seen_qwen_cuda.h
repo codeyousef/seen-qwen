@@ -60,6 +60,18 @@ SeenCudaStatus seen_qwen_partial_rope_f32(
     SeenQwenCudaBufferView output, uint64_t tokens, uint64_t heads,
     uint64_t head_dim, uint64_t rotary_dim, uint64_t position_offset,
     uint64_t max_position, float theta);
+SeenCudaStatus seen_qwen_attention_qk_rope_f32(
+    const SeenCudaStreamLaunchToken *token,
+    SeenQwenCudaBufferView query_gate_projection,
+    SeenQwenCudaBufferView key_projection,
+    SeenQwenCudaBufferView query_norm_weight,
+    SeenQwenCudaBufferView key_norm_weight,
+    SeenQwenCudaBufferView query_output,
+    SeenQwenCudaBufferView key_output,
+    SeenQwenCudaBufferView gate_output,
+    uint64_t tokens, uint64_t query_heads, uint64_t kv_heads,
+    uint64_t head_dim, uint64_t rotary_dim, uint64_t position_offset,
+    uint64_t max_position, float theta, float epsilon);
 SeenCudaStatus seen_qwen_kv_append_f32(
     const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView keys,
     SeenQwenCudaBufferView values, SeenQwenCudaBufferView key_cache,
