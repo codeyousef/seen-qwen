@@ -67,3 +67,9 @@ extern "C" fun seen_qwen_top_k_f32(token: *const CudaStreamLaunchToken,
     logits: QwenCudaBufferView, tokenIds: QwenCudaBufferView,
     values: QwenCudaBufferView, rows: UInt64, width: UInt64,
     vocabularySize: UInt64, topK: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_causal_conv_silu_f32(
+    token: *const CudaStreamLaunchToken, input: QwenCudaBufferView,
+    weights: QwenCudaBufferView, history: QwenCudaBufferView,
+    output: QwenCudaBufferView, tokenCount: UInt64, channels: UInt64,
+    kernelLength: UInt64, startPosition: UInt64,
+    processedPosition: UInt64) r: CudaNativeStatus

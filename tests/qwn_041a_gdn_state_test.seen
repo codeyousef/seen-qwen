@@ -1,0 +1,17 @@
+import seen_qwen.backend.cuda.reference_primitives.{QWEN_CUDA_REFERENCE_ABI_VERSION,
+    QwenCudaBufferView}
+
+fun main() r: Int {
+    let history = QwenCudaBufferView{
+        abiVersion: QWEN_CUDA_REFERENCE_ABI_VERSION,
+        deviceOrdinal: 0 as Int32,
+        address: 0 as UInt64,
+        byteLength: 122880 as UInt64
+    }
+    if history.abiVersion != QWEN_CUDA_REFERENCE_ABI_VERSION { return 1 }
+    if history.byteLength != (122880 as UInt64) { return 2 }
+    println("PASS: QWN-041A fixed-width GDN convolution state declaration")
+    return 0
+}
+
+main()
