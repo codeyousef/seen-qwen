@@ -1,0 +1,18 @@
+import seen_qwen.backend.cuda.reference_primitives.{QWEN_CUDA_REFERENCE_ABI_VERSION,
+    QwenCudaBufferView}
+
+fun main() r: Int {
+    let queryProjection = QwenCudaBufferView{
+        abiVersion: QWEN_CUDA_REFERENCE_ABI_VERSION,
+        deviceOrdinal: 0 as Int32,
+        address: 0 as UInt64,
+        byteLength: 98304 as UInt64
+    }
+    if queryProjection.abiVersion != QWEN_CUDA_REFERENCE_ABI_VERSION { return 1 }
+    if queryProjection.byteLength != (2 as UInt64) * (24 as UInt64) *
+        (2 as UInt64) * (256 as UInt64) * (4 as UInt64) { return 2 }
+    println("PASS: QWN-042A fixed-width Q/K projection and RoPE declaration")
+    return 0
+}
+
+main()

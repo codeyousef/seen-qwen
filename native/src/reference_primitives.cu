@@ -297,6 +297,72 @@ __global__ void partial_rope_f32(const float *input, float *output,
                               __fmul_rn(rotated, sinf(angle)));
 }
 
+__device__ float attention_rope_value(const float *row, const float *weight,
+                                      uint64_t dimension,
+                                      uint64_t rotary_dim, uint64_t position,
+                                      float theta, float inverse) {
+    const float direct = __fmul_rn(__fmul_rn(row[dimension], inverse),
+                                   __fadd_rn(1.0f, weight[dimension]));
+    if (dimension >= rotary_dim) return direct;
+    const uint64_t half = rotary_dim / 2;
+    const uint64_t frequency_index = dimension % half;
+    const float exponent = static_cast<float>(frequency_index * 2) /
+        static_cast<float>(rotary_dim);
+    const float angle = static_cast<float>(position) / powf(theta, exponent);
+    const uint64_t paired = dimension < half
+        ? dimension + half : dimension - half;
+    const float normalized_pair = __fmul_rn(
+        __fmul_rn(row[paired], inverse),
+        __fadd_rn(1.0f, weight[paired]));
+    const float rotated = dimension < half
+        ? -normalized_pair : normalized_pair;
+    return __fadd_rn(__fmul_rn(direct, cosf(angle)),
+                     __fmul_rn(rotated, sinf(angle)));
+}
+
+__global__ void attention_query_rope_f32(
+    const float *query_gate_projection, const float *weight,
+    float *query_output, float *gate_output, uint64_t rows,
+    uint64_t query_heads, uint64_t head_dim, uint64_t rotary_dim,
+    uint64_t position_offset, float theta, float epsilon) {
+    const uint64_t row_index = blockIdx.x;
+    if (row_index >= rows || threadIdx.x != 0) return;
+    const float *row = query_gate_projection + row_index * head_dim * 2;
+    float sum = 0.0f;
+    for (uint64_t dimension = 0; dimension < head_dim; ++dimension)
+        sum = __fadd_rn(sum, __fmul_rn(row[dimension], row[dimension]));
+    const float inverse = __fdividef(1.0f, sqrtf(__fadd_rn(
+        __fdividef(sum, static_cast<float>(head_dim)), epsilon)));
+    const uint64_t position = position_offset + row_index / query_heads;
+    for (uint64_t dimension = 0; dimension < head_dim; ++dimension) {
+        const uint64_t output_index = row_index * head_dim + dimension;
+        query_output[output_index] = attention_rope_value(
+            row, weight, dimension, rotary_dim, position, theta, inverse);
+        gate_output[output_index] = row[head_dim + dimension];
+    }
+}
+
+__global__ void attention_key_rope_f32(
+    const float *key_projection, const float *weight, float *key_output,
+    uint64_t rows, uint64_t kv_heads, uint64_t head_dim,
+    uint64_t rotary_dim, uint64_t position_offset, float theta,
+    float epsilon) {
+    const uint64_t row_index = blockIdx.x;
+    if (row_index >= rows || threadIdx.x != 0) return;
+    const float *row = key_projection + row_index * head_dim;
+    float sum = 0.0f;
+    for (uint64_t dimension = 0; dimension < head_dim; ++dimension)
+        sum = __fadd_rn(sum, __fmul_rn(row[dimension], row[dimension]));
+    const float inverse = __fdividef(1.0f, sqrtf(__fadd_rn(
+        __fdividef(sum, static_cast<float>(head_dim)), epsilon)));
+    const uint64_t position = position_offset + row_index / kv_heads;
+    for (uint64_t dimension = 0; dimension < head_dim; ++dimension) {
+        const uint64_t output_index = row_index * head_dim + dimension;
+        key_output[output_index] = attention_rope_value(
+            row, weight, dimension, rotary_dim, position, theta, inverse);
+    }
+}
+
 __global__ void kv_append_f32(const float *keys, const float *values,
                               float *key_cache, float *value_cache,
                               uint64_t count, uint64_t destination_offset) {
@@ -725,6 +791,80 @@ extern "C" SeenCudaStatus seen_qwen_partial_rope_f32(
     partial_rope_f32<<<blocks, kThreads, 0, stream>>>(pointer<const float>(input),
         pointer<float>(output), count, heads, head_dim, rotary_dim,
         position_offset, theta);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_attention_qk_rope_f32(
+    const SeenCudaStreamLaunchToken *token,
+    SeenQwenCudaBufferView query_gate_projection,
+    SeenQwenCudaBufferView key_projection,
+    SeenQwenCudaBufferView query_norm_weight,
+    SeenQwenCudaBufferView key_norm_weight,
+    SeenQwenCudaBufferView query_output,
+    SeenQwenCudaBufferView key_output,
+    SeenQwenCudaBufferView gate_output,
+    uint64_t tokens, uint64_t query_heads, uint64_t kv_heads,
+    uint64_t head_dim, uint64_t rotary_dim, uint64_t position_offset,
+    uint64_t max_position, float theta, float epsilon) {
+    constexpr const char *op = "seen_qwen_attention_qk_rope_f32";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t query_rows = 0, key_rows = 0, query_count = 0, key_count = 0;
+    uint64_t query_projection_count = 0, query_bytes = 0, key_bytes = 0;
+    uint64_t query_projection_bytes = 0, weight_bytes = 0;
+    if (tokens == 0 || query_heads == 0 || kv_heads == 0 ||
+        query_heads % kv_heads != 0 || head_dim == 0 || rotary_dim == 0 ||
+        rotary_dim > head_dim || rotary_dim % 2 != 0 ||
+        position_offset >= max_position || tokens > max_position - position_offset ||
+        !(theta > 0.0f) || !std::isfinite(theta) || !(epsilon > 0.0f) ||
+        !std::isfinite(epsilon) ||
+        !checked_multiply(tokens, query_heads, &query_rows) ||
+        !checked_multiply(tokens, kv_heads, &key_rows) ||
+        query_rows > UINT32_MAX || key_rows > UINT32_MAX ||
+        !checked_multiply(query_rows, head_dim, &query_count) ||
+        !checked_multiply(key_rows, head_dim, &key_count) ||
+        !checked_multiply(query_count, 2, &query_projection_count) ||
+        !checked_multiply(query_count, sizeof(float), &query_bytes) ||
+        !checked_multiply(key_count, sizeof(float), &key_bytes) ||
+        !checked_multiply(query_projection_count, sizeof(float),
+                          &query_projection_bytes) ||
+        !checked_multiply(head_dim, sizeof(float), &weight_bytes))
+        return invalid(token->device_ordinal, op,
+                       "invalid attention Q/K projection or RoPE geometry");
+    const std::pair<SeenQwenCudaBufferView, uint64_t> views[] = {
+        {query_gate_projection, query_projection_bytes},
+        {key_projection, key_bytes},
+        {query_norm_weight, weight_bytes}, {key_norm_weight, weight_bytes},
+        {query_output, query_bytes}, {key_output, key_bytes},
+        {gate_output, query_bytes},
+    };
+    for (const auto &pair : views) {
+        checked = validate_view(pair.first, pair.second,
+                                token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    for (size_t left = 0; left < sizeof(views) / sizeof(views[0]); ++left)
+        for (size_t right = left + 1;
+             right < sizeof(views) / sizeof(views[0]); ++right)
+            if (overlaps(views[left].first, views[left].second,
+                         views[right].first, views[right].second))
+                return invalid(token->device_ordinal, op,
+                               "attention Q/K buffers must be disjoint");
+    attention_query_rope_f32<<<static_cast<uint32_t>(query_rows), 1, 0, stream>>>(
+                  pointer<const float>(query_gate_projection),
+                  pointer<const float>(query_norm_weight),
+                  pointer<float>(query_output), pointer<float>(gate_output),
+                  query_rows, query_heads, head_dim, rotary_dim,
+                  position_offset, theta, epsilon);
+    cudaError_t launched = cudaPeekAtLastError();
+    if (launched != cudaSuccess)
+        return launch_status(launched, token->device_ordinal, op);
+    attention_key_rope_f32<<<static_cast<uint32_t>(key_rows), 1, 0, stream>>>(
+                  pointer<const float>(key_projection),
+                  pointer<const float>(key_norm_weight),
+                  pointer<float>(key_output), key_rows, kv_heads, head_dim,
+                  rotary_dim, position_offset, theta, epsilon);
     return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
 }
 

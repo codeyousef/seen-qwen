@@ -41,8 +41,8 @@ class CudaReferenceUtilityContractTest(unittest.TestCase):
             "seen_cuda_stream_borrow_launch_token",
         ):
             self.assertNotIn(forbidden, self.source)
-        self.assertEqual(self.source.count("<<<"), 19)
-        self.assertEqual(self.source.count(", 0, stream>>>"), 19)
+        self.assertEqual(self.source.count("<<<"), 21)
+        self.assertEqual(self.source.count(", 0, stream>>>"), 21)
         self.assertNotIn("/usr/local/bin/seen", self.runner)
         self.assertNotIn("sudo", self.runner)
 

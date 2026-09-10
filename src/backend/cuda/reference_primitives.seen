@@ -55,6 +55,18 @@ extern "C" fun seen_qwen_partial_rope_f32(token: *const CudaStreamLaunchToken,
     tokens: UInt64, heads: UInt64, headDim: UInt64, rotaryDim: UInt64,
     positionOffset: UInt64, maxPosition: UInt64,
     theta: Float32) r: CudaNativeStatus
+extern "C" fun seen_qwen_attention_qk_rope_f32(
+    token: *const CudaStreamLaunchToken,
+    queryGateProjection: QwenCudaBufferView,
+    keyProjection: QwenCudaBufferView,
+    queryNormWeight: QwenCudaBufferView,
+    keyNormWeight: QwenCudaBufferView,
+    queryOutput: QwenCudaBufferView, keyOutput: QwenCudaBufferView,
+    gateOutput: QwenCudaBufferView,
+    tokens: UInt64, queryHeads: UInt64, kvHeads: UInt64,
+    headDim: UInt64, rotaryDim: UInt64, positionOffset: UInt64,
+    maxPosition: UInt64, theta: Float32,
+    epsilon: Float32) r: CudaNativeStatus
 extern "C" fun seen_qwen_kv_append_f32(token: *const CudaStreamLaunchToken,
     keys: QwenCudaBufferView, values: QwenCudaBufferView,
     keyCache: QwenCudaBufferView, valueCache: QwenCudaBufferView,
