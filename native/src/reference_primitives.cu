@@ -441,6 +441,96 @@ __global__ void attention_decode_f32(
             output[output_base + dimension], denominator);
 }
 
+// One correctness-oracle block integrates cache mutation and causal attention
+// in a single enqueue. This deliberately prioritizes transactional ordering and
+// deterministic reference results over production prefill throughput.
+__global__ void attention_prefill_f32(
+    const float *query, const float *keys, const float *values,
+    float *key_cache, float *value_cache, float *output,
+    uint64_t token_count, uint64_t query_heads, uint64_t kv_heads,
+    uint64_t head_dim, uint64_t start_position) {
+    if (blockIdx.x != 0) return;
+    __shared__ float reduction[kThreads];
+    __shared__ float running_max;
+    __shared__ float denominator;
+    __shared__ float previous_scale;
+    __shared__ float current_scale;
+    const uint64_t kv_width = kv_heads * head_dim;
+    const float scale = rsqrtf(static_cast<float>(head_dim));
+
+    for (uint64_t token_index = 0; token_index < token_count; ++token_index) {
+        const uint64_t source_base = token_index * kv_width;
+        const uint64_t cache_base = (start_position + token_index) * kv_width;
+        for (uint64_t index = threadIdx.x; index < kv_width;
+             index += blockDim.x) {
+            key_cache[cache_base + index] = keys[source_base + index];
+            value_cache[cache_base + index] = values[source_base + index];
+        }
+        __syncthreads();
+
+        const uint64_t causal_length = start_position + token_index + 1;
+        for (uint64_t query_head = 0; query_head < query_heads; ++query_head) {
+            const uint64_t kv_head =
+                query_head / (query_heads / kv_heads);
+            const uint64_t query_base =
+                (token_index * query_heads + query_head) * head_dim;
+            const uint64_t output_base = query_base;
+            for (uint64_t dimension = threadIdx.x; dimension < head_dim;
+                 dimension += blockDim.x)
+                output[output_base + dimension] = 0.0f;
+            if (threadIdx.x == 0) {
+                running_max = -INFINITY;
+                denominator = 0.0f;
+            }
+            __syncthreads();
+
+            for (uint64_t position = 0; position < causal_length; ++position) {
+                const uint64_t row =
+                    (position * kv_heads + kv_head) * head_dim;
+                float partial = 0.0f;
+                for (uint64_t dimension = threadIdx.x; dimension < head_dim;
+                     dimension += blockDim.x)
+                    partial = __fadd_rn(partial, __fmul_rn(
+                        query[query_base + dimension],
+                        key_cache[row + dimension]));
+                reduction[threadIdx.x] = partial;
+                __syncthreads();
+                for (uint32_t width = kThreads / 2; width != 0; width /= 2) {
+                    if (threadIdx.x < width)
+                        reduction[threadIdx.x] = __fadd_rn(
+                            reduction[threadIdx.x],
+                            reduction[threadIdx.x + width]);
+                    __syncthreads();
+                }
+                if (threadIdx.x == 0) {
+                    const float score = __fmul_rn(reduction[0], scale);
+                    const float next_max = fmaxf(running_max, score);
+                    previous_scale = position == 0 ? 0.0f
+                        : expf(running_max - next_max);
+                    current_scale = expf(score - next_max);
+                    denominator = __fadd_rn(__fmul_rn(
+                        denominator, previous_scale), current_scale);
+                    running_max = next_max;
+                }
+                __syncthreads();
+                for (uint64_t dimension = threadIdx.x; dimension < head_dim;
+                     dimension += blockDim.x) {
+                    const uint64_t index = output_base + dimension;
+                    output[index] = __fadd_rn(
+                        __fmul_rn(output[index], previous_scale),
+                        __fmul_rn(value_cache[row + dimension], current_scale));
+                }
+                __syncthreads();
+            }
+            for (uint64_t dimension = threadIdx.x; dimension < head_dim;
+                 dimension += blockDim.x)
+                output[output_base + dimension] = __fdividef(
+                    output[output_base + dimension], denominator);
+            __syncthreads();
+        }
+    }
+}
+
 __global__ void causal_conv_silu_f32(const float *input, const float *weights,
                                      float *history, float *output,
                                      uint64_t token_count, uint64_t channels,
@@ -1014,6 +1104,59 @@ extern "C" SeenCudaStatus seen_qwen_attention_decode_f32(
         pointer<const float>(query), pointer<const float>(key_cache),
         pointer<const float>(value_cache), pointer<float>(output),
         query_heads, kv_heads, head_dim, cache_length);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_attention_prefill_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView query,
+    SeenQwenCudaBufferView keys, SeenQwenCudaBufferView values,
+    SeenQwenCudaBufferView key_cache, SeenQwenCudaBufferView value_cache,
+    SeenQwenCudaBufferView output, uint64_t token_count,
+    uint64_t query_heads, uint64_t kv_heads, uint64_t head_dim,
+    uint64_t start_position, uint64_t cache_capacity) {
+    constexpr const char *op = "seen_qwen_attention_prefill_f32";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t query_rows = 0, query_count = 0, kv_width = 0;
+    uint64_t input_count = 0, cache_count = 0;
+    uint64_t query_bytes = 0, input_bytes = 0, cache_bytes = 0;
+    if (token_count == 0 || query_heads == 0 || kv_heads == 0 ||
+        query_heads % kv_heads != 0 || head_dim == 0 ||
+        start_position > cache_capacity ||
+        token_count > cache_capacity - start_position ||
+        !checked_multiply(token_count, query_heads, &query_rows) ||
+        !checked_multiply(query_rows, head_dim, &query_count) ||
+        !checked_multiply(kv_heads, head_dim, &kv_width) ||
+        !checked_multiply(token_count, kv_width, &input_count) ||
+        !checked_multiply(cache_capacity, kv_width, &cache_count) ||
+        !checked_multiply(query_count, sizeof(float), &query_bytes) ||
+        !checked_multiply(input_count, sizeof(float), &input_bytes) ||
+        !checked_multiply(cache_count, sizeof(float), &cache_bytes))
+        return invalid(token->device_ordinal, op,
+                       "invalid bounded attention prefill geometry");
+    const std::pair<SeenQwenCudaBufferView, uint64_t> views[] = {
+        {query, query_bytes}, {keys, input_bytes}, {values, input_bytes},
+        {key_cache, cache_bytes}, {value_cache, cache_bytes},
+        {output, query_bytes},
+    };
+    for (const auto &pair : views) {
+        checked = validate_view(pair.first, pair.second,
+                                token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    for (size_t left = 0; left < sizeof(views) / sizeof(views[0]); ++left)
+        for (size_t right = left + 1;
+             right < sizeof(views) / sizeof(views[0]); ++right)
+            if (overlaps(views[left].first, views[left].second,
+                         views[right].first, views[right].second))
+                return invalid(token->device_ordinal, op,
+                               "attention prefill buffers must be disjoint");
+    attention_prefill_f32<<<1, kThreads, 0, stream>>>(
+        pointer<const float>(query), pointer<const float>(keys),
+        pointer<const float>(values), pointer<float>(key_cache),
+        pointer<float>(value_cache), pointer<float>(output), token_count,
+        query_heads, kv_heads, head_dim, start_position);
     return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
 }
 

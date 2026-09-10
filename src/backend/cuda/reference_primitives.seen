@@ -148,6 +148,41 @@ pub class QwenCudaKvCache {
         return Ok<Bool, CudaError>(true)
     }
 
+    /// Append a bounded query chunk's keys/values and compute causal attention
+    /// for every query in one native enqueue. The cache length commits only
+    /// after the complete integrated launch has been accepted.
+    fun prefill(token: *const CudaStreamLaunchToken,
+        query: QwenCudaBufferView, keys: QwenCudaBufferView,
+        values: QwenCudaBufferView, output: QwenCudaBufferView,
+        tokenCount: UInt64, queryHeads: UInt64,
+        startPosition: UInt64) r: Result<Bool, CudaError> {
+        if this.closed or this.used > this.capacity or
+            this.keyAllocation.handle == (0 as UInt64) or
+            this.valueAllocation.handle == (0 as UInt64) or
+            this.keyAllocation.data == (null as *Void) or
+            this.valueAllocation.data == (null as *Void) or
+            this.keyAllocation.device != this.deviceOrdinal or
+            this.valueAllocation.device != this.deviceOrdinal or
+            this.keyAllocation.byteLength < this.byteLength or
+            this.valueAllocation.byteLength < this.byteLength or
+            startPosition != this.used or tokenCount == (0 as UInt64) or
+            tokenCount > this.capacity - this.used or
+            queryHeads == (0 as UInt64) or this.kvHeads == (0 as UInt64) or
+            queryHeads % this.kvHeads != (0 as UInt64) {
+            return Err<Bool, CudaError>(qwenCudaCacheError(this.deviceOrdinal,
+                "qwen.attention.prefill", "invalid live KV cache prefill state"))
+        }
+        let status = seen_qwen_attention_prefill_f32(token, query, keys,
+            values, this.keyView(), this.valueView(), output, tokenCount,
+            queryHeads, this.kvHeads, this.headDim, startPosition,
+            this.capacity)
+        if not cudaSucceeded(status) {
+            return Err<Bool, CudaError>(cudaError(status))
+        }
+        this.used = this.used + tokenCount
+        return Ok<Bool, CudaError>(true)
+    }
+
     fun close() r: Result<Bool, CudaError> {
         if this.closed { return Ok<Bool, CudaError>(false) }
         let valueClosed = this.valueAllocation.close()
@@ -271,6 +306,13 @@ extern "C" fun seen_qwen_attention_decode_f32(
     output: QwenCudaBufferView, queryHeads: UInt64, kvHeads: UInt64,
     headDim: UInt64, cacheLength: UInt64,
     cacheCapacity: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_attention_prefill_f32(
+    token: *const CudaStreamLaunchToken, query: QwenCudaBufferView,
+    keys: QwenCudaBufferView, values: QwenCudaBufferView,
+    keyCache: QwenCudaBufferView, valueCache: QwenCudaBufferView,
+    output: QwenCudaBufferView, tokenCount: UInt64,
+    queryHeads: UInt64, kvHeads: UInt64, headDim: UInt64,
+    startPosition: UInt64, cacheCapacity: UInt64) r: CudaNativeStatus
 extern "C" fun seen_qwen_greedy_argmax_f32(token: *const CudaStreamLaunchToken,
     logits: QwenCudaBufferView, tokenId: QwenCudaBufferView,
     rows: UInt64, width: UInt64, vocabularySize: UInt64) r: CudaNativeStatus
