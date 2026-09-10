@@ -2,8 +2,10 @@
 /// A token is borrowed from a live Seen-owned CudaStream and may be passed to
 /// exactly one launch function. These declarations never retain or own it.
 
-import accelerator.cuda.mod.{CudaStreamLaunchToken}
-import accelerator.cuda.error.{CudaNativeStatus}
+import accelerator.cuda.mod.{CudaAllocation, CudaStreamLaunchToken}
+import accelerator.cuda.error.{CudaNativeStatus, CudaError, cudaSucceeded,
+    cudaError}
+import core.result.{Result}
 
 let QWEN_CUDA_REFERENCE_ABI_VERSION: UInt32 = 1 as UInt32
 
@@ -14,6 +16,175 @@ class QwenCudaBufferView {
     var deviceOrdinal: Int32
     var address: UInt64
     var byteLength: UInt64
+}
+
+/// Move-only owner for one contiguous FP32 attention KV cache. Both device
+/// allocations remain Seen-owned. Native Qwen code borrows bounded views only
+/// for the duration of an immediately nested launch and never retains them.
+@move
+pub class QwenCudaKvCache {
+    var keyAllocation: CudaAllocation
+    var valueAllocation: CudaAllocation
+    var capacity: UInt64
+    var used: UInt64
+    var kvHeads: UInt64
+    var headDim: UInt64
+    var byteLength: UInt64
+    var deviceOrdinal: Int32
+    var closed: Bool
+
+    fun length() r: UInt64 {
+        if this.closed or this.used > this.capacity { return 0 as UInt64 }
+        return this.used
+    }
+
+    fun keyView() r: QwenCudaBufferView {
+        if this.closed or this.keyAllocation.handle == (0 as UInt64) or
+            this.keyAllocation.data == (null as *Void) or
+            this.keyAllocation.device != this.deviceOrdinal or
+            this.keyAllocation.byteLength < this.byteLength {
+            return QwenCudaBufferView{ abiVersion: QWEN_CUDA_REFERENCE_ABI_VERSION,
+                deviceOrdinal: this.deviceOrdinal, address: 0 as UInt64,
+                byteLength: 0 as UInt64 }
+        }
+        return QwenCudaBufferView{ abiVersion: QWEN_CUDA_REFERENCE_ABI_VERSION,
+            deviceOrdinal: this.deviceOrdinal,
+            address: this.keyAllocation.data as UInt64,
+            byteLength: this.byteLength }
+    }
+
+    fun valueView() r: QwenCudaBufferView {
+        if this.closed or this.valueAllocation.handle == (0 as UInt64) or
+            this.valueAllocation.data == (null as *Void) or
+            this.valueAllocation.device != this.deviceOrdinal or
+            this.valueAllocation.byteLength < this.byteLength {
+            return QwenCudaBufferView{ abiVersion: QWEN_CUDA_REFERENCE_ABI_VERSION,
+                deviceOrdinal: this.deviceOrdinal, address: 0 as UInt64,
+                byteLength: 0 as UInt64 }
+        }
+        return QwenCudaBufferView{ abiVersion: QWEN_CUDA_REFERENCE_ABI_VERSION,
+            deviceOrdinal: this.deviceOrdinal,
+            address: this.valueAllocation.data as UInt64,
+            byteLength: this.byteLength }
+    }
+
+    fun reset() r: Result<Bool, CudaError> {
+        if this.closed {
+            return Err<Bool, CudaError>(qwenCudaCacheError(this.deviceOrdinal,
+                "qwen.kv_cache.reset", "KV cache is closed"))
+        }
+        if this.used > this.capacity or this.keyAllocation.handle == (0 as UInt64) or
+            this.valueAllocation.handle == (0 as UInt64) or
+            this.keyAllocation.data == (null as *Void) or
+            this.valueAllocation.data == (null as *Void) or
+            this.keyAllocation.byteLength < this.byteLength or
+            this.valueAllocation.byteLength < this.byteLength {
+            return Err<Bool, CudaError>(qwenCudaCacheError(this.deviceOrdinal,
+                "qwen.kv_cache.reset", "KV cache ownership state is invalid"))
+        }
+        this.used = 0 as UInt64
+        return Ok<Bool, CudaError>(true)
+    }
+
+    fun append(token: *const CudaStreamLaunchToken,
+        keys: QwenCudaBufferView, values: QwenCudaBufferView,
+        tokenCount: UInt64, startPosition: UInt64)
+        r: Result<Bool, CudaError> {
+        if this.closed {
+            return Err<Bool, CudaError>(qwenCudaCacheError(this.deviceOrdinal,
+                "qwen.kv_cache.append", "KV cache is closed"))
+        }
+        if this.used > this.capacity or this.keyAllocation.handle == (0 as UInt64) or
+            this.valueAllocation.handle == (0 as UInt64) or
+            this.keyAllocation.data == (null as *Void) or
+            this.valueAllocation.data == (null as *Void) or
+            this.keyAllocation.device != this.deviceOrdinal or
+            this.valueAllocation.device != this.deviceOrdinal or
+            this.keyAllocation.byteLength < this.byteLength or
+            this.valueAllocation.byteLength < this.byteLength {
+            return Err<Bool, CudaError>(qwenCudaCacheError(this.deviceOrdinal,
+                "qwen.kv_cache.append", "KV cache ownership state is invalid"))
+        }
+        if startPosition != this.used {
+            return Err<Bool, CudaError>(qwenCudaCacheError(this.deviceOrdinal,
+                "qwen.kv_cache.append",
+                "cache append position must exactly equal the current length"))
+        }
+        if tokenCount == (0 as UInt64) or tokenCount > this.capacity - this.used {
+            return Err<Bool, CudaError>(qwenCudaCacheError(this.deviceOrdinal,
+                "qwen.kv_cache.append", "KV cache capacity would be exceeded"))
+        }
+        let status = seen_qwen_kv_append_f32(token, keys, values,
+            this.keyView(), this.valueView(), tokenCount, this.kvHeads,
+            this.headDim, startPosition, this.capacity)
+        if not cudaSucceeded(status) {
+            return Err<Bool, CudaError>(cudaError(status))
+        }
+        // The authoritative length changes only after validation and enqueue
+        // succeeded. Work remains ordered by the borrowed Seen stream.
+        this.used = this.used + tokenCount
+        return Ok<Bool, CudaError>(true)
+    }
+
+    fun close() r: Result<Bool, CudaError> {
+        if this.closed { return Ok<Bool, CudaError>(false) }
+        let valueClosed = this.valueAllocation.close()
+        let keyClosed = this.keyAllocation.close()
+        this.used = 0 as UInt64
+        if valueClosed.isErr() {
+            return Err<Bool, CudaError>(valueClosed.unwrapErr())
+        }
+        if keyClosed.isErr() {
+            return Err<Bool, CudaError>(keyClosed.unwrapErr())
+        }
+        this.byteLength = 0 as UInt64
+        this.closed = true
+        return Ok<Bool, CudaError>(true)
+    }
+}
+
+fun qwenCudaCacheError(deviceOrdinal: Int32, operation: String,
+    message: String) r: CudaError {
+    return CudaError{ code: 1 as Int32, nativeCode: 0 as Int32,
+        deviceOrdinal: deviceOrdinal, maturity: 2 as Int32,
+        operation: operation, message: message, sourceFile: "<qwen-cuda-cache>",
+        sourceLine: 0, sourceColumn: 0 }
+}
+
+pub fun createQwenCudaKvCache(deviceOrdinal: Int32, capacity: UInt64,
+    kvHeads: UInt64, headDim: UInt64) r: Result<QwenCudaKvCache, CudaError> {
+    let limit = 0x7FFFFFFFFFFFFFFF as UInt64
+    if deviceOrdinal < (0 as Int32) or capacity == (0 as UInt64) or
+        kvHeads == (0 as UInt64) or headDim == (0 as UInt64) or
+        kvHeads > limit / headDim {
+        return Err<QwenCudaKvCache, CudaError>(qwenCudaCacheError(deviceOrdinal,
+            "qwen.kv_cache.create", "invalid bounded KV cache geometry"))
+    }
+    let tokenWidth = kvHeads * headDim
+    if capacity > limit / tokenWidth {
+        return Err<QwenCudaKvCache, CudaError>(qwenCudaCacheError(deviceOrdinal,
+            "qwen.kv_cache.create", "KV cache element count overflows"))
+    }
+    let elements = capacity * tokenWidth
+    if elements > limit / (4 as UInt64) {
+        return Err<QwenCudaKvCache, CudaError>(qwenCudaCacheError(deviceOrdinal,
+            "qwen.kv_cache.create", "KV cache byte length overflows"))
+    }
+    let bytes = elements * (4 as UInt64)
+    let keys = CudaAllocation.allocate(deviceOrdinal, bytes)
+    if keys.isErr() {
+        return Err<QwenCudaKvCache, CudaError>(keys.unwrapErr())
+    }
+    let values = CudaAllocation.allocate(deviceOrdinal, bytes)
+    if values.isErr() {
+        let _ = keys.unwrap().close()
+        return Err<QwenCudaKvCache, CudaError>(values.unwrapErr())
+    }
+    return Ok<QwenCudaKvCache, CudaError>(QwenCudaKvCache{
+        keyAllocation: keys.unwrap(), valueAllocation: values.unwrap(),
+        capacity: capacity, used: 0 as UInt64, kvHeads: kvHeads,
+        headDim: headDim, byteLength: bytes, deviceOrdinal: deviceOrdinal,
+        closed: false })
 }
 
 extern "C" fun seen_qwen_fill_f32(token: *const CudaStreamLaunchToken,

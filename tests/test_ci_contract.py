@@ -119,6 +119,10 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("tests/qwn_042a_attention_qk_test.seen --frozen", self.inner)
         self.assertIn("qwn_042a_attention_qk_test_fast", self.inner)
         self.assertIn("qwn_042a_attention_qk_test", self.inner)
+        self.assertIn("tests/test_cuda_kv_cache.py", self.inner)
+        self.assertIn("tests/qwn_042b_kv_cache_test.seen --frozen", self.inner)
+        self.assertIn("qwn_042b_kv_cache_test_fast", self.inner)
+        self.assertIn("qwn_042b_kv_cache_test", self.inner)
 
     def test_seen_release_provenance_is_exact_and_current(self) -> None:
         compiler_sha256 = (
