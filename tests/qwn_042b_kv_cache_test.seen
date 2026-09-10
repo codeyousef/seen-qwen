@@ -1,0 +1,28 @@
+import accelerator.cuda.mod.{CudaAllocation}
+import seen_qwen.backend.cuda.reference_primitives.{QwenCudaKvCache,
+    QWEN_CUDA_REFERENCE_ABI_VERSION}
+
+fun main() r: Int {
+    let cache = QwenCudaKvCache{
+        keyAllocation: CudaAllocation{ handle: 1 as UInt64,
+            data: 1 as *Void, byteLength: 32768 as UInt64,
+            device: 0 as Int32 },
+        valueAllocation: CudaAllocation{ handle: 2 as UInt64,
+            data: 2 as *Void, byteLength: 32768 as UInt64,
+            device: 0 as Int32 },
+        capacity: 8 as UInt64, used: 3 as UInt64,
+        kvHeads: 4 as UInt64, headDim: 256 as UInt64,
+        byteLength: 32768 as UInt64, deviceOrdinal: 0 as Int32,
+        closed: false
+    }
+    if cache.length() != (3 as UInt64) { return 1 }
+    let keys = cache.keyView()
+    if keys.abiVersion != QWEN_CUDA_REFERENCE_ABI_VERSION or
+        keys.byteLength != (8 as UInt64) * (4 as UInt64) *
+            (256 as UInt64) * (4 as UInt64) { return 2 }
+    if cache.reset().isErr() or cache.length() != (0 as UInt64) { return 3 }
+    println("PASS: QWN-042B Seen-owned deterministic KV-cache surface")
+    return 0
+}
+
+main()
