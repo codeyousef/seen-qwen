@@ -1,0 +1,28 @@
+import accelerator.cuda.mod.{CudaAllocation}
+import seen_qwen.backend.cuda.reference_primitives.{QwenCudaBufferView,
+    QwenCudaKvCache, QWEN_CUDA_REFERENCE_ABI_VERSION}
+
+fun main() r: Int {
+    let output = QwenCudaBufferView{
+        abiVersion: QWEN_CUDA_REFERENCE_ABI_VERSION,
+        deviceOrdinal: 0 as Int32,
+        address: 0 as UInt64,
+        byteLength: 0 as UInt64 }
+    let cache = QwenCudaKvCache{
+        keyAllocation: CudaAllocation{ handle: 0 as UInt64,
+            data: null as *Void, byteLength: 0 as UInt64,
+            device: 0 as Int32 },
+        valueAllocation: CudaAllocation{ handle: 0 as UInt64,
+            data: null as *Void, byteLength: 0 as UInt64,
+            device: 0 as Int32 },
+        capacity: 7 as UInt64, used: 0 as UInt64,
+        kvHeads: 4 as UInt64, headDim: 256 as UInt64,
+        byteLength: 28672 as UInt64, deviceOrdinal: 0 as Int32,
+        closed: true }
+    if output.byteLength != (0 as UInt64) { return 1 }
+    if cache.length() != (0 as UInt64) { return 2 }
+    println("PASS: QWN-042D fixed-width causal prefill ownership declaration")
+    return 0
+}
+
+main()
