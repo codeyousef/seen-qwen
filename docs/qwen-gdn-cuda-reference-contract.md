@@ -1,10 +1,11 @@
-# Qwen GDN CUDA state and causal-convolution reference contract
+# Qwen GDN CUDA state, convolution, and recurrent-decode reference contract
 
 FEL-1433 / QWN-041A adds the first Gated DeltaNet CUDA state operation. The
 reference path is deliberately narrow: FP32 causal depthwise convolution with
 the official Qwen convolution length of four, followed by SiLU. Recurrent
 delta-state update, chunk prefill, and gated output belong to later QWN-041
-leaves.
+leaves. FEL-1436 / QWN-041B adds the single-token recurrent DeltaNet decode
+step; multi-token chunk prefill and gated output remain later leaves.
 
 ## Layout and semantics
 
@@ -21,24 +22,40 @@ leaves.
 - The official model boundary is 10,240 channels: two 2,048-wide Q/K
   projections plus one 6,144-wide value projection.
 
+## Recurrent decode semantics
+
+- `query` and `key` are contiguous `[value_heads, key_dim]` FP32 views;
+  `value` and `output` are `[value_heads, value_dim]`; `beta` and `log_decay`
+  are `[value_heads]`.
+- `state` is caller-owned `[value_heads, key_dim, value_dim]` FP32 storage.
+  For each head, a successful decode multiplies state by `exp(log_decay)`,
+  computes the key-weighted memory, applies `(value - memory) * beta` as the
+  rank-one delta, and emits the updated state's query projection.
+- `start_position` must equal `processed_position`, and advancing by the one
+  decoded token must not overflow. All seven views must be distinct.
+- The official boundary is 48 value heads with key and value dimensions 128;
+  smaller positive geometries are supported for differential evidence.
+
 ## Ownership and execution
 
 Seen owns every allocation and the stream. The adapter borrows the ledgered
 `SeenCudaStreamLaunchToken`, validates fixed-width device views, and enqueues
 one model-owned `seen_qwen_*` kernel on that exact stream. It neither allocates
 nor retains state, creates or destroys streams, synchronizes, decodes an opaque
-handle, applies fallback, or owns policy. History and output remain valid only
-under the caller's normal Seen allocation lifetime.
+handle, applies fallback, or owns policy. History, recurrent state, and outputs
+remain valid only under the caller's normal Seen allocation lifetime.
 
 ## Errors and maturity
 
 Missing or incompatible tokens, wrong device/allocation identity, invalid or
 overflowing geometry, stale positions, undersized views, and unsupported
 overlap fail before enqueue with stable Seen CUDA status categories. Device
-data is never copied to the host for validation. This leaf is
+data is never copied to the host for validation. There is no fallback. This
+corpus is
 `experimental-hardware` until the complete QWN-041 corpus is certified.
 
-The focused gate is `scripts/cuda/run_qwn_041a.sh`. It uses audited Seen
+The focused gates are `scripts/cuda/run_qwn_041a.sh` and
+`scripts/cuda/run_qwn_041b.sh`. They use audited Seen
 v0.20.4, a current-memory-derived swap-disabled hard scope, one build worker,
 RTX 4090 CPU/CUDA differential and state-continuity checks, CUDA graph capture,
 deterministic teardown, and Compute Sanitizer memcheck, initcheck, racecheck,
