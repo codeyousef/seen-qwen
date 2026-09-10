@@ -34,3 +34,36 @@ extern "C" fun seen_qwen_embedding_gather_f32(
     token: *const CudaStreamLaunchToken, table: QwenCudaBufferView,
     tokenIds: QwenCudaBufferView, output: QwenCudaBufferView,
     tokenCount: UInt64, vocabularySize: UInt64, width: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_rms_norm_f32(token: *const CudaStreamLaunchToken,
+    input: QwenCudaBufferView, weight: QwenCudaBufferView,
+    output: QwenCudaBufferView, rows: UInt64, width: UInt64,
+    epsilon: Float32) r: CudaNativeStatus
+extern "C" fun seen_qwen_l2_norm_f32(token: *const CudaStreamLaunchToken,
+    input: QwenCudaBufferView, output: QwenCudaBufferView,
+    rows: UInt64, width: UInt64, epsilon: Float32) r: CudaNativeStatus
+extern "C" fun seen_qwen_silu_f32(token: *const CudaStreamLaunchToken,
+    input: QwenCudaBufferView, output: QwenCudaBufferView,
+    count: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_swiglu_f32(token: *const CudaStreamLaunchToken,
+    gate: QwenCudaBufferView, up: QwenCudaBufferView,
+    output: QwenCudaBufferView, count: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_sigmoid_gate_f32(token: *const CudaStreamLaunchToken,
+    input: QwenCudaBufferView, gate: QwenCudaBufferView,
+    output: QwenCudaBufferView, count: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_partial_rope_f32(token: *const CudaStreamLaunchToken,
+    input: QwenCudaBufferView, output: QwenCudaBufferView,
+    tokens: UInt64, heads: UInt64, headDim: UInt64, rotaryDim: UInt64,
+    positionOffset: UInt64, maxPosition: UInt64,
+    theta: Float32) r: CudaNativeStatus
+extern "C" fun seen_qwen_kv_append_f32(token: *const CudaStreamLaunchToken,
+    keys: QwenCudaBufferView, values: QwenCudaBufferView,
+    keyCache: QwenCudaBufferView, valueCache: QwenCudaBufferView,
+    tokenCount: UInt64, kvHeads: UInt64, headDim: UInt64,
+    startPosition: UInt64, capacity: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_greedy_argmax_f32(token: *const CudaStreamLaunchToken,
+    logits: QwenCudaBufferView, tokenId: QwenCudaBufferView,
+    rows: UInt64, width: UInt64, vocabularySize: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_top_k_f32(token: *const CudaStreamLaunchToken,
+    logits: QwenCudaBufferView, tokenIds: QwenCudaBufferView,
+    values: QwenCudaBufferView, rows: UInt64, width: UInt64,
+    vocabularySize: UInt64, topK: UInt64) r: CudaNativeStatus

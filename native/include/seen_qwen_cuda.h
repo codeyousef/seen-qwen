@@ -38,6 +38,42 @@ SeenCudaStatus seen_qwen_embedding_gather_f32(
     const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView table,
     SeenQwenCudaBufferView token_ids, SeenQwenCudaBufferView output,
     uint64_t token_count, uint64_t vocabulary_size, uint64_t width);
+SeenCudaStatus seen_qwen_rms_norm_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView weight, SeenQwenCudaBufferView output,
+    uint64_t rows, uint64_t width, float epsilon);
+SeenCudaStatus seen_qwen_l2_norm_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView output, uint64_t rows, uint64_t width,
+    float epsilon);
+SeenCudaStatus seen_qwen_silu_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView output, uint64_t count);
+SeenCudaStatus seen_qwen_swiglu_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView gate,
+    SeenQwenCudaBufferView up, SeenQwenCudaBufferView output, uint64_t count);
+SeenCudaStatus seen_qwen_sigmoid_gate_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView gate, SeenQwenCudaBufferView output, uint64_t count);
+SeenCudaStatus seen_qwen_partial_rope_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView output, uint64_t tokens, uint64_t heads,
+    uint64_t head_dim, uint64_t rotary_dim, uint64_t position_offset,
+    uint64_t max_position, float theta);
+SeenCudaStatus seen_qwen_kv_append_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView keys,
+    SeenQwenCudaBufferView values, SeenQwenCudaBufferView key_cache,
+    SeenQwenCudaBufferView value_cache, uint64_t token_count,
+    uint64_t kv_heads, uint64_t head_dim, uint64_t start_position,
+    uint64_t capacity);
+SeenCudaStatus seen_qwen_greedy_argmax_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView logits,
+    SeenQwenCudaBufferView token_id, uint64_t rows, uint64_t width,
+    uint64_t vocabulary_size);
+SeenCudaStatus seen_qwen_top_k_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView logits,
+    SeenQwenCudaBufferView token_ids, SeenQwenCudaBufferView values,
+    uint64_t rows, uint64_t width, uint64_t vocabulary_size, uint64_t top_k);
 
 #ifdef __cplusplus
 }

@@ -42,3 +42,10 @@ add_executable(qwn_040a_header_contract tests/header_contract.c)
 target_include_directories(qwn_040a_header_contract PRIVATE
   include "${SEEN_CUDA_SOURCE_ROOT}/include")
 target_compile_options(qwn_040a_header_contract PRIVATE -Wall -Wextra -Werror)
+
+add_executable(qwn_040b_cuda_test tests/reference_utilities_test.cu)
+target_link_libraries(qwn_040b_cuda_test PRIVATE seen_qwen_cuda seen_cuda CUDA::cudart)
+target_compile_options(qwn_040b_cuda_test PRIVATE
+  $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Werror>
+  $<$<COMPILE_LANGUAGE:CUDA>:--threads=1;--Werror=cross-execution-space-call>)
+set_target_properties(qwn_040b_cuda_test PROPERTIES BUILD_RPATH "$ORIGIN;$ORIGIN/seen_cuda_build")
