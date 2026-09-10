@@ -244,6 +244,42 @@ pub fun createQwenCudaKvCache(deviceOrdinal: Int32, capacity: UInt64,
         closed: false })
 }
 
+/// Flatten the full-attention head output and apply the gate branch emitted by
+/// q_proj. The resulting `[tokens, queryHeads * headDim]` buffer is the exact
+/// input expected by the separately owned output-projection path.
+pub fun qwenCudaAttentionOutputGate(token: *const CudaStreamLaunchToken,
+    attended: QwenCudaBufferView, gate: QwenCudaBufferView,
+    output: QwenCudaBufferView, tokenCount: UInt64,
+    queryHeads: UInt64, headDim: UInt64) r: Result<Bool, CudaError> {
+    let limit = 0x7FFFFFFFFFFFFFFF as UInt64
+    if tokenCount == (0 as UInt64) or queryHeads == (0 as UInt64) or
+        headDim == (0 as UInt64) or tokenCount > limit / queryHeads {
+        return Err<Bool, CudaError>(qwenCudaAttentionError(output.deviceOrdinal,
+            "qwen.attention.output_gate", "invalid bounded attention gate geometry"))
+    }
+    let rows = tokenCount * queryHeads
+    if rows > limit / headDim {
+        return Err<Bool, CudaError>(qwenCudaAttentionError(output.deviceOrdinal,
+            "qwen.attention.output_gate", "attention gate element count overflows"))
+    }
+    let count = rows * headDim
+    let status = seen_qwen_sigmoid_gate_f32(token, attended, gate, output,
+        count)
+    if not cudaSucceeded(status) {
+        return Err<Bool, CudaError>(cudaError(status))
+    }
+    return Ok<Bool, CudaError>(true)
+}
+
+fun qwenCudaAttentionError(deviceOrdinal: Int32, operation: String,
+    message: String) r: CudaError {
+    return CudaError{ code: 1 as Int32, nativeCode: 0 as Int32,
+        deviceOrdinal: deviceOrdinal, maturity: 2 as Int32,
+        operation: operation, message: message,
+        sourceFile: "<qwen-cuda-attention>", sourceLine: 0,
+        sourceColumn: 0 }
+}
+
 extern "C" fun seen_qwen_fill_f32(token: *const CudaStreamLaunchToken,
     output: QwenCudaBufferView, count: UInt64, value: Float32) r: CudaNativeStatus
 extern "C" fun seen_qwen_add_f32(token: *const CudaStreamLaunchToken,
