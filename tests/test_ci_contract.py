@@ -91,12 +91,18 @@ class CiContractTests(unittest.TestCase):
 
     def test_cuda_reference_contract_is_required(self) -> None:
         self.assertIn("tests/test_cuda_reference_primitives.py", self.inner)
+        self.assertIn("tests/test_cuda_reference_utilities.py", self.inner)
         self.assertIn(
             "tests/qwn_040a_reference_primitives_test.seen --frozen", self.inner
         )
         self.assertIn("qwn_030b_sqw_reader_test_fast", self.inner)
         self.assertIn("qwn_040a_reference_primitives_test_fast", self.inner)
         self.assertIn("qwn_040a_reference_primitives_test", self.inner)
+        self.assertIn(
+            "tests/qwn_040b_reference_utilities_test.seen --frozen", self.inner
+        )
+        self.assertIn("qwn_040b_reference_utilities_test_fast", self.inner)
+        self.assertIn("qwn_040b_reference_utilities_test", self.inner)
 
     def test_seen_release_provenance_is_exact_and_current(self) -> None:
         compiler_sha256 = (

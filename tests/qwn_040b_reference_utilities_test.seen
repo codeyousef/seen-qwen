@@ -1,0 +1,16 @@
+import seen_qwen.backend.cuda.reference_primitives.{QWEN_CUDA_REFERENCE_ABI_VERSION,
+    QwenCudaBufferView}
+
+fun main() r: Int {
+    let view = QwenCudaBufferView{
+        abiVersion: QWEN_CUDA_REFERENCE_ABI_VERSION,
+        deviceOrdinal: 0 as Int32,
+        address: 0 as UInt64,
+        byteLength: 4096 as UInt64
+    }
+    if view.abiVersion != QWEN_CUDA_REFERENCE_ABI_VERSION { return 1 }
+    println("PASS: QWN-040B fixed-width Seen CUDA utility declarations")
+    return 0
+}
+
+main()

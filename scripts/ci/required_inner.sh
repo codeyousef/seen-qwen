@@ -103,6 +103,7 @@ outside_objects_before=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o \
 "$SEEN_PACKAGE_CLIENT" --expect-version 0.20.4 version |
     grep -Fx 'seen-pkg 0.20.4 (SEENPKG1)'
 python3 -m unittest tests/test_ci_contract.py tests/test_cuda_reference_primitives.py \
+    tests/test_cuda_reference_utilities.py \
     tests/test_qwen_tokenizer_oracles.py \
     tests/test_sampling_profiles.py tests/test_hybrid_mini_contract.py \
     tests/test_hybrid_mini_assets.py tests/test_hybrid_mini_oracle.py \
@@ -140,6 +141,7 @@ python3 -m unittest tests/test_ci_contract.py tests/test_cuda_reference_primitiv
 "$SEEN_COMPILER" check tests/qwn_033c_policy_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_034a_engine_artifact_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_040a_reference_primitives_test.seen --frozen
+"$SEEN_COMPILER" check tests/qwn_040b_reference_utilities_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022d_sampling_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022b_tokenizer_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022c_chat_template_test.seen --frozen
@@ -159,6 +161,16 @@ python3 -m unittest tests/test_ci_contract.py tests/test_cuda_reference_primitiv
     --release --lto=thin --target-cpu=x86-64 --no-cache \
     --jobs 1 --opt-jobs 1 --no-fork --frozen
 "$OUTPUT_ROOT/qwn_040a_reference_primitives_test"
+"$SEEN_COMPILER" compile tests/qwn_040b_reference_utilities_test.seen \
+    "$OUTPUT_ROOT/qwn_040b_reference_utilities_test_fast" \
+    --target-cpu=x86-64 --no-cache \
+    --jobs 1 --opt-jobs 1 --no-fork --frozen
+"$OUTPUT_ROOT/qwn_040b_reference_utilities_test_fast"
+"$SEEN_COMPILER" compile tests/qwn_040b_reference_utilities_test.seen \
+    "$OUTPUT_ROOT/qwn_040b_reference_utilities_test" \
+    --release --lto=thin --target-cpu=x86-64 --no-cache \
+    --jobs 1 --opt-jobs 1 --no-fork --frozen
+"$OUTPUT_ROOT/qwn_040b_reference_utilities_test"
 "$SEEN_COMPILER" compile tests/qwn_024e_cpu_engine_test.seen \
     "$OUTPUT_ROOT/qwn_024e_cpu_engine_test" \
     --release --lto=thin --target-cpu=x86-64 --no-cache \

@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <limits>
 #include <utility>
 
@@ -183,6 +184,144 @@ __global__ void embedding_gather_f32(const float *table,
         : __int_as_float(0x7fffffff);
 }
 
+__global__ void rms_norm_f32(const float *input, const float *weight,
+                             float *output, uint64_t rows, uint64_t width,
+                             float epsilon) {
+    const uint64_t row = blockIdx.x;
+    if (row >= rows || threadIdx.x != 0) return;
+    float sum = 0.0f;
+    for (uint64_t column = 0; column < width; ++column) {
+        const float value = input[row * width + column];
+        sum = __fadd_rn(sum, __fmul_rn(value, value));
+    }
+    const float inverse = __fdividef(1.0f, sqrtf(__fadd_rn(
+        __fdividef(sum, static_cast<float>(width)), epsilon)));
+    for (uint64_t column = 0; column < width; ++column) {
+        const uint64_t index = row * width + column;
+        output[index] = __fmul_rn(__fmul_rn(input[index], inverse),
+                                  __fadd_rn(1.0f, weight[column]));
+    }
+}
+
+__global__ void l2_norm_f32(const float *input, float *output,
+                            uint64_t rows, uint64_t width, float epsilon) {
+    const uint64_t row = blockIdx.x;
+    if (row >= rows || threadIdx.x != 0) return;
+    float sum = 0.0f;
+    for (uint64_t column = 0; column < width; ++column) {
+        const float value = input[row * width + column];
+        sum = __fadd_rn(sum, __fmul_rn(value, value));
+    }
+    const float inverse = __fdividef(1.0f, sqrtf(__fadd_rn(sum, epsilon)));
+    for (uint64_t column = 0; column < width; ++column) {
+        const uint64_t index = row * width + column;
+        output[index] = __fmul_rn(input[index], inverse);
+    }
+}
+
+__global__ void silu_f32(const float *input, float *output, uint64_t count) {
+    const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+        threadIdx.x;
+    if (index < count)
+        output[index] = __fdividef(input[index], __fadd_rn(1.0f, expf(-input[index])));
+}
+
+__global__ void swiglu_f32(const float *gate, const float *up, float *output,
+                           uint64_t count) {
+    const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+        threadIdx.x;
+    if (index < count) {
+        const float activated = __fdividef(gate[index],
+            __fadd_rn(1.0f, expf(-gate[index])));
+        output[index] = __fmul_rn(activated, up[index]);
+    }
+}
+
+__global__ void sigmoid_gate_f32(const float *input, const float *gate,
+                                 float *output, uint64_t count) {
+    const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+        threadIdx.x;
+    if (index < count) {
+        const float sigmoid = __fdividef(1.0f,
+            __fadd_rn(1.0f, expf(-gate[index])));
+        output[index] = __fmul_rn(input[index], sigmoid);
+    }
+}
+
+__global__ void partial_rope_f32(const float *input, float *output,
+                                 uint64_t count, uint64_t heads,
+                                 uint64_t head_dim, uint64_t rotary_dim,
+                                 uint64_t position_offset, float theta) {
+    const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+        threadIdx.x;
+    if (index >= count) return;
+    const uint64_t dimension = index % head_dim;
+    if (dimension >= rotary_dim) { output[index] = input[index]; return; }
+    const uint64_t half = rotary_dim / 2;
+    const uint64_t token = index / (heads * head_dim);
+    const uint64_t row_base = index - dimension;
+    const uint64_t frequency_index = dimension % half;
+    const float exponent = static_cast<float>(frequency_index * 2) /
+        static_cast<float>(rotary_dim);
+    const float angle = static_cast<float>(position_offset + token) /
+        powf(theta, exponent);
+    const uint64_t rotated_dimension = dimension < half
+        ? dimension + half : dimension - half;
+    const float rotated = dimension < half
+        ? -input[row_base + rotated_dimension]
+        : input[row_base + rotated_dimension];
+    output[index] = __fadd_rn(__fmul_rn(input[index], cosf(angle)),
+                              __fmul_rn(rotated, sinf(angle)));
+}
+
+__global__ void kv_append_f32(const float *keys, const float *values,
+                              float *key_cache, float *value_cache,
+                              uint64_t count, uint64_t destination_offset) {
+    const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+        threadIdx.x;
+    if (index < count) {
+        key_cache[destination_offset + index] = keys[index];
+        value_cache[destination_offset + index] = values[index];
+    }
+}
+
+__global__ void greedy_argmax_f32(const float *logits, int32_t *token_ids,
+                                  uint64_t rows, uint64_t width,
+                                  uint64_t vocabulary_size) {
+    const uint64_t row = blockIdx.x;
+    if (row >= rows || threadIdx.x != 0) return;
+    const float *values = logits + row * width;
+    uint64_t best = 0;
+    for (uint64_t token = 1; token < vocabulary_size; ++token) {
+        if ((isnan(values[best]) && !isnan(values[token])) ||
+            values[token] > values[best]) best = token;
+    }
+    token_ids[row] = static_cast<int32_t>(best);
+}
+
+__global__ void top_k_f32(const float *logits, int32_t *token_ids,
+                          float *top_values, uint64_t rows, uint64_t width,
+                          uint64_t vocabulary_size, uint64_t top_k) {
+    const uint64_t row = blockIdx.x;
+    if (row >= rows || threadIdx.x != 0) return;
+    const float *values = logits + row * width;
+    for (uint64_t rank = 0; rank < top_k; ++rank) {
+        uint64_t best = UINT64_MAX;
+        for (uint64_t token = 0; token < vocabulary_size; ++token) {
+            bool selected = false;
+            for (uint64_t previous = 0; previous < rank; ++previous)
+                if (token_ids[row * top_k + previous] == static_cast<int32_t>(token))
+                    selected = true;
+            if (selected) continue;
+            if (best == UINT64_MAX ||
+                (isnan(values[best]) && !isnan(values[token])) ||
+                values[token] > values[best]) best = token;
+        }
+        token_ids[row * top_k + rank] = static_cast<int32_t>(best);
+        top_values[row * top_k + rank] = values[best];
+    }
+}
+
 }  // namespace
 
 extern "C" SeenCudaStatus seen_qwen_fill_f32(
@@ -299,5 +438,240 @@ extern "C" SeenCudaStatus seen_qwen_embedding_gather_f32(
         return invalid(token->device_ordinal, op,
                        "overlapping embedding buffers are unsupported");
     embedding_gather_f32<<<blocks, kThreads, 0, stream>>>(pointer<const float>(table), pointer<const int32_t>(token_ids), pointer<float>(output), token_count, vocabulary_size, width, output_count);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_rms_norm_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView weight, SeenQwenCudaBufferView output,
+    uint64_t rows, uint64_t width, float epsilon) {
+    constexpr const char *op = "seen_qwen_rms_norm_f32";
+    cudaStream_t stream{}; SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t count = 0, bytes = 0, weight_bytes = 0;
+    if (!checked_multiply(rows, width, &count) ||
+        !checked_multiply(count, sizeof(float), &bytes) ||
+        !checked_multiply(width, sizeof(float), &weight_bytes) ||
+        rows == 0 || width == 0 || rows > UINT32_MAX ||
+        !(epsilon > 0.0f) || !std::isfinite(epsilon))
+        return invalid(token->device_ordinal, op, "invalid RMSNorm geometry or epsilon");
+    for (const auto &pair : {std::pair<SeenQwenCudaBufferView, uint64_t>{input, bytes},
+             {weight, weight_bytes}, {output, bytes}}) {
+        checked = validate_view(pair.first, pair.second, token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    if ((overlaps(input, bytes, output, bytes) && input.address != output.address) ||
+        overlaps(weight, weight_bytes, output, bytes))
+        return invalid(token->device_ordinal, op, "unsupported RMSNorm buffer overlap");
+    rms_norm_f32<<<static_cast<uint32_t>(rows), 1, 0, stream>>>(
+        pointer<const float>(input), pointer<const float>(weight),
+        pointer<float>(output), rows, width, epsilon);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_l2_norm_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView output, uint64_t rows, uint64_t width,
+    float epsilon) {
+    constexpr const char *op = "seen_qwen_l2_norm_f32";
+    cudaStream_t stream{}; SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t count = 0, bytes = 0;
+    if (!checked_multiply(rows, width, &count) ||
+        !checked_multiply(count, sizeof(float), &bytes) || rows == 0 ||
+        width == 0 || rows > UINT32_MAX || !(epsilon > 0.0f) ||
+        !std::isfinite(epsilon))
+        return invalid(token->device_ordinal, op, "invalid L2 normalization geometry or epsilon");
+    checked = validate_view(input, bytes, token->device_ordinal, op);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    checked = validate_view(output, bytes, token->device_ordinal, op);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    if (overlaps(input, bytes, output, bytes) && input.address != output.address)
+        return invalid(token->device_ordinal, op, "partially overlapping L2 buffers are unsupported");
+    l2_norm_f32<<<static_cast<uint32_t>(rows), 1, 0, stream>>>(
+        pointer<const float>(input), pointer<float>(output), rows, width, epsilon);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_silu_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView output, uint64_t count) {
+    constexpr const char *op = "seen_qwen_silu_f32";
+    cudaStream_t stream{}; SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t bytes = 0; uint32_t blocks = 0;
+    if (!checked_multiply(count, sizeof(float), &bytes) || !launch_shape(count, &blocks))
+        return invalid(token->device_ordinal, op, "invalid element count");
+    checked = validate_view(input, bytes, token->device_ordinal, op);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    checked = validate_view(output, bytes, token->device_ordinal, op);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    if (overlaps(input, bytes, output, bytes) && input.address != output.address)
+        return invalid(token->device_ordinal, op, "partially overlapping SiLU buffers are unsupported");
+    silu_f32<<<blocks, kThreads, 0, stream>>>(pointer<const float>(input), pointer<float>(output), count);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_swiglu_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView gate,
+    SeenQwenCudaBufferView up, SeenQwenCudaBufferView output, uint64_t count) {
+    constexpr const char *op = "seen_qwen_swiglu_f32";
+    cudaStream_t stream{}; SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t bytes = 0; uint32_t blocks = 0;
+    if (!checked_multiply(count, sizeof(float), &bytes) || !launch_shape(count, &blocks))
+        return invalid(token->device_ordinal, op, "invalid element count");
+    for (const auto &view : {gate, up, output}) {
+        checked = validate_view(view, bytes, token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    if ((overlaps(gate, bytes, output, bytes) && gate.address != output.address) ||
+        (overlaps(up, bytes, output, bytes) && up.address != output.address))
+        return invalid(token->device_ordinal, op, "partially overlapping SwiGLU buffers are unsupported");
+    swiglu_f32<<<blocks, kThreads, 0, stream>>>(pointer<const float>(gate), pointer<const float>(up), pointer<float>(output), count);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_sigmoid_gate_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView gate, SeenQwenCudaBufferView output, uint64_t count) {
+    constexpr const char *op = "seen_qwen_sigmoid_gate_f32";
+    cudaStream_t stream{}; SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t bytes = 0; uint32_t blocks = 0;
+    if (!checked_multiply(count, sizeof(float), &bytes) || !launch_shape(count, &blocks))
+        return invalid(token->device_ordinal, op, "invalid element count");
+    for (const auto &view : {input, gate, output}) {
+        checked = validate_view(view, bytes, token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    if ((overlaps(input, bytes, output, bytes) && input.address != output.address) ||
+        (overlaps(gate, bytes, output, bytes) && gate.address != output.address))
+        return invalid(token->device_ordinal, op, "partially overlapping gate buffers are unsupported");
+    sigmoid_gate_f32<<<blocks, kThreads, 0, stream>>>(pointer<const float>(input), pointer<const float>(gate), pointer<float>(output), count);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_partial_rope_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView output, uint64_t tokens, uint64_t heads,
+    uint64_t head_dim, uint64_t rotary_dim, uint64_t position_offset,
+    uint64_t max_position, float theta) {
+    constexpr const char *op = "seen_qwen_partial_rope_f32";
+    cudaStream_t stream{}; SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t rows = 0, count = 0, bytes = 0; uint32_t blocks = 0;
+    if (!checked_multiply(tokens, heads, &rows) ||
+        !checked_multiply(rows, head_dim, &count) ||
+        !checked_multiply(count, sizeof(float), &bytes) ||
+        !launch_shape(count, &blocks) || rotary_dim == 0 ||
+        rotary_dim > head_dim || rotary_dim % 2 != 0 ||
+        !(theta > 0.0f) || !std::isfinite(theta) ||
+        position_offset > max_position || tokens > max_position - position_offset)
+        return invalid(token->device_ordinal, op, "invalid bounded RoPE geometry");
+    checked = validate_view(input, bytes, token->device_ordinal, op);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    checked = validate_view(output, bytes, token->device_ordinal, op);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    if (overlaps(input, bytes, output, bytes))
+        return invalid(token->device_ordinal, op, "overlapping RoPE buffers are unsupported");
+    partial_rope_f32<<<blocks, kThreads, 0, stream>>>(pointer<const float>(input),
+        pointer<float>(output), count, heads, head_dim, rotary_dim,
+        position_offset, theta);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_kv_append_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView keys,
+    SeenQwenCudaBufferView values, SeenQwenCudaBufferView key_cache,
+    SeenQwenCudaBufferView value_cache, uint64_t token_count,
+    uint64_t kv_heads, uint64_t head_dim, uint64_t start_position,
+    uint64_t capacity) {
+    constexpr const char *op = "seen_qwen_kv_append_f32";
+    cudaStream_t stream{}; SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t token_width = 0, count = 0, cache_count = 0, bytes = 0;
+    uint64_t cache_bytes = 0, destination_offset = 0; uint32_t blocks = 0;
+    if (!checked_multiply(kv_heads, head_dim, &token_width) ||
+        !checked_multiply(token_count, token_width, &count) ||
+        !checked_multiply(capacity, token_width, &cache_count) ||
+        !checked_multiply(count, sizeof(float), &bytes) ||
+        !checked_multiply(cache_count, sizeof(float), &cache_bytes) ||
+        !checked_multiply(start_position, token_width, &destination_offset) ||
+        !launch_shape(count, &blocks) || start_position > capacity ||
+        token_count > capacity - start_position)
+        return invalid(token->device_ordinal, op, "invalid bounded KV append geometry");
+    for (const auto &pair : {std::pair<SeenQwenCudaBufferView, uint64_t>{keys, bytes},
+             {values, bytes}, {key_cache, cache_bytes}, {value_cache, cache_bytes}}) {
+        checked = validate_view(pair.first, pair.second, token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    if (overlaps(keys, bytes, key_cache, cache_bytes) ||
+        overlaps(keys, bytes, value_cache, cache_bytes) ||
+        overlaps(values, bytes, key_cache, cache_bytes) ||
+        overlaps(values, bytes, value_cache, cache_bytes) ||
+        overlaps(key_cache, cache_bytes, value_cache, cache_bytes))
+        return invalid(token->device_ordinal, op, "overlapping KV buffers are unsupported");
+    kv_append_f32<<<blocks, kThreads, 0, stream>>>(pointer<const float>(keys),
+        pointer<const float>(values), pointer<float>(key_cache),
+        pointer<float>(value_cache), count, destination_offset);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_greedy_argmax_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView logits,
+    SeenQwenCudaBufferView token_id, uint64_t rows, uint64_t width,
+    uint64_t vocabulary_size) {
+    constexpr const char *op = "seen_qwen_greedy_argmax_f32";
+    cudaStream_t stream{}; SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t count = 0, bytes = 0, id_bytes = 0;
+    if (!checked_multiply(rows, width, &count) ||
+        !checked_multiply(count, sizeof(float), &bytes) ||
+        !checked_multiply(rows, sizeof(int32_t), &id_bytes) || rows == 0 ||
+        rows > UINT32_MAX || vocabulary_size == 0 ||
+        vocabulary_size > width || vocabulary_size > INT32_MAX)
+        return invalid(token->device_ordinal, op, "invalid greedy sampling geometry");
+    checked = validate_view(logits, bytes, token->device_ordinal, op);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    checked = validate_view(token_id, id_bytes, token->device_ordinal, op);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    if (overlaps(logits, bytes, token_id, id_bytes))
+        return invalid(token->device_ordinal, op, "overlapping greedy buffers are unsupported");
+    greedy_argmax_f32<<<static_cast<uint32_t>(rows), 1, 0, stream>>>(
+        pointer<const float>(logits), pointer<int32_t>(token_id), rows, width,
+        vocabulary_size);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_top_k_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView logits,
+    SeenQwenCudaBufferView token_ids, SeenQwenCudaBufferView values,
+    uint64_t rows, uint64_t width, uint64_t vocabulary_size, uint64_t top_k) {
+    constexpr const char *op = "seen_qwen_top_k_f32";
+    cudaStream_t stream{}; SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t count = 0, bytes = 0, output_count = 0, id_bytes = 0, value_bytes = 0;
+    if (!checked_multiply(rows, width, &count) ||
+        !checked_multiply(count, sizeof(float), &bytes) ||
+        !checked_multiply(rows, top_k, &output_count) ||
+        !checked_multiply(output_count, sizeof(int32_t), &id_bytes) ||
+        !checked_multiply(output_count, sizeof(float), &value_bytes) ||
+        rows == 0 || rows > UINT32_MAX || top_k == 0 ||
+        top_k > vocabulary_size || vocabulary_size > width ||
+        vocabulary_size > INT32_MAX)
+        return invalid(token->device_ordinal, op, "invalid top-k sampling geometry");
+    for (const auto &pair : {std::pair<SeenQwenCudaBufferView, uint64_t>{logits, bytes},
+             {token_ids, id_bytes}, {values, value_bytes}}) {
+        checked = validate_view(pair.first, pair.second, token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    if (overlaps(logits, bytes, token_ids, id_bytes) ||
+        overlaps(logits, bytes, values, value_bytes) ||
+        overlaps(token_ids, id_bytes, values, value_bytes))
+        return invalid(token->device_ordinal, op, "overlapping top-k buffers are unsupported");
+    top_k_f32<<<static_cast<uint32_t>(rows), 1, 0, stream>>>(
+        pointer<const float>(logits), pointer<int32_t>(token_ids),
+        pointer<float>(values), rows, width, vocabulary_size, top_k);
     return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
 }
