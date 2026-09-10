@@ -80,3 +80,11 @@ extern "C" fun seen_qwen_gdn_recurrent_decode_f32(
     state: QwenCudaBufferView, output: QwenCudaBufferView,
     valueHeads: UInt64, keyDim: UInt64, valueDim: UInt64,
     startPosition: UInt64, processedPosition: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_gdn_recurrent_prefill_f32(
+    token: *const CudaStreamLaunchToken, query: QwenCudaBufferView,
+    key: QwenCudaBufferView, value: QwenCudaBufferView,
+    beta: QwenCudaBufferView, logDecay: QwenCudaBufferView,
+    state: QwenCudaBufferView, output: QwenCudaBufferView,
+    tokenCount: UInt64, valueHeads: UInt64, keyDim: UInt64,
+    valueDim: UInt64, startPosition: UInt64,
+    processedPosition: UInt64) r: CudaNativeStatus

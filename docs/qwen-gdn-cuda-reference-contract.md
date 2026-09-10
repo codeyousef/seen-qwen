@@ -5,7 +5,8 @@ reference path is deliberately narrow: FP32 causal depthwise convolution with
 the official Qwen convolution length of four, followed by SiLU. Recurrent
 delta-state update, chunk prefill, and gated output belong to later QWN-041
 leaves. FEL-1436 / QWN-041B adds the single-token recurrent DeltaNet decode
-step; multi-token chunk prefill and gated output remain later leaves.
+step. FEL-1435 / QWN-041C extends the same transition to bounded multi-token
+chunk prefill; gated output remains a later leaf.
 
 ## Layout and semantics
 
@@ -35,6 +36,13 @@ step; multi-token chunk prefill and gated output remain later leaves.
   decoded token must not overflow. All seven views must be distinct.
 - The official boundary is 48 value heads with key and value dimensions 128;
   smaller positive geometries are supported for differential evidence.
+- Prefill adds a leading `token_count` dimension to every input and output
+  view except state. It processes tokens strictly in sequence per head, so one
+  prefill launch, arbitrary sequential prefill chunks, and repeated decode
+  launches produce bit-identical output and final state.
+- Prefill requires a positive token count, exact position continuity, and
+  checked `processed_position + token_count`. Its seven views are pairwise
+  disjoint and remain caller-owned.
 
 ## Ownership and execution
 
@@ -55,7 +63,7 @@ corpus is
 `experimental-hardware` until the complete QWN-041 corpus is certified.
 
 The focused gates are `scripts/cuda/run_qwn_041a.sh` and
-`scripts/cuda/run_qwn_041b.sh`. They use audited Seen
+`scripts/cuda/run_qwn_041b.sh`, and `scripts/cuda/run_qwn_041c.sh`. They use audited Seen
 v0.20.4, a current-memory-derived swap-disabled hard scope, one build worker,
 RTX 4090 CPU/CUDA differential and state-continuity checks, CUDA graph capture,
 deterministic teardown, and Compute Sanitizer memcheck, initcheck, racecheck,
