@@ -6,7 +6,8 @@ the official Qwen convolution length of four, followed by SiLU. Recurrent
 delta-state update, chunk prefill, and gated output belong to later QWN-041
 leaves. FEL-1436 / QWN-041B adds the single-token recurrent DeltaNet decode
 step. FEL-1435 / QWN-041C extends the same transition to bounded multi-token
-chunk prefill; gated output remains a later leaf.
+chunk prefill. FEL-1438 / QWN-041D completes the reference path with gated
+RMS-normalized output.
 
 ## Layout and semantics
 
@@ -44,6 +45,17 @@ chunk prefill; gated output remains a later leaf.
   checked `processed_position + token_count`. Its seven views are pairwise
   disjoint and remain caller-owned.
 
+## Gated output semantics
+
+- `core`, `gate`, and `output` are contiguous `[rows, value_dim]` FP32 views;
+  `weight` is contiguous `[value_dim]`. Rows flatten token and value-head axes.
+- Each core row is RMS-normalized with positive finite epsilon, then multiplied
+  elementwise by `SiLU(gate)` and the learned weight. The weight is applied directly,
+  not as `1 + weight`, matching the frozen CPU GDN oracle.
+- The official boundary is 48 value heads and value dimension 128. Exact
+  core/output aliasing is supported after the row norm is reduced; every other
+  overlap fails before enqueue.
+
 ## Ownership and execution
 
 Seen owns every allocation and the stream. The adapter borrows the ledgered
@@ -62,8 +74,9 @@ data is never copied to the host for validation. There is no fallback. This
 corpus is
 `experimental-hardware` until the complete QWN-041 corpus is certified.
 
-The focused gates are `scripts/cuda/run_qwn_041a.sh` and
-`scripts/cuda/run_qwn_041b.sh`, and `scripts/cuda/run_qwn_041c.sh`. They use audited Seen
+The focused gates are `scripts/cuda/run_qwn_041a.sh`,
+`scripts/cuda/run_qwn_041b.sh`, `scripts/cuda/run_qwn_041c.sh`, and
+`scripts/cuda/run_qwn_041d.sh`. They use audited Seen
 v0.20.4, a current-memory-derived swap-disabled hard scope, one build worker,
 RTX 4090 CPU/CUDA differential and state-continuity checks, CUDA graph capture,
 deterministic teardown, and Compute Sanitizer memcheck, initcheck, racecheck,

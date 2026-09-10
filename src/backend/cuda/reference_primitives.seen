@@ -88,3 +88,8 @@ extern "C" fun seen_qwen_gdn_recurrent_prefill_f32(
     tokenCount: UInt64, valueHeads: UInt64, keyDim: UInt64,
     valueDim: UInt64, startPosition: UInt64,
     processedPosition: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_gdn_gated_rms_norm_f32(
+    token: *const CudaStreamLaunchToken, core: QwenCudaBufferView,
+    gate: QwenCudaBufferView, weight: QwenCudaBufferView,
+    output: QwenCudaBufferView, rows: UInt64, width: UInt64,
+    epsilon: Float32) r: CudaNativeStatus
