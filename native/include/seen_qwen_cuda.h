@@ -78,6 +78,11 @@ SeenCudaStatus seen_qwen_kv_append_f32(
     SeenQwenCudaBufferView value_cache, uint64_t token_count,
     uint64_t kv_heads, uint64_t head_dim, uint64_t start_position,
     uint64_t capacity);
+SeenCudaStatus seen_qwen_attention_decode_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView query,
+    SeenQwenCudaBufferView key_cache, SeenQwenCudaBufferView value_cache,
+    SeenQwenCudaBufferView output, uint64_t query_heads, uint64_t kv_heads,
+    uint64_t head_dim, uint64_t cache_length, uint64_t cache_capacity);
 SeenCudaStatus seen_qwen_greedy_argmax_f32(
     const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView logits,
     SeenQwenCudaBufferView token_id, uint64_t rows, uint64_t width,
