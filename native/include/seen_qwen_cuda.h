@@ -95,6 +95,11 @@ SeenCudaStatus seen_qwen_gdn_recurrent_prefill_f32(
     uint64_t token_count, uint64_t value_heads, uint64_t key_dim,
     uint64_t value_dim, uint64_t start_position,
     uint64_t processed_position);
+SeenCudaStatus seen_qwen_gdn_gated_rms_norm_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView core,
+    SeenQwenCudaBufferView gate, SeenQwenCudaBufferView weight,
+    SeenQwenCudaBufferView output, uint64_t rows, uint64_t width,
+    float epsilon);
 
 #ifdef __cplusplus
 }

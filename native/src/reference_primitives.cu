@@ -203,6 +203,29 @@ __global__ void rms_norm_f32(const float *input, const float *weight,
     }
 }
 
+__global__ void gdn_gated_rms_norm_f32(const float *core, const float *gate,
+                                       const float *weight, float *output,
+                                       uint64_t rows, uint64_t width,
+                                       float epsilon) {
+    const uint64_t row = blockIdx.x;
+    if (row >= rows || threadIdx.x != 0) return;
+    float sum = 0.0f;
+    for (uint64_t column = 0; column < width; ++column) {
+        const float value = core[row * width + column];
+        sum = __fadd_rn(sum, __fmul_rn(value, value));
+    }
+    const float inverse = __fdividef(1.0f, sqrtf(__fadd_rn(
+        __fdividef(sum, static_cast<float>(width)), epsilon)));
+    for (uint64_t column = 0; column < width; ++column) {
+        const uint64_t index = row * width + column;
+        const float gate_value = gate[index];
+        const float sigmoid = __fdividef(1.0f, __fadd_rn(1.0f, expf(-gate_value)));
+        const float silu = __fmul_rn(gate_value, sigmoid);
+        output[index] = __fmul_rn(weight[column],
+            __fmul_rn(__fmul_rn(core[index], inverse), silu));
+    }
+}
+
 __global__ void l2_norm_f32(const float *input, float *output,
                             uint64_t rows, uint64_t width, float epsilon) {
     const uint64_t row = blockIdx.x;
@@ -550,6 +573,46 @@ extern "C" SeenCudaStatus seen_qwen_rms_norm_f32(
     rms_norm_f32<<<static_cast<uint32_t>(rows), 1, 0, stream>>>(
         pointer<const float>(input), pointer<const float>(weight),
         pointer<float>(output), rows, width, epsilon);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_gdn_gated_rms_norm_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView core,
+    SeenQwenCudaBufferView gate, SeenQwenCudaBufferView weight,
+    SeenQwenCudaBufferView output, uint64_t rows, uint64_t width,
+    float epsilon) {
+    constexpr const char *op = "seen_qwen_gdn_gated_rms_norm_f32";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t count = 0, bytes = 0, weight_bytes = 0;
+    if (!checked_multiply(rows, width, &count) ||
+        !checked_multiply(count, sizeof(float), &bytes) ||
+        !checked_multiply(width, sizeof(float), &weight_bytes) ||
+        rows == 0 || width == 0 || rows > UINT32_MAX ||
+        !(epsilon > 0.0f) || !std::isfinite(epsilon))
+        return invalid(token->device_ordinal, op,
+                       "invalid gated GDN RMSNorm geometry or epsilon");
+    for (const auto &pair : {
+             std::pair<SeenQwenCudaBufferView, uint64_t>{core, bytes},
+             {gate, bytes}, {weight, weight_bytes}, {output, bytes}}) {
+        checked = validate_view(pair.first, pair.second,
+                                token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    const bool exact_core_alias = core.address == output.address;
+    if ((overlaps(core, bytes, output, bytes) && !exact_core_alias) ||
+        overlaps(gate, bytes, output, bytes) ||
+        overlaps(weight, weight_bytes, output, bytes) ||
+        overlaps(core, bytes, gate, bytes) ||
+        overlaps(core, bytes, weight, weight_bytes) ||
+        overlaps(gate, bytes, weight, weight_bytes))
+        return invalid(token->device_ordinal, op,
+                       "unsupported gated GDN RMSNorm buffer overlap");
+    gdn_gated_rms_norm_f32<<<static_cast<uint32_t>(rows), 1, 0, stream>>>(
+        pointer<const float>(core), pointer<const float>(gate),
+        pointer<const float>(weight), pointer<float>(output),
+        rows, width, epsilon);
     return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
 }
 
