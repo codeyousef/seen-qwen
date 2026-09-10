@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd -P -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
 GIT_COMMON_DIR="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)"
 SHARED_ROOT="${GIT_COMMON_DIR%/.git}"
-DEFAULT_TOOLCHAIN="$SHARED_ROOT/.seen/toolchains/seen-0.20.2/seen-0.20.2-linux-x64"
+DEFAULT_TOOLCHAIN="$SHARED_ROOT/.seen/toolchains/seen-0.20.4-linux-x64"
 TOOLCHAIN_ROOT="${SEEN_TOOLCHAIN_ROOT:-$DEFAULT_TOOLCHAIN}"
 ARTIFACT_ROOT="$ROOT_DIR/.seen/artifacts/qwn_040a"
 
@@ -28,12 +28,12 @@ COMPATIBILITY_MANIFEST="$TOOLCHAIN_ROOT/bin/compatibility-manifest.json"
 SEEN_CUDA_ROOT="$TOOLCHAIN_ROOT/lib/seen/runtime/cuda"
 BUILD_ROOT="$ARTIFACT_ROOT/build"
 
-printf '%s  %s\n' c3a528a7375d34d4209e8dcfd506d603b9c46623357e6aafdd22036c02868032 "$SEEN_BIN" | sha256sum -c -
-printf '%s  %s\n' eda0988c1966722e086b0ef86ffb0c4dbb502276dbca4a6d2553fb403ed93421 "$SEEN_PACKAGE_CLIENT" | sha256sum -c -
-printf '%s  %s\n' 2b5e034c3316d01c23be99cc32e36e74f7379b24adb3c0b14b2e7f43fcf69a32 "$COMPATIBILITY_MANIFEST" | sha256sum -c -
-"$SEEN_BIN" --version | grep -Fx 'Seen 0.20.2'
-"$SEEN_PACKAGE_CLIENT" --expect-version 0.20.2 version | grep -Fx 'seen-pkg 0.20.2 (SEENPKG1)'
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["release_version"] == "0.20.2" and d["components"]["compiler"]["version"] == "0.20.2" and d["components"]["runtime"]["abi"] == "runtime-v4" and d["components"]["package_client"] == {"protocol": "SEENPKG1", "version": "0.20.2"}' "$COMPATIBILITY_MANIFEST"
+printf '%s  %s\n' 79293f057890f0edf133910d5f2055613006829f815eb6504197c233a0a6c57c "$SEEN_BIN" | sha256sum -c -
+printf '%s  %s\n' bfed49cea60c983751c26cef81b21e3374360f3a43de677e8134c14a3c30a158 "$SEEN_PACKAGE_CLIENT" | sha256sum -c -
+printf '%s  %s\n' 69441bbf20755f0bbf12a4241fffadf3ad20df6f9d1155a6b0b5ab92992e9e2c "$COMPATIBILITY_MANIFEST" | sha256sum -c -
+"$SEEN_BIN" --version | grep -Fx 'Seen 0.20.4'
+"$SEEN_PACKAGE_CLIENT" --expect-version 0.20.4 version | grep -Fx 'seen-pkg 0.20.4 (SEENPKG1)'
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["release_version"] == "0.20.4" and d["components"]["compiler"]["version"] == "0.20.4" and d["components"]["runtime"]["abi"] == "runtime-v4" and d["components"]["package_client"] == {"protocol": "SEENPKG1", "version": "0.20.4"}' "$COMPATIBILITY_MANIFEST"
 
 toolchain_hash_before=$(find "$TOOLCHAIN_ROOT" -type f -print0 | sort -z |
     xargs -0 sha256sum | sha256sum | awk '{print $1}')
@@ -86,4 +86,4 @@ outside_objects_after=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o \
     echo "qwn-040a: compiler objects changed outside the ignored .seen root" >&2
     exit 126
 }
-echo "PASS: QWN-040A v0.20.2 CPU, RTX 4090, graph, sanitizer, and leak gates"
+echo "PASS: QWN-040A v0.20.4 CPU, RTX 4090, graph, sanitizer, and leak gates"

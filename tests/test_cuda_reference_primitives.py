@@ -56,9 +56,9 @@ class CudaReferencePrimitiveContractTest(unittest.TestCase):
 
     def test_hardware_gate_is_exact_bounded_and_sanitized(self) -> None:
         for required in (
-            "c3a528a7375d34d4209e8dcfd506d603b9c46623357e6aafdd22036c02868032",
-            "eda0988c1966722e086b0ef86ffb0c4dbb502276dbca4a6d2553fb403ed93421",
-            "2b5e034c3316d01c23be99cc32e36e74f7379b24adb3c0b14b2e7f43fcf69a32",
+            "79293f057890f0edf133910d5f2055613006829f815eb6504197c233a0a6c57c",
+            "bfed49cea60c983751c26cef81b21e3374360f3a43de677e8134c14a3c30a158",
+            "69441bbf20755f0bbf12a4241fffadf3ad20df6f9d1155a6b0b5ab92992e9e2c",
             "scripts/oracle/run_bounded.sh",
             "QWN_TASKS_MAX=32",
             "--parallel 1",
