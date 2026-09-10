@@ -126,6 +126,28 @@ pub class QwenCudaKvCache {
         return Ok<Bool, CudaError>(true)
     }
 
+    /// Decode one query token against the committed cache prefix. The owner
+    /// remains live and retains both allocations; the native adapter borrows
+    /// their views only for this immediately nested enqueue.
+    fun decode(token: *const CudaStreamLaunchToken,
+        query: QwenCudaBufferView, output: QwenCudaBufferView,
+        queryHeads: UInt64) r: Result<Bool, CudaError> {
+        if this.closed or this.used == (0 as UInt64) or
+            this.used > this.capacity or queryHeads == (0 as UInt64) or
+            this.kvHeads == (0 as UInt64) or
+            queryHeads % this.kvHeads != (0 as UInt64) {
+            return Err<Bool, CudaError>(qwenCudaCacheError(this.deviceOrdinal,
+                "qwen.attention.decode", "invalid live KV cache decode state"))
+        }
+        let status = seen_qwen_attention_decode_f32(token, query,
+            this.keyView(), this.valueView(), output, queryHeads,
+            this.kvHeads, this.headDim, this.used, this.capacity)
+        if not cudaSucceeded(status) {
+            return Err<Bool, CudaError>(cudaError(status))
+        }
+        return Ok<Bool, CudaError>(true)
+    }
+
     fun close() r: Result<Bool, CudaError> {
         if this.closed { return Ok<Bool, CudaError>(false) }
         let valueClosed = this.valueAllocation.close()
@@ -243,6 +265,12 @@ extern "C" fun seen_qwen_kv_append_f32(token: *const CudaStreamLaunchToken,
     keyCache: QwenCudaBufferView, valueCache: QwenCudaBufferView,
     tokenCount: UInt64, kvHeads: UInt64, headDim: UInt64,
     startPosition: UInt64, capacity: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_attention_decode_f32(
+    token: *const CudaStreamLaunchToken, query: QwenCudaBufferView,
+    keyCache: QwenCudaBufferView, valueCache: QwenCudaBufferView,
+    output: QwenCudaBufferView, queryHeads: UInt64, kvHeads: UInt64,
+    headDim: UInt64, cacheLength: UInt64,
+    cacheCapacity: UInt64) r: CudaNativeStatus
 extern "C" fun seen_qwen_greedy_argmax_f32(token: *const CudaStreamLaunchToken,
     logits: QwenCudaBufferView, tokenId: QwenCudaBufferView,
     rows: UInt64, width: UInt64, vocabularySize: UInt64) r: CudaNativeStatus

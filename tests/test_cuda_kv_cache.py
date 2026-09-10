@@ -29,8 +29,8 @@ class CudaKvCacheContractTest(unittest.TestCase):
         )
 
     def test_native_boundary_remains_borrowed_and_allocation_free(self) -> None:
-        self.assertEqual(self.native.count("<<<"), 21)
-        self.assertEqual(self.native.count(", 0, stream>>>"), 21)
+        self.assertEqual(self.native.count("<<<"), 22)
+        self.assertEqual(self.native.count(", 0, stream>>>"), 22)
         for forbidden in (
             "cudaDeviceSynchronize", "cudaStreamSynchronize", "cudaStreamCreate",
             "cudaStreamDestroy", "cudaMalloc", "cudaFree",

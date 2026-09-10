@@ -33,6 +33,7 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", self.workflow)
         self.assertIn("runs-on: ubuntu-24.04", self.workflow)
         self.assertIn("timeout-minutes: 30", self.workflow)
+        self.assertIn("TIMEOUT_SECS=1500", self.runner)
         self.assertIn(
             "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
             self.workflow,
@@ -123,6 +124,10 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("tests/qwn_042b_kv_cache_test.seen --frozen", self.inner)
         self.assertIn("qwn_042b_kv_cache_test_fast", self.inner)
         self.assertIn("qwn_042b_kv_cache_test", self.inner)
+        self.assertIn("tests/test_cuda_attention_decode.py", self.inner)
+        self.assertIn("tests/qwn_042c_attention_decode_test.seen --frozen", self.inner)
+        self.assertIn("qwn_042c_attention_decode_test_fast", self.inner)
+        self.assertIn("qwn_042c_attention_decode_test", self.inner)
 
     def test_seen_release_provenance_is_exact_and_current(self) -> None:
         compiler_sha256 = (
