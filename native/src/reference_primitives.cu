@@ -312,17 +312,14 @@ __global__ void causal_conv_silu_f32(const float *input, const float *weights,
     }
 }
 
-__global__ void gdn_recurrent_decode_f32(
+__device__ void gdn_recurrent_step_f32(
     const float *query, const float *key, const float *value,
     const float *beta, const float *log_decay, float *state, float *output,
-    uint64_t value_heads, uint64_t key_dim, uint64_t value_dim) {
-    const uint64_t head = static_cast<uint64_t>(blockIdx.x);
-    if (head >= value_heads || threadIdx.x != 0) return;
-    const uint64_t key_base = head * key_dim;
-    const uint64_t value_base = head * value_dim;
+    uint64_t head, uint64_t key_base, uint64_t value_base,
+    uint64_t scalar_index, uint64_t key_dim, uint64_t value_dim) {
     const uint64_t state_base = head * key_dim * value_dim;
-    const float decay = expf(log_decay[head]);
-    const float step = beta[head];
+    const float decay = expf(log_decay[scalar_index]);
+    const float step = beta[scalar_index];
     for (uint64_t column = 0; column < value_dim; ++column) {
         float memory = 0.0f;
         for (uint64_t row = 0; row < key_dim; ++row) {
@@ -344,6 +341,31 @@ __global__ void gdn_recurrent_decode_f32(
                 __fmul_rn(updated, query[key_base + row]));
         }
         output[value_base + column] = result;
+    }
+}
+
+__global__ void gdn_recurrent_decode_f32(
+    const float *query, const float *key, const float *value,
+    const float *beta, const float *log_decay, float *state, float *output,
+    uint64_t value_heads, uint64_t key_dim, uint64_t value_dim) {
+    const uint64_t head = static_cast<uint64_t>(blockIdx.x);
+    if (head >= value_heads || threadIdx.x != 0) return;
+    gdn_recurrent_step_f32(query, key, value, beta, log_decay, state, output,
+        head, head * key_dim, head * value_dim, head, key_dim, value_dim);
+}
+
+__global__ void gdn_recurrent_prefill_f32(
+    const float *query, const float *key, const float *value,
+    const float *beta, const float *log_decay, float *state, float *output,
+    uint64_t token_count, uint64_t value_heads, uint64_t key_dim,
+    uint64_t value_dim) {
+    const uint64_t head = static_cast<uint64_t>(blockIdx.x);
+    if (head >= value_heads || threadIdx.x != 0) return;
+    for (uint64_t token = 0; token < token_count; ++token) {
+        const uint64_t scalar_index = token * value_heads + head;
+        gdn_recurrent_step_f32(query, key, value, beta, log_decay, state,
+            output, head, scalar_index * key_dim,
+            scalar_index * value_dim, scalar_index, key_dim, value_dim);
     }
 }
 
@@ -837,5 +859,63 @@ extern "C" SeenCudaStatus seen_qwen_gdn_recurrent_decode_f32(
         pointer<const float>(value), pointer<const float>(beta),
         pointer<const float>(log_decay), pointer<float>(state),
         pointer<float>(output), value_heads, key_dim, value_dim);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_gdn_recurrent_prefill_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView query,
+    SeenQwenCudaBufferView key, SeenQwenCudaBufferView value,
+    SeenQwenCudaBufferView beta, SeenQwenCudaBufferView log_decay,
+    SeenQwenCudaBufferView state, SeenQwenCudaBufferView output,
+    uint64_t token_count, uint64_t value_heads, uint64_t key_dim,
+    uint64_t value_dim, uint64_t start_position,
+    uint64_t processed_position) {
+    constexpr const char *op = "seen_qwen_gdn_recurrent_prefill_f32";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t token_heads = 0, key_count = 0, value_count = 0;
+    uint64_t state_count = 0, state_rows = 0;
+    uint64_t key_bytes = 0, value_bytes = 0, scalar_bytes = 0, state_bytes = 0;
+    if (token_count == 0 || value_heads == 0 || value_heads > UINT32_MAX ||
+        key_dim == 0 || value_dim == 0 ||
+        start_position != processed_position ||
+        token_count > std::numeric_limits<uint64_t>::max() - processed_position ||
+        !checked_multiply(token_count, value_heads, &token_heads) ||
+        !checked_multiply(token_heads, key_dim, &key_count) ||
+        !checked_multiply(token_heads, value_dim, &value_count) ||
+        !checked_multiply(value_heads, key_dim, &state_rows) ||
+        !checked_multiply(state_rows, value_dim, &state_count) ||
+        !checked_multiply(key_count, sizeof(float), &key_bytes) ||
+        !checked_multiply(value_count, sizeof(float), &value_bytes) ||
+        !checked_multiply(token_heads, sizeof(float), &scalar_bytes) ||
+        !checked_multiply(state_count, sizeof(float), &state_bytes))
+        return invalid(token->device_ordinal, op,
+                       "invalid recurrent prefill state or geometry");
+    for (const auto &pair : {
+             std::pair<SeenQwenCudaBufferView, uint64_t>{query, key_bytes},
+             {key, key_bytes}, {value, value_bytes}, {beta, scalar_bytes},
+             {log_decay, scalar_bytes}, {state, state_bytes},
+             {output, value_bytes}}) {
+        checked = validate_view(pair.first, pair.second,
+                                token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    const std::pair<SeenQwenCudaBufferView, uint64_t> views[] = {
+        {query, key_bytes}, {key, key_bytes}, {value, value_bytes},
+        {beta, scalar_bytes}, {log_decay, scalar_bytes},
+        {state, state_bytes}, {output, value_bytes}};
+    for (size_t left = 0; left < sizeof(views) / sizeof(views[0]); ++left)
+        for (size_t right = left + 1;
+             right < sizeof(views) / sizeof(views[0]); ++right)
+            if (overlaps(views[left].first, views[left].second,
+                         views[right].first, views[right].second))
+                return invalid(token->device_ordinal, op,
+                               "overlapping recurrent prefill buffers are unsupported");
+    gdn_recurrent_prefill_f32<<<static_cast<uint32_t>(value_heads), 1, 0, stream>>>(
+        pointer<const float>(query), pointer<const float>(key),
+        pointer<const float>(value), pointer<const float>(beta),
+        pointer<const float>(log_decay), pointer<float>(state),
+        pointer<float>(output), token_count, value_heads, key_dim, value_dim);
     return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
 }

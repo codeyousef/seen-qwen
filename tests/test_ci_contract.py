@@ -107,6 +107,10 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("tests/qwn_041b_gdn_decode_test.seen --frozen", self.inner)
         self.assertIn("qwn_041b_gdn_decode_test_fast", self.inner)
         self.assertIn("qwn_041b_gdn_decode_test", self.inner)
+        self.assertIn("tests/test_cuda_gdn_recurrent_prefill.py", self.inner)
+        self.assertIn("tests/qwn_041c_gdn_prefill_test.seen --frozen", self.inner)
+        self.assertIn("qwn_041c_gdn_prefill_test_fast", self.inner)
+        self.assertIn("qwn_041c_gdn_prefill_test", self.inner)
 
     def test_seen_release_provenance_is_exact_and_current(self) -> None:
         compiler_sha256 = (
@@ -286,6 +290,7 @@ class CiContractTests(unittest.TestCase):
             "qwn_033b_sensitivity_test",
             "qwn_033c_policy_test",
             "qwn_041b_gdn_decode_test",
+            "qwn_041c_gdn_prefill_test",
             "test_sampling_profiles.py",
             "test_hybrid_mini_contract.py",
             "test_hybrid_mini_assets.py",
