@@ -185,9 +185,9 @@ fi
 GIT_COMMON_DIR="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)"
 SHARED_ROOT="${GIT_COMMON_DIR%/.git}"
 TOOLCHAINS_ROOT="$SHARED_ROOT/.seen/toolchains"
-TOOLCHAIN_PARENT="$TOOLCHAINS_ROOT/seen-0.20.4-linux-x64"
+TOOLCHAIN_PARENT="$TOOLCHAINS_ROOT"
 DOWNLOAD_ROOT="$TOOLCHAINS_ROOT/seen-0.20.4-archive"
-TOOLCHAIN_ROOT="$TOOLCHAIN_PARENT"
+TOOLCHAIN_ROOT="$TOOLCHAINS_ROOT/seen-0.20.4-linux-x64"
 
 ensure_local_directory "$ROOT_DIR/.seen"
 ensure_local_directory "$CI_ROOT"
