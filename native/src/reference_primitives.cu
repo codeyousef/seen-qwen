@@ -285,6 +285,33 @@ __global__ void kv_append_f32(const float *keys, const float *values,
     }
 }
 
+__global__ void causal_conv_silu_f32(const float *input, const float *weights,
+                                     float *history, float *output,
+                                     uint64_t token_count, uint64_t channels,
+                                     uint64_t kernel_length) {
+    const uint64_t channel = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+        threadIdx.x;
+    if (channel >= channels) return;
+    const uint64_t history_slots = kernel_length - 1;
+    for (uint64_t token = 0; token < token_count; ++token) {
+        float sum = 0.0f;
+        for (uint64_t tap = 0; tap < history_slots; ++tap)
+            sum = __fadd_rn(sum, __fmul_rn(
+                history[tap * channels + channel],
+                weights[channel * kernel_length + tap]));
+        const uint64_t input_index = token * channels + channel;
+        const float current = input[input_index];
+        sum = __fadd_rn(sum, __fmul_rn(current,
+            weights[channel * kernel_length + history_slots]));
+        output[input_index] = __fdividef(sum, __fadd_rn(1.0f, expf(-sum)));
+        for (uint64_t tap = 0; tap + 1 < history_slots; ++tap)
+            history[tap * channels + channel] =
+                history[(tap + 1) * channels + channel];
+        if (history_slots != 0)
+            history[(history_slots - 1) * channels + channel] = current;
+    }
+}
+
 __global__ void greedy_argmax_f32(const float *logits, int32_t *token_ids,
                                   uint64_t rows, uint64_t width,
                                   uint64_t vocabulary_size) {
@@ -673,5 +700,54 @@ extern "C" SeenCudaStatus seen_qwen_top_k_f32(
     top_k_f32<<<static_cast<uint32_t>(rows), 1, 0, stream>>>(
         pointer<const float>(logits), pointer<int32_t>(token_ids),
         pointer<float>(values), rows, width, vocabulary_size, top_k);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_causal_conv_silu_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView weights, SeenQwenCudaBufferView history,
+    SeenQwenCudaBufferView output, uint64_t token_count, uint64_t channels,
+    uint64_t kernel_length, uint64_t start_position,
+    uint64_t processed_position) {
+    constexpr const char *op = "seen_qwen_causal_conv_silu_f32";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t element_count = 0, weight_count = 0, history_count = 0;
+    uint64_t input_bytes = 0, weight_bytes = 0, history_bytes = 0;
+    uint32_t blocks = 0;
+    if (kernel_length != 4 || token_count == 0 || channels == 0 ||
+        start_position != processed_position ||
+        token_count > std::numeric_limits<uint64_t>::max() - processed_position ||
+        !checked_multiply(token_count, channels, &element_count) ||
+        !checked_multiply(channels, kernel_length, &weight_count) ||
+        !checked_multiply(channels, kernel_length - 1, &history_count) ||
+        !checked_multiply(element_count, sizeof(float), &input_bytes) ||
+        !checked_multiply(weight_count, sizeof(float), &weight_bytes) ||
+        !checked_multiply(history_count, sizeof(float), &history_bytes) ||
+        !launch_shape(channels, &blocks))
+        return invalid(token->device_ordinal, op,
+                       "invalid causal-convolution state or geometry");
+    for (const auto &pair : {
+             std::pair<SeenQwenCudaBufferView, uint64_t>{input, input_bytes},
+             {weights, weight_bytes}, {history, history_bytes},
+             {output, input_bytes}}) {
+        checked = validate_view(pair.first, pair.second,
+                                token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    const bool exact_in_place = input.address == output.address;
+    if ((overlaps(input, input_bytes, output, input_bytes) && !exact_in_place) ||
+        overlaps(input, input_bytes, weights, weight_bytes) ||
+        overlaps(input, input_bytes, history, history_bytes) ||
+        overlaps(output, input_bytes, weights, weight_bytes) ||
+        overlaps(output, input_bytes, history, history_bytes) ||
+        overlaps(weights, weight_bytes, history, history_bytes))
+        return invalid(token->device_ordinal, op,
+                       "unsupported causal-convolution buffer overlap");
+    causal_conv_silu_f32<<<blocks, kThreads, 0, stream>>>(
+        pointer<const float>(input), pointer<const float>(weights),
+        pointer<float>(history), pointer<float>(output), token_count, channels,
+        kernel_length);
     return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
 }

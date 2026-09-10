@@ -74,6 +74,12 @@ SeenCudaStatus seen_qwen_top_k_f32(
     const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView logits,
     SeenQwenCudaBufferView token_ids, SeenQwenCudaBufferView values,
     uint64_t rows, uint64_t width, uint64_t vocabulary_size, uint64_t top_k);
+SeenCudaStatus seen_qwen_causal_conv_silu_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView weights, SeenQwenCudaBufferView history,
+    SeenQwenCudaBufferView output, uint64_t token_count, uint64_t channels,
+    uint64_t kernel_length, uint64_t start_position,
+    uint64_t processed_position);
 
 #ifdef __cplusplus
 }
