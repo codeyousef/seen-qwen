@@ -104,6 +104,7 @@ outside_objects_before=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o \
     grep -Fx 'seen-pkg 0.20.4 (SEENPKG1)'
 python3 -m unittest tests/test_ci_contract.py tests/test_cuda_reference_primitives.py \
     tests/test_cuda_reference_utilities.py tests/test_cuda_gdn_state.py \
+    tests/test_cuda_gdn_recurrent_decode.py \
     tests/test_qwen_tokenizer_oracles.py \
     tests/test_sampling_profiles.py tests/test_hybrid_mini_contract.py \
     tests/test_hybrid_mini_assets.py tests/test_hybrid_mini_oracle.py \
@@ -143,6 +144,7 @@ python3 -m unittest tests/test_ci_contract.py tests/test_cuda_reference_primitiv
 "$SEEN_COMPILER" check tests/qwn_040a_reference_primitives_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_040b_reference_utilities_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_041a_gdn_state_test.seen --frozen
+"$SEEN_COMPILER" check tests/qwn_041b_gdn_decode_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022d_sampling_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022b_tokenizer_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022c_chat_template_test.seen --frozen
@@ -182,6 +184,16 @@ python3 -m unittest tests/test_ci_contract.py tests/test_cuda_reference_primitiv
     --release --lto=thin --target-cpu=x86-64 --no-cache \
     --jobs 1 --opt-jobs 1 --no-fork --frozen
 "$OUTPUT_ROOT/qwn_041a_gdn_state_test"
+"$SEEN_COMPILER" compile tests/qwn_041b_gdn_decode_test.seen \
+    "$OUTPUT_ROOT/qwn_041b_gdn_decode_test_fast" \
+    --target-cpu=x86-64 --no-cache \
+    --jobs 1 --opt-jobs 1 --no-fork --frozen
+"$OUTPUT_ROOT/qwn_041b_gdn_decode_test_fast"
+"$SEEN_COMPILER" compile tests/qwn_041b_gdn_decode_test.seen \
+    "$OUTPUT_ROOT/qwn_041b_gdn_decode_test" \
+    --release --lto=thin --target-cpu=x86-64 --no-cache \
+    --jobs 1 --opt-jobs 1 --no-fork --frozen
+"$OUTPUT_ROOT/qwn_041b_gdn_decode_test"
 "$SEEN_COMPILER" compile tests/qwn_024e_cpu_engine_test.seen \
     "$OUTPUT_ROOT/qwn_024e_cpu_engine_test" \
     --release --lto=thin --target-cpu=x86-64 --no-cache \

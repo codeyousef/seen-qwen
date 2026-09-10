@@ -1,0 +1,18 @@
+import seen_qwen.backend.cuda.reference_primitives.{QWEN_CUDA_REFERENCE_ABI_VERSION,
+    QwenCudaBufferView}
+
+fun main() r: Int {
+    let state = QwenCudaBufferView{
+        abiVersion: QWEN_CUDA_REFERENCE_ABI_VERSION,
+        deviceOrdinal: 0 as Int32,
+        address: 0 as UInt64,
+        byteLength: 3145728 as UInt64
+    }
+    if state.abiVersion != QWEN_CUDA_REFERENCE_ABI_VERSION { return 1 }
+    if state.byteLength != (48 as UInt64) * (128 as UInt64) *
+        (128 as UInt64) * (4 as UInt64) { return 2 }
+    println("PASS: QWN-041B fixed-width recurrent GDN decode declaration")
+    return 0
+}
+
+main()

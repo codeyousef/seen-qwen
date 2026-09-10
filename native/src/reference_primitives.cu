@@ -312,6 +312,41 @@ __global__ void causal_conv_silu_f32(const float *input, const float *weights,
     }
 }
 
+__global__ void gdn_recurrent_decode_f32(
+    const float *query, const float *key, const float *value,
+    const float *beta, const float *log_decay, float *state, float *output,
+    uint64_t value_heads, uint64_t key_dim, uint64_t value_dim) {
+    const uint64_t head = static_cast<uint64_t>(blockIdx.x);
+    if (head >= value_heads || threadIdx.x != 0) return;
+    const uint64_t key_base = head * key_dim;
+    const uint64_t value_base = head * value_dim;
+    const uint64_t state_base = head * key_dim * value_dim;
+    const float decay = expf(log_decay[head]);
+    const float step = beta[head];
+    for (uint64_t column = 0; column < value_dim; ++column) {
+        float memory = 0.0f;
+        for (uint64_t row = 0; row < key_dim; ++row) {
+            const uint64_t index = state_base + row * value_dim + column;
+            const float decayed = __fmul_rn(state[index], decay);
+            state[index] = decayed;
+            memory = __fadd_rn(memory,
+                __fmul_rn(decayed, key[key_base + row]));
+        }
+        const float delta = __fmul_rn(
+            __fsub_rn(value[value_base + column], memory), step);
+        float result = 0.0f;
+        for (uint64_t row = 0; row < key_dim; ++row) {
+            const uint64_t index = state_base + row * value_dim + column;
+            const float updated = __fadd_rn(state[index],
+                __fmul_rn(key[key_base + row], delta));
+            state[index] = updated;
+            result = __fadd_rn(result,
+                __fmul_rn(updated, query[key_base + row]));
+        }
+        output[value_base + column] = result;
+    }
+}
+
 __global__ void greedy_argmax_f32(const float *logits, int32_t *token_ids,
                                   uint64_t rows, uint64_t width,
                                   uint64_t vocabulary_size) {
@@ -749,5 +784,58 @@ extern "C" SeenCudaStatus seen_qwen_causal_conv_silu_f32(
         pointer<const float>(input), pointer<const float>(weights),
         pointer<float>(history), pointer<float>(output), token_count, channels,
         kernel_length);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_gdn_recurrent_decode_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView query,
+    SeenQwenCudaBufferView key, SeenQwenCudaBufferView value,
+    SeenQwenCudaBufferView beta, SeenQwenCudaBufferView log_decay,
+    SeenQwenCudaBufferView state, SeenQwenCudaBufferView output,
+    uint64_t value_heads, uint64_t key_dim, uint64_t value_dim,
+    uint64_t start_position, uint64_t processed_position) {
+    constexpr const char *op = "seen_qwen_gdn_recurrent_decode_f32";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t key_count = 0, value_count = 0, state_count = 0;
+    uint64_t key_bytes = 0, value_bytes = 0, state_bytes = 0;
+    if (value_heads == 0 || value_heads > UINT32_MAX || key_dim == 0 ||
+        value_dim == 0 || start_position != processed_position ||
+        processed_position == std::numeric_limits<uint64_t>::max() ||
+        !checked_multiply(value_heads, key_dim, &key_count) ||
+        !checked_multiply(value_heads, value_dim, &value_count) ||
+        !checked_multiply(key_count, value_dim, &state_count) ||
+        !checked_multiply(key_count, sizeof(float), &key_bytes) ||
+        !checked_multiply(value_count, sizeof(float), &value_bytes) ||
+        !checked_multiply(state_count, sizeof(float), &state_bytes))
+        return invalid(token->device_ordinal, op,
+                       "invalid recurrent decode state or geometry");
+    const uint64_t scalar_bytes = value_heads * sizeof(float);
+    for (const auto &pair : {
+             std::pair<SeenQwenCudaBufferView, uint64_t>{query, key_bytes},
+             {key, key_bytes}, {value, value_bytes}, {beta, scalar_bytes},
+             {log_decay, scalar_bytes}, {state, state_bytes},
+             {output, value_bytes}}) {
+        checked = validate_view(pair.first, pair.second,
+                                token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    const std::pair<SeenQwenCudaBufferView, uint64_t> views[] = {
+        {query, key_bytes}, {key, key_bytes}, {value, value_bytes},
+        {beta, scalar_bytes}, {log_decay, scalar_bytes},
+        {state, state_bytes}, {output, value_bytes}};
+    for (size_t left = 0; left < sizeof(views) / sizeof(views[0]); ++left)
+        for (size_t right = left + 1;
+             right < sizeof(views) / sizeof(views[0]); ++right)
+            if (overlaps(views[left].first, views[left].second,
+                         views[right].first, views[right].second))
+                return invalid(token->device_ordinal, op,
+                               "overlapping recurrent decode buffers are unsupported");
+    gdn_recurrent_decode_f32<<<static_cast<uint32_t>(value_heads), 1, 0, stream>>>(
+        pointer<const float>(query), pointer<const float>(key),
+        pointer<const float>(value), pointer<const float>(beta),
+        pointer<const float>(log_decay), pointer<float>(state),
+        pointer<float>(output), value_heads, key_dim, value_dim);
     return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
 }

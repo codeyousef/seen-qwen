@@ -80,6 +80,13 @@ SeenCudaStatus seen_qwen_causal_conv_silu_f32(
     SeenQwenCudaBufferView output, uint64_t token_count, uint64_t channels,
     uint64_t kernel_length, uint64_t start_position,
     uint64_t processed_position);
+SeenCudaStatus seen_qwen_gdn_recurrent_decode_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView query,
+    SeenQwenCudaBufferView key, SeenQwenCudaBufferView value,
+    SeenQwenCudaBufferView beta, SeenQwenCudaBufferView log_decay,
+    SeenQwenCudaBufferView state, SeenQwenCudaBufferView output,
+    uint64_t value_heads, uint64_t key_dim, uint64_t value_dim,
+    uint64_t start_position, uint64_t processed_position);
 
 #ifdef __cplusplus
 }

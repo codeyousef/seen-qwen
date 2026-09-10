@@ -73,3 +73,10 @@ extern "C" fun seen_qwen_causal_conv_silu_f32(
     output: QwenCudaBufferView, tokenCount: UInt64, channels: UInt64,
     kernelLength: UInt64, startPosition: UInt64,
     processedPosition: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_gdn_recurrent_decode_f32(
+    token: *const CudaStreamLaunchToken, query: QwenCudaBufferView,
+    key: QwenCudaBufferView, value: QwenCudaBufferView,
+    beta: QwenCudaBufferView, logDecay: QwenCudaBufferView,
+    state: QwenCudaBufferView, output: QwenCudaBufferView,
+    valueHeads: UInt64, keyDim: UInt64, valueDim: UInt64,
+    startPosition: UInt64, processedPosition: UInt64) r: CudaNativeStatus
