@@ -1,0 +1,49 @@
+import seen_qwen.backend.cuda.projection.{QWEN_CUDA_PROJECTION_F16,
+    QWEN_CUDA_PROJECTION_BF16, qwenCudaProjectionDescriptor}
+
+fun require(condition: Bool, message: String) {
+    if not condition {
+        println("FAIL: " + message)
+        exit(1)
+    }
+}
+
+fun main() r: Int {
+    let descriptor = qwenCudaProjectionDescriptor(16 as UInt64,
+        5120 as UInt64, 17408 as UInt64, QWEN_CUDA_PROJECTION_BF16,
+        33554432 as UInt64)
+    require(descriptor.isOkay(), "build official BF16 FFN descriptor")
+    let value = descriptor.unwrap()
+    require(value.abiVersion == (1 as UInt32) and
+        value.dataType == QWEN_CUDA_PROJECTION_BF16 and
+        value.transposeA == (1 as Int32) and
+        value.transposeB == (0 as Int32) and
+        value.m == (17408 as UInt64) and value.n == (16 as UInt64) and
+        value.k == (5120 as UInt64) and
+        value.leadingA == (5120 as Int64) and
+        value.leadingB == (5120 as Int64) and
+        value.leadingC == (17408 as Int64) and
+        value.workspaceLimitBytes == (33554432 as UInt64),
+        "map token-major projection to exact cuBLASLt geometry")
+
+    require(qwenCudaProjectionDescriptor(1 as UInt64, 6144 as UInt64,
+        5120 as UInt64, QWEN_CUDA_PROJECTION_F16,
+        0 as UInt64).isOkay(), "accept official GDN output projection")
+    require(qwenCudaProjectionDescriptor(0 as UInt64, 5120 as UInt64,
+        5120 as UInt64, QWEN_CUDA_PROJECTION_BF16,
+        0 as UInt64).isErr(), "reject zero tokens")
+    require(qwenCudaProjectionDescriptor(1 as UInt64, 0x80000000 as UInt64,
+        5120 as UInt64, QWEN_CUDA_PROJECTION_BF16,
+        0 as UInt64).isErr(), "reject dimensions above the native bound")
+    require(qwenCudaProjectionDescriptor(1 as UInt64, 5120 as UInt64,
+        5120 as UInt64, 3 as Int32, 0 as UInt64).isErr(),
+        "reject unsupported projection dtype")
+    require(qwenCudaProjectionDescriptor(1 as UInt64, 5120 as UInt64,
+        5120 as UInt64, QWEN_CUDA_PROJECTION_BF16,
+        0x8000000000000000 as UInt64).isErr(),
+        "reject workspace limit above the bounded ABI")
+    println("PASS: QWN-043A checked row-major cuBLASLt projection descriptors")
+    return 0
+}
+
+main()

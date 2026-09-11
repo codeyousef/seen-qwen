@@ -1,0 +1,116 @@
+/// QWN-043A Qwen projection geometry mapped onto the packaged Seen cuBLASLt
+/// ABI. Tensor storage remains token-major row-major; cuBLASLt observes the
+/// same bytes as column-major transposes and computes Y^T = W * X^T.
+
+import accelerator.cuda.mod.{CUDA_ABI_VERSION, CudaAlgorithm,
+    CudaMatmulDescriptor, CublasLtHandle}
+import accelerator.cuda.error.{CudaError}
+import core.result.{Result}
+
+let QWEN_CUDA_PROJECTION_F16: Int32 = 1 as Int32
+let QWEN_CUDA_PROJECTION_BF16: Int32 = 2 as Int32
+
+fun qwenProjectionError(deviceOrdinal: Int32, message: String) r: CudaError {
+    return CudaError{ code: 1 as Int32, nativeCode: 0 as Int32,
+        deviceOrdinal: deviceOrdinal, maturity: 2 as Int32,
+        operation: "qwen.projection.select", message: message,
+        sourceFile: "<qwen-cuda-projection>", sourceLine: 0,
+        sourceColumn: 0 }
+}
+
+/// Construct the complete descriptor for X[tokens,input] times
+/// W[output,input]^T into Y[tokens,output]. No allocation or CUDA operation is
+/// performed. Leading dimensions describe the column-major views of the
+/// caller-owned row-major buffers.
+pub fun qwenCudaProjectionDescriptor(tokenCount: UInt64,
+    inputWidth: UInt64, outputWidth: UInt64, dataType: Int32,
+    workspaceLimitBytes: UInt64) r: Result<CudaMatmulDescriptor, CudaError> {
+    let dimensionLimit = 0x7FFFFFFF as UInt64
+    let workspaceLimit = 0x7FFFFFFFFFFFFFFF as UInt64
+    if tokenCount == (0 as UInt64) or inputWidth == (0 as UInt64) or
+        outputWidth == (0 as UInt64) or tokenCount > dimensionLimit or
+        inputWidth > dimensionLimit or outputWidth > dimensionLimit {
+        return Err<CudaMatmulDescriptor, CudaError>(qwenProjectionError(
+            -1 as Int32, "projection dimensions are outside the bounded ABI"))
+    }
+    if dataType != QWEN_CUDA_PROJECTION_F16 and
+        dataType != QWEN_CUDA_PROJECTION_BF16 {
+        return Err<CudaMatmulDescriptor, CudaError>(qwenProjectionError(
+            -1 as Int32, "projection dtype must be F16 or BF16"))
+    }
+    if workspaceLimitBytes > workspaceLimit {
+        return Err<CudaMatmulDescriptor, CudaError>(qwenProjectionError(
+            -1 as Int32, "projection workspace limit exceeds the bounded ABI"))
+    }
+    return Ok<CudaMatmulDescriptor, CudaError>(CudaMatmulDescriptor{
+        abiVersion: CUDA_ABI_VERSION, dataType: dataType,
+        transposeA: 1 as Int32, transposeB: 0 as Int32,
+        m: outputWidth, n: tokenCount, k: inputWidth,
+        leadingA: inputWidth as Int64, leadingB: inputWidth as Int64,
+        leadingC: outputWidth as Int64,
+        workspaceLimitBytes: workspaceLimitBytes })
+}
+
+/// Process-local, non-serializable selection. It borrows the Seen-owned
+/// cuBLASLt handle only during creation and owns no CUDA allocation or handle.
+/// Reuse is permitted only for the exact device and descriptor identity.
+@move
+pub class QwenCudaProjectionSelection {
+    var descriptor: CudaMatmulDescriptor
+    var algorithm: CudaAlgorithm
+    var deviceOrdinal: Int32
+    var active: Bool
+
+    fun matches(deviceOrdinal: Int32, tokenCount: UInt64,
+        inputWidth: UInt64, outputWidth: UInt64, dataType: Int32,
+        workspaceLimitBytes: UInt64) r: Bool {
+        return this.active and this.deviceOrdinal == deviceOrdinal and
+            this.descriptor.abiVersion == CUDA_ABI_VERSION and
+            this.descriptor.dataType == dataType and
+            this.descriptor.transposeA == (1 as Int32) and
+            this.descriptor.transposeB == (0 as Int32) and
+            this.descriptor.m == outputWidth and
+            this.descriptor.n == tokenCount and
+            this.descriptor.k == inputWidth and
+            this.descriptor.leadingA == inputWidth as Int64 and
+            this.descriptor.leadingB == inputWidth as Int64 and
+            this.descriptor.leadingC == outputWidth as Int64 and
+            this.descriptor.workspaceLimitBytes == workspaceLimitBytes and
+            this.algorithm.cacheIdentity != (0 as UInt64) and
+            this.algorithm.workspaceBytes <= workspaceLimitBytes
+    }
+
+    fun close() r: Bool {
+        if not this.active { return false }
+        this.algorithm = CudaAlgorithm{ algorithmId: 0 as Int32,
+            tileId: 0 as Int32, splitK: 0 as Int32,
+            reductionScheme: 0 as Int32, workspaceBytes: 0 as UInt64,
+            cacheIdentity: 0 as UInt64 }
+        this.active = false
+        return true
+    }
+}
+
+pub fun selectQwenCudaProjection(handle: CublasLtHandle,
+    deviceOrdinal: Int32, tokenCount: UInt64, inputWidth: UInt64,
+    outputWidth: UInt64, dataType: Int32, workspaceLimitBytes: UInt64)
+    r: Result<QwenCudaProjectionSelection, CudaError> {
+    if handle.handle == (0 as UInt64) or handle.device != deviceOrdinal {
+        return Err<QwenCudaProjectionSelection, CudaError>(qwenProjectionError(
+            deviceOrdinal, "projection selection requires the live matching Seen handle"))
+    }
+    let made = qwenCudaProjectionDescriptor(tokenCount, inputWidth,
+        outputWidth, dataType, workspaceLimitBytes)
+    if made.isErr() {
+        return Err<QwenCudaProjectionSelection, CudaError>(made.unwrapErr())
+    }
+    let descriptor = made.unwrap()
+    let selected = handle.selectAlgorithm(descriptor)
+    if selected.isErr() {
+        return Err<QwenCudaProjectionSelection, CudaError>(selected.unwrapErr())
+    }
+    return Ok<QwenCudaProjectionSelection, CudaError>(
+        QwenCudaProjectionSelection{ descriptor: descriptor,
+            algorithm: selected.unwrap(), deviceOrdinal: deviceOrdinal,
+            active: true })
+}
