@@ -29,6 +29,7 @@ modules = [
     "src/tokenizer/tokenizer.seen",
     "src/artifact/engine_artifact.seen",
     "src/backend/cuda/reference_primitives.seen",
+    "src/backend/cuda/projection.seen",
 ]
 
 [build]
