@@ -52,6 +52,10 @@ SeenCudaStatus seen_qwen_silu_f32(
 SeenCudaStatus seen_qwen_swiglu_f32(
     const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView gate,
     SeenQwenCudaBufferView up, SeenQwenCudaBufferView output, uint64_t count);
+SeenCudaStatus seen_qwen_swiglu_low_precision(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView gate,
+    SeenQwenCudaBufferView up, SeenQwenCudaBufferView output, uint64_t count,
+    int32_t data_type);
 SeenCudaStatus seen_qwen_sigmoid_gate_f32(
     const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
     SeenQwenCudaBufferView gate, SeenQwenCudaBufferView output, uint64_t count);

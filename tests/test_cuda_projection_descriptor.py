@@ -44,7 +44,7 @@ class CudaProjectionDescriptorContractTest(unittest.TestCase):
         for required in (
             "scripts/oracle/run_bounded.sh", "QWN_TASKS_MAX=32",
             "qwn_043a_cuda_test", "compute-sanitizer", "--leak-check full",
-            "nvidia-smi", "03a06cc002355251b7aeea3539a3ceb466d447733a66e5b0ee3ab8c184672124",
+            "nvidia-smi", "5fa95f150e652843795611810f02de9ca1fb6e2914ac1159fd75912bc4ae8231",
         ):
             self.assertIn(required, self.runner)
         self.assertNotIn("sudo", self.runner)

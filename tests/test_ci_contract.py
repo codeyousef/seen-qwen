@@ -65,13 +65,13 @@ class CiContractTests(unittest.TestCase):
 
     def test_inputs_match_dependency_and_oracle_locks(self) -> None:
         identities = (
-            "91bf9e66ebbb231c31c6564e28edc6a34f3f315e",
-            "83868498710653ef926c10d0ad5603e315456b0a",
-            "e30efc5f1eb27c9b36e67148f32556968001f948",
-            "94e2428606adc12a9bae249d4fc89b5ef1a073a3fcfe3034f6f52ad1bc3e5a22",
-            "03a06cc002355251b7aeea3539a3ceb466d447733a66e5b0ee3ab8c184672124",
-            "d5343ef51bee979b59faef43b721726ec1a490b980a05786ec99c5e197358e63",
-            "d4c95ac9ed50e889308974288520b85db891b464c7ec8ac35f40fc335661280c",
+            "fb2a7b3633d69effda6b2b5889e061da505af1e7",
+            "52087a68550234cc3895a37902b4a286b1db2060",
+            "a1edb404b4ea6879e27faafb5f61546af7674a01",
+            "2cf025d2b98f89eab70496efc32e8320308372729d208f8cc3b1893fa3fd3ab7",
+            "5fa95f150e652843795611810f02de9ca1fb6e2914ac1159fd75912bc4ae8231",
+            "91b9db87826131517830e8b0b65280c71a5a5d4ea953325c60e4fee1fbf4a754",
+            "b8a85368c2092fd635a5be45e505082f40a9e25107bcd33bf12e0caa45c540ee",
             "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
             "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
             "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
@@ -142,31 +142,42 @@ class CiContractTests(unittest.TestCase):
         )
         self.assertIn("qwn_043a_projection_descriptor_test_fast", self.inner)
         self.assertIn("qwn_043a_projection_descriptor_test", self.inner)
+        self.assertIn("tests/test_cuda_ffn_execution.py", self.inner)
+        self.assertIn(
+            "tests/qwn_043b_ffn_execution_test.seen --frozen", self.inner
+        )
+        self.assertIn("qwn_043b_ffn_execution_test_fast", self.inner)
+        self.assertIn("qwn_043b_ffn_execution_test", self.inner)
+        self.assertIn("qwn_043b_cpu_project", self.inner)
+        self.assertIn("seen_cuda_link_stubs.c", self.inner)
+        self.assertIn("seen_qwen_cuda_link_stubs.c", self.inner)
+        self.assertIn("clang -shared -fPIC -O2 -Wl,--no-undefined", self.inner)
+        self.assertNotIn("nvcc", self.inner)
 
     def test_seen_release_provenance_is_exact_and_current(self) -> None:
         compiler_sha256 = (
-            "03a06cc002355251b7aeea3539a3ceb466d447733a66e5b0ee3ab8c184672124"
+            "5fa95f150e652843795611810f02de9ca1fb6e2914ac1159fd75912bc4ae8231"
         )
         archive_sha256 = (
-            "94e2428606adc12a9bae249d4fc89b5ef1a073a3fcfe3034f6f52ad1bc3e5a22"
+            "2cf025d2b98f89eab70496efc32e8320308372729d208f8cc3b1893fa3fd3ab7"
         )
-        source_commit = "91bf9e66ebbb231c31c6564e28edc6a34f3f315e"
-        build_id = "7c842fa5b49e9f4d8da003553e2d6456a1c0b4a7"
+        source_commit = "fb2a7b3633d69effda6b2b5889e061da505af1e7"
+        build_id = "50859fd52afa920237528c3cf6b2667ab3ad77cb"
 
         for lock_entry in (
-            '# release_tag = "v0.20.5"',
+            '# release_tag = "v0.20.7"',
             f'# certified_commit = "{source_commit}"',
             f'# linux_x64_archive_sha256 = "{archive_sha256}"',
             f'# packaged_compiler_sha256 = "{compiler_sha256}"',
             f'# compiler_build_id = "{build_id}"',
-            "compiler=0.20.5",
+            "compiler=0.20.7",
             "target=linux-x86_64",
             "cpu=x86-64",
         ):
             self.assertIn(lock_entry, self.lock)
 
         for prepare_entry in (
-            "releases/download/v0.20.5/seen-0.20.5-linux-x64.tar.gz",
+            "releases/download/v0.20.7/seen-0.20.7-linux-x64.tar.gz",
             archive_sha256,
             compiler_sha256,
             source_commit,
@@ -185,9 +196,9 @@ class CiContractTests(unittest.TestCase):
             self.assertIn(prepare_entry, self.prepare)
 
         for inner_entry in (
-            "seen-0.20.5-linux-x64",
+            "seen-0.20.7-linux-x64",
             compiler_sha256,
-            "Seen 0.20.5",
+            "Seen 0.20.7",
             "--target-cpu=x86-64",
         ):
             self.assertIn(inner_entry, self.inner)
