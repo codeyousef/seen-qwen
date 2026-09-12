@@ -1,6 +1,8 @@
 #include "seen_qwen_cuda.h"
 
 #include <cuda.h>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
 
 #include <cstddef>
@@ -257,6 +259,20 @@ __global__ void swiglu_f32(const float *gate, const float *up, float *output,
         const float activated = __fdividef(gate[index],
             __fadd_rn(1.0f, expf(-gate[index])));
         output[index] = __fmul_rn(activated, up[index]);
+    }
+}
+
+template <typename T>
+__global__ void swiglu_low_precision(const T *gate, const T *up, T *output,
+                                     uint64_t count) {
+    const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+        threadIdx.x;
+    if (index < count) {
+        const float gate_value = static_cast<float>(gate[index]);
+        const float up_value = static_cast<float>(up[index]);
+        const float activated = __fdividef(gate_value,
+            __fadd_rn(1.0f, expf(-gate_value)));
+        output[index] = static_cast<T>(__fmul_rn(activated, up_value));
     }
 }
 
@@ -899,6 +915,44 @@ extern "C" SeenCudaStatus seen_qwen_swiglu_f32(
         (overlaps(up, bytes, output, bytes) && up.address != output.address))
         return invalid(token->device_ordinal, op, "partially overlapping SwiGLU buffers are unsupported");
     swiglu_f32<<<blocks, kThreads, 0, stream>>>(pointer<const float>(gate), pointer<const float>(up), pointer<float>(output), count);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_swiglu_low_precision(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView gate,
+    SeenQwenCudaBufferView up, SeenQwenCudaBufferView output, uint64_t count,
+    int32_t data_type) {
+    constexpr const char *op = "seen_qwen_swiglu_low_precision";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint32_t blocks = 0;
+    uint64_t bytes = 0;
+    if (!launch_shape(count, &blocks) ||
+        !checked_multiply(count, 2, &bytes) ||
+        (data_type != SEEN_CUDA_F16 && data_type != SEEN_CUDA_BF16))
+        return invalid(token->device_ordinal, op,
+                       "invalid F16/BF16 SwiGLU geometry or dtype");
+    for (const SeenQwenCudaBufferView view : {gate, up, output}) {
+        checked = validate_view(view, bytes, token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    const bool gate_output_alias = gate.address == output.address;
+    if (overlaps(gate, bytes, up, bytes) ||
+        (overlaps(gate, bytes, output, bytes) && !gate_output_alias) ||
+        overlaps(up, bytes, output, bytes))
+        return invalid(token->device_ordinal, op,
+                       "unsupported low-precision SwiGLU buffer overlap");
+    if (data_type == SEEN_CUDA_F16) {
+        swiglu_low_precision<<<blocks, kThreads, 0, stream>>>(
+            pointer<const __half>(gate), pointer<const __half>(up),
+            pointer<__half>(output), count);
+    } else {
+        swiglu_low_precision<<<blocks, kThreads, 0, stream>>>(
+            pointer<const __nv_bfloat16>(gate),
+            pointer<const __nv_bfloat16>(up),
+            pointer<__nv_bfloat16>(output), count);
+    }
     return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
 }
 

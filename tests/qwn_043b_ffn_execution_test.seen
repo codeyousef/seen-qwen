@@ -1,0 +1,38 @@
+import seen_qwen.backend.cuda.projection.{QWEN_CUDA_PROJECTION_BF16,
+    QWEN_CUDA_PROJECTION_F16, createQwenCudaFfnExecutor,
+    qwenCudaProjectionDescriptor}
+
+fun require(condition: Bool, message: String) {
+    if not condition {
+        println("FAIL: " + message)
+        exit(1)
+    }
+}
+
+fun main() r: Int {
+    let gate = qwenCudaProjectionDescriptor(1 as UInt64, 5120 as UInt64,
+        17408 as UInt64, QWEN_CUDA_PROJECTION_BF16,
+        33554432 as UInt64)
+    let down = qwenCudaProjectionDescriptor(1 as UInt64, 17408 as UInt64,
+        5120 as UInt64, QWEN_CUDA_PROJECTION_BF16,
+        33554432 as UInt64)
+    require(gate.isOkay() and down.isOkay(),
+        "accept exact Qwen3.8 gate/up/down projection geometry")
+    require(gate.unwrap().m == down.unwrap().k and
+        gate.unwrap().k == down.unwrap().m and
+        gate.unwrap().n == down.unwrap().n,
+        "compose gate/up and down descriptors without a layout transform")
+    require(createQwenCudaFfnExecutor(0 as Int32, 0 as UInt64,
+        5120 as UInt64, 17408 as UInt64, QWEN_CUDA_PROJECTION_BF16,
+        0 as UInt64).isErr(), "reject zero-token FFN before CUDA discovery")
+    require(createQwenCudaFfnExecutor(0 as Int32, 1 as UInt64,
+        5120 as UInt64, 17408 as UInt64, 3 as Int32,
+        0 as UInt64).isErr(), "reject unsupported FFN dtype before CUDA discovery")
+    require(qwenCudaProjectionDescriptor(3 as UInt64, 8 as UInt64,
+        12 as UInt64, QWEN_CUDA_PROJECTION_F16,
+        8388608 as UInt64).isOkay(), "accept bounded F16 mini differential")
+    println("PASS: QWN-043B exact checked Qwen FFN execution contract")
+    return 0
+}
+
+main()

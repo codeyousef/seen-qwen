@@ -3,9 +3,12 @@
 /// same bytes as column-major transposes and computes Y^T = W * X^T.
 
 import accelerator.cuda.mod.{CUDA_ABI_VERSION, CudaAlgorithm,
-    CudaMatmulDescriptor, CublasLtHandle}
-import accelerator.cuda.error.{CudaError}
+    CudaMatmulDescriptor, CudaStream, CublasLtHandle}
+import accelerator.cuda.error.{CudaNativeStatus, CudaError, cudaError,
+    cudaSucceeded}
 import core.result.{Result}
+import seen_qwen.backend.cuda.reference_primitives.{QWEN_CUDA_REFERENCE_ABI_VERSION,
+    QwenCudaBufferView, seen_qwen_swiglu_low_precision}
 
 let QWEN_CUDA_PROJECTION_F16: Int32 = 1 as Int32
 let QWEN_CUDA_PROJECTION_BF16: Int32 = 2 as Int32
@@ -113,4 +116,214 @@ pub fun selectQwenCudaProjection(handle: CublasLtHandle,
         QwenCudaProjectionSelection{ descriptor: descriptor,
             algorithm: selected.unwrap(), deviceOrdinal: deviceOrdinal,
             active: true })
+}
+
+fun qwenProjectionBytes(left: UInt64, right: UInt64) r: UInt64 {
+    let limit = 0x7FFFFFFFFFFFFFFF as UInt64
+    if left == (0 as UInt64) or right == (0 as UInt64) or
+        left > limit / right { return 0 as UInt64 }
+    let elements = left * right
+    if elements > limit / (2 as UInt64) { return 0 as UInt64 }
+    return elements * (2 as UInt64)
+}
+
+fun qwenProjectionViewValid(view: QwenCudaBufferView,
+    deviceOrdinal: Int32, requiredBytes: UInt64) r: Bool {
+    return view.abiVersion == QWEN_CUDA_REFERENCE_ABI_VERSION and
+        view.deviceOrdinal == deviceOrdinal and view.address != (0 as UInt64) and
+        requiredBytes != (0 as UInt64) and view.byteLength >= requiredBytes
+}
+
+extern "C" fun seen_cublaslt_select_algorithm(handle: UInt64,
+    descriptor: *const CudaMatmulDescriptor,
+    algorithm: *CudaAlgorithm) r: CudaNativeStatus
+extern "C" fun seen_cublaslt_matmul(handle: UInt64,
+    descriptor: *const CudaMatmulDescriptor,
+    algorithm: *const CudaAlgorithm, a: *const Void, b: *const Void,
+    c: *Void, workspace: *Void, stream: UInt64)
+    r: CudaNativeStatus
+
+/// Enqueue the exact pinned Qwen3.8 text MLP:
+/// down_proj(SiLU(gate_proj(x)) * up_proj(x)). The three selections and every
+/// buffer views are borrowed from caller-owned, preallocated device storage.
+/// Gate and activation may be the same exact view. The executor owns the one
+/// Seen handle and stream used for all four enqueues and closes them
+/// deterministically; it never allocates in execute().
+@move
+pub class QwenCudaFfnExecutor {
+    var handle: CublasLtHandle
+    var stream: CudaStream
+    var gateSelection: QwenCudaProjectionSelection
+    var upSelection: QwenCudaProjectionSelection
+    var downSelection: QwenCudaProjectionSelection
+    var deviceOrdinal: Int32
+    var active: Bool
+
+    fun execute(input: QwenCudaBufferView, gateWeight: QwenCudaBufferView,
+        upWeight: QwenCudaBufferView, downWeight: QwenCudaBufferView,
+        gateOutput: QwenCudaBufferView, upOutput: QwenCudaBufferView,
+        activation: QwenCudaBufferView, output: QwenCudaBufferView,
+        workspace: QwenCudaBufferView) r: Result<Bool, CudaError> {
+        let gate = this.gateSelection.descriptor
+        let up = this.upSelection.descriptor
+        let down = this.downSelection.descriptor
+        if not this.active or gate.dataType != up.dataType or
+            gate.dataType != down.dataType or gate.n != up.n or
+            gate.n != down.n or gate.k != up.k or gate.m != up.m or
+            down.k != gate.m or down.m != gate.k {
+            return Err<Bool, CudaError>(qwenProjectionError(this.deviceOrdinal,
+                "FFN executor is closed or internally incompatible"))
+        }
+        let inputBytes = qwenProjectionBytes(gate.n, gate.k)
+        let intermediateBytes = qwenProjectionBytes(gate.n, gate.m)
+        let gateWeightBytes = qwenProjectionBytes(gate.m, gate.k)
+        let downWeightBytes = qwenProjectionBytes(down.m, down.k)
+        let outputBytes = qwenProjectionBytes(down.n, down.m)
+        if not qwenProjectionViewValid(input, this.deviceOrdinal, inputBytes) or
+            not qwenProjectionViewValid(gateWeight, this.deviceOrdinal,
+                gateWeightBytes) or
+            not qwenProjectionViewValid(upWeight, this.deviceOrdinal,
+                gateWeightBytes) or
+            not qwenProjectionViewValid(downWeight, this.deviceOrdinal,
+                downWeightBytes) or
+            not qwenProjectionViewValid(gateOutput, this.deviceOrdinal,
+                intermediateBytes) or
+            not qwenProjectionViewValid(upOutput, this.deviceOrdinal,
+                intermediateBytes) or
+            not qwenProjectionViewValid(activation, this.deviceOrdinal,
+                intermediateBytes) or
+            not qwenProjectionViewValid(output, this.deviceOrdinal,
+                outputBytes) or gateOutput.address == upOutput.address or
+            activation.address == upOutput.address or
+            (activation.address != gateOutput.address and
+                activation.address == input.address) {
+            return Err<Bool, CudaError>(qwenProjectionError(this.deviceOrdinal,
+                "FFN received invalid or incompatible bounded buffer views"))
+        }
+        let workspaceRequired = this.gateSelection.algorithm.workspaceBytes
+        var required = workspaceRequired
+        if this.upSelection.algorithm.workspaceBytes > required {
+            required = this.upSelection.algorithm.workspaceBytes
+        }
+        if this.downSelection.algorithm.workspaceBytes > required {
+            required = this.downSelection.algorithm.workspaceBytes
+        }
+        if required > (0 as UInt64) and
+            not qwenProjectionViewValid(workspace, this.deviceOrdinal, required) {
+            return Err<Bool, CudaError>(qwenProjectionError(this.deviceOrdinal,
+                "FFN workspace is absent, closed, or too small"))
+        }
+        var status = seen_cublaslt_matmul(this.handle.handle, &gate,
+            &this.gateSelection.algorithm, gateWeight.address as *const Void,
+            input.address as *const Void, gateOutput.address as *Void,
+            workspace.address as *Void, this.stream.handle)
+        if not cudaSucceeded(status) {
+            return Err<Bool, CudaError>(cudaError(status))
+        }
+        status = seen_cublaslt_matmul(this.handle.handle, &up,
+            &this.upSelection.algorithm, upWeight.address as *const Void,
+            input.address as *const Void, upOutput.address as *Void,
+            workspace.address as *Void, this.stream.handle)
+        if not cudaSucceeded(status) {
+            return Err<Bool, CudaError>(cudaError(status))
+        }
+        let borrowed = this.stream.borrowLaunchToken()
+        if borrowed.isErr() { return Err<Bool, CudaError>(borrowed.unwrapErr()) }
+        let token = borrowed.unwrap()
+        status = seen_qwen_swiglu_low_precision(&token, gateOutput, upOutput,
+            activation, gate.n * gate.m, gate.dataType)
+        if not cudaSucceeded(status) {
+            return Err<Bool, CudaError>(cudaError(status))
+        }
+        status = seen_cublaslt_matmul(this.handle.handle, &down,
+            &this.downSelection.algorithm, downWeight.address as *const Void,
+            activation.address as *const Void, output.address as *Void,
+            workspace.address as *Void, this.stream.handle)
+        if not cudaSucceeded(status) {
+            return Err<Bool, CudaError>(cudaError(status))
+        }
+        return Ok<Bool, CudaError>(true)
+    }
+
+    fun close() r: Result<Bool, CudaError> {
+        if not this.active { return Ok<Bool, CudaError>(false) }
+        this.gateSelection.close(); this.upSelection.close()
+        this.downSelection.close()
+        let handleClosed = this.handle.close()
+        let streamClosed = this.stream.close()
+        this.active = false
+        if handleClosed.isErr() {
+            return Err<Bool, CudaError>(handleClosed.unwrapErr())
+        }
+        if streamClosed.isErr() {
+            return Err<Bool, CudaError>(streamClosed.unwrapErr())
+        }
+        return Ok<Bool, CudaError>(true)
+    }
+}
+
+fun qwenSelectFfnProjection(handle: UInt64,
+    descriptor: CudaMatmulDescriptor, deviceOrdinal: Int32)
+    r: Result<QwenCudaProjectionSelection, CudaError> {
+    var algorithm = CudaAlgorithm{ algorithmId: 0 as Int32,
+        tileId: 0 as Int32, splitK: 0 as Int32,
+        reductionScheme: 0 as Int32, workspaceBytes: 0 as UInt64,
+        cacheIdentity: 0 as UInt64 }
+    let status = seen_cublaslt_select_algorithm(handle, &descriptor, &algorithm)
+    if not cudaSucceeded(status) {
+        return Err<QwenCudaProjectionSelection, CudaError>(cudaError(status))
+    }
+    return Ok<QwenCudaProjectionSelection, CudaError>(
+        QwenCudaProjectionSelection{ descriptor: descriptor,
+            algorithm: algorithm, deviceOrdinal: deviceOrdinal, active: true })
+}
+
+pub fun createQwenCudaFfnExecutor(deviceOrdinal: Int32, tokenCount: UInt64,
+    hiddenWidth: UInt64, intermediateWidth: UInt64, dataType: Int32,
+    workspaceLimitBytes: UInt64)
+    r: Result<QwenCudaFfnExecutor, CudaError> {
+    let gateDescriptor = qwenCudaProjectionDescriptor(tokenCount, hiddenWidth,
+        intermediateWidth, dataType, workspaceLimitBytes)
+    if gateDescriptor.isErr() {
+        return Err<QwenCudaFfnExecutor, CudaError>(gateDescriptor.unwrapErr())
+    }
+    let downDescriptor = qwenCudaProjectionDescriptor(tokenCount,
+        intermediateWidth, hiddenWidth, dataType, workspaceLimitBytes)
+    if downDescriptor.isErr() {
+        return Err<QwenCudaFfnExecutor, CudaError>(downDescriptor.unwrapErr())
+    }
+    let madeHandle = CublasLtHandle.create(deviceOrdinal)
+    if madeHandle.isErr() {
+        return Err<QwenCudaFfnExecutor, CudaError>(madeHandle.unwrapErr())
+    }
+    let madeStream = CudaStream.create(deviceOrdinal)
+    if madeStream.isErr() {
+        let _ = madeHandle.unwrap().close()
+        return Err<QwenCudaFfnExecutor, CudaError>(madeStream.unwrapErr())
+    }
+    let handle = madeHandle.unwrap()
+    let stream = madeStream.unwrap()
+    let gate = qwenSelectFfnProjection(handle.handle, gateDescriptor.unwrap(),
+        deviceOrdinal)
+    if gate.isErr() {
+        let _ = handle.close(); let _ = stream.close()
+        return Err<QwenCudaFfnExecutor, CudaError>(gate.unwrapErr())
+    }
+    let up = qwenSelectFfnProjection(handle.handle, gateDescriptor.unwrap(),
+        deviceOrdinal)
+    if up.isErr() {
+        gate.unwrap().close(); let _ = handle.close(); let _ = stream.close()
+        return Err<QwenCudaFfnExecutor, CudaError>(up.unwrapErr())
+    }
+    let down = qwenSelectFfnProjection(handle.handle, downDescriptor.unwrap(),
+        deviceOrdinal)
+    if down.isErr() {
+        gate.unwrap().close(); up.unwrap().close()
+        let _ = handle.close(); let _ = stream.close()
+        return Err<QwenCudaFfnExecutor, CudaError>(down.unwrapErr())
+    }
+    return Ok<QwenCudaFfnExecutor, CudaError>(QwenCudaFfnExecutor{
+        handle: handle, stream: stream, gateSelection: gate.unwrap(),
+        upSelection: up.unwrap(), downSelection: down.unwrap(),
+        deviceOrdinal: deviceOrdinal, active: true })
 }

@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd -P -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
 GIT_COMMON_DIR="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)"
 SHARED_ROOT="${GIT_COMMON_DIR%/.git}"
-TOOLCHAIN_ROOT="${SEEN_TOOLCHAIN_ROOT:-$SHARED_ROOT/.seen/toolchains/seen-0.20.5-linux-x64}"
+TOOLCHAIN_ROOT="${SEEN_TOOLCHAIN_ROOT:-$SHARED_ROOT/.seen/toolchains/v0.20.7/seen-0.20.7-linux-x64}"
 ARTIFACT_ROOT="$ROOT_DIR/.seen/artifacts/qwn_043a"
 
 if [ "${1:-}" != "--inner" ]; then
@@ -20,8 +20,8 @@ fi
 SEEN_BIN="$TOOLCHAIN_ROOT/bin/seen"
 SEEN_CUDA_ROOT="$TOOLCHAIN_ROOT/lib/seen/runtime/cuda"
 BUILD_ROOT="$ARTIFACT_ROOT/build"
-printf '%s  %s\n' 03a06cc002355251b7aeea3539a3ceb466d447733a66e5b0ee3ab8c184672124 "$SEEN_BIN" | sha256sum -c -
-"$SEEN_BIN" --version | grep -Fx 'Seen 0.20.5'
+printf '%s  %s\n' 5fa95f150e652843795611810f02de9ca1fb6e2914ac1159fd75912bc4ae8231 "$SEEN_BIN" | sha256sum -c -
+"$SEEN_BIN" --version | grep -Fx 'Seen 0.20.7'
 
 toolchain_hash_before=$(find "$TOOLCHAIN_ROOT" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
 outside_objects_before=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o -type f \( -name '*.o' -o -name '*.sig' -o -name '*.a' \) -print0 | sort -z | xargs -0 -r sha256sum | sha256sum | awk '{print $1}')
@@ -57,4 +57,4 @@ toolchain_hash_after=$(find "$TOOLCHAIN_ROOT" -type f -print0 | sort -z | xargs 
 [ "$toolchain_hash_after" = "$toolchain_hash_before" ] || exit 126
 outside_objects_after=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o -type f \( -name '*.o' -o -name '*.sig' -o -name '*.a' \) -print0 | sort -z | xargs -0 -r sha256sum | sha256sum | awk '{print $1}')
 [ "$outside_objects_after" = "$outside_objects_before" ] || exit 126
-echo "PASS: QWN-043A v0.20.5 descriptor, RTX 4090, sanitizer, and cleanup gates"
+echo "PASS: QWN-043A v0.20.7 descriptor, RTX 4090, sanitizer, and cleanup gates"
