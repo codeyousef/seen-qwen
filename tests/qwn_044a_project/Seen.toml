@@ -1,0 +1,22 @@
+manifest-version = 1
+
+[project]
+name = "seen_qwen"
+version = "0.15.0-dev"
+language = "en"
+visibility = "private"
+edition = "2025"
+modules = [
+    "src/backend/cuda/reference_primitives.seen",
+    "src/backend/cuda/projection.seen",
+]
+
+[build]
+targets = ["native"]
+optimize = "speed"
+
+[dependencies]
+
+[native.dependencies]
+seen_qwen_cuda = { path = "native/lib" }
+seen_cuda = { path = "native/lib" }

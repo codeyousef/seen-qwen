@@ -1,0 +1,35 @@
+import seen_qwen.backend.cuda.projection.{QWEN_CUDA_PROJECTION_BF16,
+    QWEN_CUDA_PROJECTION_F16, createQwenCudaLmHeadExecutor,
+    qwenCudaProjectionDescriptor}
+
+fun require(condition: Bool, message: String) {
+    if not condition { println("FAIL: " + message); exit(1) }
+}
+
+fun main() r: Int {
+    let official = qwenCudaProjectionDescriptor(1 as UInt64,
+        5120 as UInt64, 248320 as UInt64, QWEN_CUDA_PROJECTION_BF16,
+        33554432 as UInt64)
+    require(official.isOkay(), "accept exact resident Qwen LM-head geometry")
+    let value = official.unwrap()
+    require(value.m == (248320 as UInt64) and value.n == (1 as UInt64) and
+        value.k == (5120 as UInt64) and value.transposeA == (1 as Int32) and
+        value.transposeB == (0 as Int32) and
+        value.leadingA == (5120 as Int64) and
+        value.leadingB == (5120 as Int64) and
+        value.leadingC == (248320 as Int64),
+        "map resident row-major LM-head bytes without a layout transform")
+    require(qwenCudaProjectionDescriptor(2 as UInt64, 8 as UInt64,
+        16 as UInt64, QWEN_CUDA_PROJECTION_F16,
+        8388608 as UInt64).isOkay(), "accept bounded F16 differential")
+    require(createQwenCudaLmHeadExecutor(0 as Int32, 0 as UInt64,
+        5120 as UInt64, 248320 as UInt64, QWEN_CUDA_PROJECTION_BF16,
+        0 as UInt64).isErr(), "reject zero rows before CUDA discovery")
+    require(createQwenCudaLmHeadExecutor(0 as Int32, 1 as UInt64,
+        5120 as UInt64, 248320 as UInt64, 3 as Int32,
+        0 as UInt64).isErr(), "reject unsupported dtype before CUDA discovery")
+    println("PASS: QWN-044A resident LM-head and deterministic greedy contract")
+    return 0
+}
+
+main()

@@ -111,6 +111,7 @@ python3 -m unittest tests/test_ci_contract.py tests/test_cuda_reference_primitiv
     tests/test_cuda_attention_output_gate.py \
     tests/test_cuda_projection_descriptor.py \
     tests/test_cuda_ffn_execution.py \
+    tests/test_cuda_lm_head_greedy.py \
     tests/test_qwen_tokenizer_oracles.py \
     tests/test_sampling_profiles.py tests/test_hybrid_mini_contract.py \
     tests/test_hybrid_mini_assets.py tests/test_hybrid_mini_oracle.py \
@@ -160,6 +161,7 @@ python3 -m unittest tests/test_ci_contract.py tests/test_cuda_reference_primitiv
 "$SEEN_COMPILER" check tests/qwn_042e_attention_output_gate_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_043a_projection_descriptor_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_043b_ffn_execution_test.seen --frozen
+"$SEEN_COMPILER" check tests/qwn_044a_lm_head_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022d_sampling_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022b_tokenizer_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022c_chat_template_test.seen --frozen
@@ -214,6 +216,31 @@ clang -shared -fPIC -O2 -Wl,--no-undefined \
     --release --lto=thin --target-cpu=x86-64 --no-cache \
     --jobs 1 --opt-jobs 1 --no-fork --offline
 "$OUTPUT_ROOT/qwn_043b_ffn_execution_test"
+QWN_044A_CPU_PROJECT=$(mktemp -d "$OUTPUT_ROOT/qwn_044a_cpu_project.XXXXXX")
+cp -R "$ROOT_DIR/src" "$QWN_044A_CPU_PROJECT/src"
+mkdir -p "$QWN_044A_CPU_PROJECT/tests" "$QWN_044A_CPU_PROJECT/native/lib"
+cp "$ROOT_DIR/tests/qwn_044a_lm_head_test.seen" \
+    "$QWN_044A_CPU_PROJECT/tests/qwn_044a_lm_head_test.seen"
+cp "$ROOT_DIR/tests/qwn_044a_project/Seen.toml" \
+    "$QWN_044A_CPU_PROJECT/Seen.toml"
+clang -shared -fPIC -O2 -Wl,--no-undefined \
+    "$ROOT_DIR/tests/qwn_044a_project/seen_cuda_link_stubs.c" \
+    -o "$QWN_044A_CPU_PROJECT/native/lib/libseen_cuda.so"
+clang -shared -fPIC -O2 -Wl,--no-undefined \
+    "$ROOT_DIR/tests/qwn_044a_project/seen_qwen_cuda_link_stubs.c" \
+    -o "$QWN_044A_CPU_PROJECT/native/lib/libseen_qwen_cuda.so"
+"$SEEN_COMPILER" compile \
+    "$QWN_044A_CPU_PROJECT/tests/qwn_044a_lm_head_test.seen" \
+    "$OUTPUT_ROOT/qwn_044a_lm_head_test_fast" \
+    --target-cpu=x86-64 --no-cache \
+    --jobs 1 --opt-jobs 1 --no-fork --offline
+"$OUTPUT_ROOT/qwn_044a_lm_head_test_fast"
+"$SEEN_COMPILER" compile \
+    "$QWN_044A_CPU_PROJECT/tests/qwn_044a_lm_head_test.seen" \
+    "$OUTPUT_ROOT/qwn_044a_lm_head_test" \
+    --release --lto=thin --target-cpu=x86-64 --no-cache \
+    --jobs 1 --opt-jobs 1 --no-fork --offline
+"$OUTPUT_ROOT/qwn_044a_lm_head_test"
 "$SEEN_COMPILER" compile tests/qwn_040b_reference_utilities_test.seen \
     "$OUTPUT_ROOT/qwn_040b_reference_utilities_test_fast" \
     --target-cpu=x86-64 --no-cache \

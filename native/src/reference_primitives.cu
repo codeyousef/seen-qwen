@@ -645,6 +645,24 @@ __global__ void greedy_argmax_f32(const float *logits, int32_t *token_ids,
     token_ids[row] = static_cast<int32_t>(best);
 }
 
+template <typename T>
+__global__ void greedy_argmax_low_precision(const T *logits,
+                                            int32_t *token_ids,
+                                            uint64_t rows, uint64_t width,
+                                            uint64_t vocabulary_size) {
+    const uint64_t row = blockIdx.x;
+    if (row >= rows || threadIdx.x != 0) return;
+    const T *values = logits + row * width;
+    uint64_t best = 0;
+    for (uint64_t token = 1; token < vocabulary_size; ++token) {
+        const float best_value = static_cast<float>(values[best]);
+        const float candidate = static_cast<float>(values[token]);
+        if ((isnan(best_value) && !isnan(candidate)) ||
+            candidate > best_value) best = token;
+    }
+    token_ids[row] = static_cast<int32_t>(best);
+}
+
 __global__ void top_k_f32(const float *logits, int32_t *token_ids,
                           float *top_values, uint64_t rows, uint64_t width,
                           uint64_t vocabulary_size, uint64_t top_k) {
@@ -1237,6 +1255,43 @@ extern "C" SeenCudaStatus seen_qwen_greedy_argmax_f32(
     greedy_argmax_f32<<<static_cast<uint32_t>(rows), 1, 0, stream>>>(
         pointer<const float>(logits), pointer<int32_t>(token_id), rows, width,
         vocabulary_size);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_greedy_argmax_low_precision(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView logits,
+    SeenQwenCudaBufferView token_id, uint64_t rows, uint64_t width,
+    uint64_t vocabulary_size, int32_t data_type) {
+    constexpr const char *op = "seen_qwen_greedy_argmax_low_precision";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t count = 0, bytes = 0, id_bytes = 0;
+    if (!checked_multiply(rows, width, &count) ||
+        !checked_multiply(count, 2, &bytes) ||
+        !checked_multiply(rows, sizeof(int32_t), &id_bytes) || rows == 0 ||
+        rows > UINT32_MAX || vocabulary_size == 0 ||
+        vocabulary_size > width || vocabulary_size > INT32_MAX ||
+        (data_type != SEEN_CUDA_F16 && data_type != SEEN_CUDA_BF16))
+        return invalid(token->device_ordinal, op,
+                       "invalid low-precision greedy sampling geometry");
+    checked = validate_view(logits, bytes, token->device_ordinal, op);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    checked = validate_view(token_id, id_bytes, token->device_ordinal, op);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    if (overlaps(logits, bytes, token_id, id_bytes))
+        return invalid(token->device_ordinal, op,
+                       "overlapping low-precision greedy buffers are unsupported");
+    if (data_type == SEEN_CUDA_F16) {
+        greedy_argmax_low_precision<<<static_cast<uint32_t>(rows), 1, 0,
+            stream>>>(pointer<const __half>(logits), pointer<int32_t>(token_id),
+                      rows, width, vocabulary_size);
+    } else {
+        greedy_argmax_low_precision<<<static_cast<uint32_t>(rows), 1, 0,
+            stream>>>(pointer<const __nv_bfloat16>(logits),
+                      pointer<int32_t>(token_id), rows, width,
+                      vocabulary_size);
+    }
     return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
 }
 
