@@ -315,6 +315,10 @@ extern "C" fun seen_qwen_swiglu_low_precision(
     token: *const CudaStreamLaunchToken, gate: QwenCudaBufferView,
     up: QwenCudaBufferView, output: QwenCudaBufferView,
     count: UInt64, dataType: Int32) r: CudaNativeStatus
+extern "C" fun seen_qwen_greedy_argmax_low_precision(
+    token: *const CudaStreamLaunchToken, logits: QwenCudaBufferView,
+    tokenIds: QwenCudaBufferView, rows: UInt64, width: UInt64,
+    vocabularySize: UInt64, dataType: Int32) r: CudaNativeStatus
 extern "C" fun seen_qwen_sigmoid_gate_f32(token: *const CudaStreamLaunchToken,
     input: QwenCudaBufferView, gate: QwenCudaBufferView,
     output: QwenCudaBufferView, count: UInt64) r: CudaNativeStatus

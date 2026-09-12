@@ -151,6 +151,11 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("qwn_043b_cpu_project", self.inner)
         self.assertIn("seen_cuda_link_stubs.c", self.inner)
         self.assertIn("seen_qwen_cuda_link_stubs.c", self.inner)
+        self.assertIn("tests/test_cuda_lm_head_greedy.py", self.inner)
+        self.assertIn("tests/qwn_044a_lm_head_test.seen --frozen", self.inner)
+        self.assertIn("qwn_044a_lm_head_test_fast", self.inner)
+        self.assertIn("qwn_044a_lm_head_test", self.inner)
+        self.assertIn("qwn_044a_cpu_project", self.inner)
         self.assertIn("clang -shared -fPIC -O2 -Wl,--no-undefined", self.inner)
         self.assertNotIn("nvcc", self.inner)
 

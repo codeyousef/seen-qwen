@@ -8,7 +8,8 @@ import accelerator.cuda.error.{CudaNativeStatus, CudaError, cudaError,
     cudaSucceeded}
 import core.result.{Result}
 import seen_qwen.backend.cuda.reference_primitives.{QWEN_CUDA_REFERENCE_ABI_VERSION,
-    QwenCudaBufferView, seen_qwen_swiglu_low_precision}
+    QwenCudaBufferView, seen_qwen_swiglu_low_precision,
+    seen_qwen_greedy_argmax_low_precision}
 
 let QWEN_CUDA_PROJECTION_F16: Int32 = 1 as Int32
 let QWEN_CUDA_PROJECTION_BF16: Int32 = 2 as Int32
@@ -325,5 +326,143 @@ pub fun createQwenCudaFfnExecutor(deviceOrdinal: Int32, tokenCount: UInt64,
     return Ok<QwenCudaFfnExecutor, CudaError>(QwenCudaFfnExecutor{
         handle: handle, stream: stream, gateSelection: gate.unwrap(),
         upSelection: up.unwrap(), downSelection: down.unwrap(),
+        deviceOrdinal: deviceOrdinal, active: true })
+}
+
+fun qwenProjectionViewsOverlap(left: QwenCudaBufferView, leftBytes: UInt64,
+    right: QwenCudaBufferView, rightBytes: UInt64) r: Bool {
+    let limit = 0xFFFFFFFFFFFFFFFF as UInt64
+    if leftBytes == (0 as UInt64) or rightBytes == (0 as UInt64) or
+        left.address > limit - leftBytes or right.address > limit - rightBytes {
+        return true
+    }
+    return left.address < right.address + rightBytes and
+        right.address < left.address + leftBytes
+}
+
+/// Resident LM-head projection followed by deterministic greedy selection.
+/// The executor owns one Seen handle/stream and process-local selection. Every
+/// tensor remains caller-owned device storage; execute enqueues only and never
+/// allocates, synchronizes, changes precision, or falls back.
+@move
+pub class QwenCudaLmHeadExecutor {
+    var handle: CublasLtHandle
+    var stream: CudaStream
+    var selection: QwenCudaProjectionSelection
+    var deviceOrdinal: Int32
+    var active: Bool
+
+    fun executeGreedy(hidden: QwenCudaBufferView,
+        lmHeadWeight: QwenCudaBufferView, logits: QwenCudaBufferView,
+        tokenIds: QwenCudaBufferView, workspace: QwenCudaBufferView)
+        r: Result<Bool, CudaError> {
+        let descriptor = this.selection.descriptor
+        if not this.active or not this.selection.active or
+            descriptor.dataType != QWEN_CUDA_PROJECTION_F16 and
+                descriptor.dataType != QWEN_CUDA_PROJECTION_BF16 {
+            return Err<Bool, CudaError>(qwenProjectionError(this.deviceOrdinal,
+                "LM-head executor is closed or internally incompatible"))
+        }
+        let hiddenBytes = qwenProjectionBytes(descriptor.n, descriptor.k)
+        let weightBytes = qwenProjectionBytes(descriptor.m, descriptor.k)
+        let logitsBytes = qwenProjectionBytes(descriptor.n, descriptor.m)
+        let limit = 0x7FFFFFFFFFFFFFFF as UInt64
+        if descriptor.n > limit / (4 as UInt64) {
+            return Err<Bool, CudaError>(qwenProjectionError(this.deviceOrdinal,
+                "LM-head token output byte length overflows"))
+        }
+        let tokenBytes = descriptor.n * (4 as UInt64)
+        if not qwenProjectionViewValid(hidden, this.deviceOrdinal, hiddenBytes) or
+            not qwenProjectionViewValid(lmHeadWeight, this.deviceOrdinal,
+                weightBytes) or
+            not qwenProjectionViewValid(logits, this.deviceOrdinal, logitsBytes) or
+            not qwenProjectionViewValid(tokenIds, this.deviceOrdinal, tokenBytes) or
+            qwenProjectionViewsOverlap(hidden, hiddenBytes, lmHeadWeight,
+                weightBytes) or
+            qwenProjectionViewsOverlap(hidden, hiddenBytes, logits, logitsBytes) or
+            qwenProjectionViewsOverlap(hidden, hiddenBytes, tokenIds, tokenBytes) or
+            qwenProjectionViewsOverlap(lmHeadWeight, weightBytes, logits,
+                logitsBytes) or
+            qwenProjectionViewsOverlap(lmHeadWeight, weightBytes, tokenIds,
+                tokenBytes) or
+            qwenProjectionViewsOverlap(logits, logitsBytes, tokenIds, tokenBytes) {
+            return Err<Bool, CudaError>(qwenProjectionError(this.deviceOrdinal,
+                "LM-head received invalid or overlapping resident buffer views"))
+        }
+        let required = this.selection.algorithm.workspaceBytes
+        if required > (0 as UInt64) and
+            (not qwenProjectionViewValid(workspace, this.deviceOrdinal, required) or
+             qwenProjectionViewsOverlap(workspace, required, hidden, hiddenBytes) or
+             qwenProjectionViewsOverlap(workspace, required, lmHeadWeight,
+                weightBytes) or
+             qwenProjectionViewsOverlap(workspace, required, logits, logitsBytes) or
+             qwenProjectionViewsOverlap(workspace, required, tokenIds, tokenBytes)) {
+            return Err<Bool, CudaError>(qwenProjectionError(this.deviceOrdinal,
+                "LM-head workspace is absent, overlapping, or too small"))
+        }
+        var status = seen_cublaslt_matmul(this.handle.handle, &descriptor,
+            &this.selection.algorithm, lmHeadWeight.address as *const Void,
+            hidden.address as *const Void, logits.address as *Void,
+            workspace.address as *Void, this.stream.handle)
+        if not cudaSucceeded(status) {
+            return Err<Bool, CudaError>(cudaError(status))
+        }
+        let borrowed = this.stream.borrowLaunchToken()
+        if borrowed.isErr() { return Err<Bool, CudaError>(borrowed.unwrapErr()) }
+        let token = borrowed.unwrap()
+        status = seen_qwen_greedy_argmax_low_precision(&token, logits,
+            tokenIds, descriptor.n, descriptor.m, descriptor.m,
+            descriptor.dataType)
+        if not cudaSucceeded(status) {
+            return Err<Bool, CudaError>(cudaError(status))
+        }
+        return Ok<Bool, CudaError>(true)
+    }
+
+    fun close() r: Result<Bool, CudaError> {
+        if not this.active { return Ok<Bool, CudaError>(false) }
+        this.selection.close()
+        let handleClosed = this.handle.close()
+        let streamClosed = this.stream.close()
+        this.active = false
+        if handleClosed.isErr() {
+            return Err<Bool, CudaError>(handleClosed.unwrapErr())
+        }
+        if streamClosed.isErr() {
+            return Err<Bool, CudaError>(streamClosed.unwrapErr())
+        }
+        return Ok<Bool, CudaError>(true)
+    }
+}
+
+pub fun createQwenCudaLmHeadExecutor(deviceOrdinal: Int32,
+    tokenCount: UInt64, hiddenWidth: UInt64, vocabularySize: UInt64,
+    dataType: Int32, workspaceLimitBytes: UInt64)
+    r: Result<QwenCudaLmHeadExecutor, CudaError> {
+    let descriptor = qwenCudaProjectionDescriptor(tokenCount, hiddenWidth,
+        vocabularySize, dataType, workspaceLimitBytes)
+    if descriptor.isErr() {
+        return Err<QwenCudaLmHeadExecutor, CudaError>(descriptor.unwrapErr())
+    }
+    let madeHandle = CublasLtHandle.create(deviceOrdinal)
+    if madeHandle.isErr() {
+        return Err<QwenCudaLmHeadExecutor, CudaError>(madeHandle.unwrapErr())
+    }
+    let madeStream = CudaStream.create(deviceOrdinal)
+    if madeStream.isErr() {
+        let _ = madeHandle.unwrap().close()
+        return Err<QwenCudaLmHeadExecutor, CudaError>(madeStream.unwrapErr())
+    }
+    let handle = madeHandle.unwrap()
+    let stream = madeStream.unwrap()
+    let selection = selectQwenCudaProjection(handle, deviceOrdinal,
+        tokenCount, hiddenWidth, vocabularySize, dataType,
+        workspaceLimitBytes)
+    if selection.isErr() {
+        let _ = handle.close(); let _ = stream.close()
+        return Err<QwenCudaLmHeadExecutor, CudaError>(selection.unwrapErr())
+    }
+    return Ok<QwenCudaLmHeadExecutor, CudaError>(QwenCudaLmHeadExecutor{
+        handle: handle, stream: stream, selection: selection.unwrap(),
         deviceOrdinal: deviceOrdinal, active: true })
 }

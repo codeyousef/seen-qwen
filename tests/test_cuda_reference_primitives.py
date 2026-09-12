@@ -49,7 +49,7 @@ class CudaReferencePrimitiveContractTest(unittest.TestCase):
             "seen_cuda_stream_borrow_launch_token",
         ):
             self.assertNotIn(forbidden, self.source)
-        self.assertEqual(self.source.count("<<<"), 25)
+        self.assertEqual(self.source.count("<<<"), 27)
         self.assertEqual(self.source.count(", 0, stream>>>"), 25)
         self.assertIn("token->generation == 0", self.source)
         self.assertIn("cudaPointerGetAttributes", self.source)

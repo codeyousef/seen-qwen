@@ -29,7 +29,7 @@ class CudaAttentionQkContractTest(unittest.TestCase):
     def test_kernels_use_only_the_borrowed_seen_stream(self) -> None:
         self.assertIn("attention_query_rope_f32<<<", self.source)
         self.assertIn("attention_key_rope_f32<<<", self.source)
-        self.assertEqual(self.source.count("<<<"), 25)
+        self.assertEqual(self.source.count("<<<"), 27)
         self.assertEqual(self.source.count(", 0, stream>>>"), 25)
         for forbidden in (
             "cudaDeviceSynchronize", "cudaStreamSynchronize", "cudaStreamCreate",

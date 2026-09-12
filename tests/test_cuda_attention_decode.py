@@ -39,7 +39,7 @@ class CudaAttentionDecodeContractTest(unittest.TestCase):
             "cudaStreamCreate", "cudaMalloc", "cudaFree",
         ):
             self.assertNotIn(forbidden, self.source)
-        self.assertEqual(self.source.count("<<<"), 25)
+        self.assertEqual(self.source.count("<<<"), 27)
         self.assertEqual(self.source.count(", 0, stream>>>"), 25)
 
     def test_hardware_corpus_is_official_and_negative_complete(self) -> None:
