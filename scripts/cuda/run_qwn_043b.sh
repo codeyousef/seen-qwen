@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd -P -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
 GIT_COMMON_DIR="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)"
 SHARED_ROOT="${GIT_COMMON_DIR%/.git}"
-TOOLCHAIN_ROOT="${SEEN_TOOLCHAIN_ROOT:-$SHARED_ROOT/.seen/toolchains/v0.20.7/seen-0.20.7-linux-x64}"
+TOOLCHAIN_ROOT="${SEEN_TOOLCHAIN_ROOT:-$SHARED_ROOT/.seen/toolchains/v0.20.8/extracted/seen-0.20.8-linux-x64}"
 ARTIFACT_ROOT="$ROOT_DIR/.seen/artifacts/qwn_043b"
 
 if [ "${1:-}" != "--inner" ]; then
@@ -22,13 +22,13 @@ SEEN_PACKAGE_CLIENT="$TOOLCHAIN_ROOT/bin/seen-pkg"
 SEEN_CUDA_ROOT="$TOOLCHAIN_ROOT/lib/seen/runtime/cuda"
 BUILD_ROOT="$ARTIFACT_ROOT/build"
 mkdir -p "$ARTIFACT_ROOT"
-IR_ROOT=$(mktemp -d "$ARTIFACT_ROOT/ir-v0.20.7.XXXXXX")
-SEEN_PROJECT=$(mktemp -d "$ARTIFACT_ROOT/seen-project-v0.20.7.XXXXXX")
-printf '%s  %s\n' 5fa95f150e652843795611810f02de9ca1fb6e2914ac1159fd75912bc4ae8231 "$SEEN_BIN" | sha256sum -c -
-printf '%s  %s\n' 91b9db87826131517830e8b0b65280c71a5a5d4ea953325c60e4fee1fbf4a754 "$SEEN_PACKAGE_CLIENT" | sha256sum -c -
-printf '%s  %s\n' b8a85368c2092fd635a5be45e505082f40a9e25107bcd33bf12e0caa45c540ee "$TOOLCHAIN_ROOT/bin/compatibility-manifest.json" | sha256sum -c -
-"$SEEN_BIN" --version | grep -Fx 'Seen 0.20.7'
-"$SEEN_PACKAGE_CLIENT" --expect-version 0.20.7 version | grep -Fx 'seen-pkg 0.20.7 (SEENPKG1)'
+IR_ROOT=$(mktemp -d "$ARTIFACT_ROOT/ir-v0.20.8.XXXXXX")
+SEEN_PROJECT=$(mktemp -d "$ARTIFACT_ROOT/seen-project-v0.20.8.XXXXXX")
+printf '%s  %s\n' 76833346fbe3e01cda0aeb2b34d585a2115086ccee3e87205059b055d22ac2b6 "$SEEN_BIN" | sha256sum -c -
+printf '%s  %s\n' 9cfeeb645ed31f51d2a32f3348b9e586027363a7e2085c2316a793f132049b7e "$SEEN_PACKAGE_CLIENT" | sha256sum -c -
+printf '%s  %s\n' 6bc6cc29032f834035a0c65391ddee25069b5fb3496f24a33a0c9eaf4eada7ee "$TOOLCHAIN_ROOT/bin/compatibility-manifest.json" | sha256sum -c -
+"$SEEN_BIN" --version | grep -Fx 'Seen 0.20.8'
+"$SEEN_PACKAGE_CLIENT" --expect-version 0.20.8 version | grep -Fx 'seen-pkg 0.20.8 (SEENPKG1)'
 
 toolchain_hash_before=$(find "$TOOLCHAIN_ROOT" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
 outside_objects_before=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o -type f \( -name '*.o' -o -name '*.sig' -o -name '*.a' \) -print0 | sort -z | xargs -0 -r sha256sum | sha256sum | awk '{print $1}')
@@ -92,4 +92,4 @@ toolchain_hash_after=$(find "$TOOLCHAIN_ROOT" -type f -print0 | sort -z | xargs 
 [ "$toolchain_hash_after" = "$toolchain_hash_before" ] || exit 126
 outside_objects_after=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o -type f \( -name '*.o' -o -name '*.sig' -o -name '*.a' \) -print0 | sort -z | xargs -0 -r sha256sum | sha256sum | awk '{print $1}')
 [ "$outside_objects_after" = "$outside_objects_before" ] || exit 126
-echo "PASS: QWN-043B v0.20.7 exact FFN, RTX 4090, sanitizer, graph, and cleanup gates"
+echo "PASS: QWN-043B v0.20.8 exact FFN, RTX 4090, sanitizer, graph, and cleanup gates"

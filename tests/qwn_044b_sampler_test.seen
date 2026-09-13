@@ -1,0 +1,217 @@
+import io.file.{readText}
+import seen_qwen.model.cpu_reference.{CpuTensor, createCpuTensor}
+import seen_qwen.model.sampling.{QwenSampler, cpuSampleQwenToken,
+    createQwenSampler, qwenSamplerNext24}
+import seen_qwen.tokenizer.tokenizer.{QwenSamplingValues,
+    qwenCustomSamplingValues, qwenSamplingValues}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun samplerTensor(values: Array<Float>) r: CpuTensor {
+    let shape = Array<UInt64>(); shape.push(1 as UInt64)
+    shape.push(values.length() as UInt64)
+    let tensor = createCpuTensor(shape, values, 248320 as UInt64)
+    shape.free(); require(tensor.isOkay(), "create sampler logits")
+    return tensor.unwrap()
+}
+
+fun select(logits: CpuTensor, history: Array<Int>, policy: QwenSamplingValues,
+    sampler: QwenSampler) r: Int {
+    let result = cpuSampleQwenToken(logits, history, policy, sampler,
+        logits.values.length() as UInt64, 262144 as UInt64,
+        248320 as UInt64)
+    require(result.isOkay(), "sample valid distribution")
+    return result.unwrap()
+}
+
+fun main() r: Int {
+    let profiles = readText("profiles/sampling.toml")
+    let thinking = qwenSamplingValues(profiles, "thinking", 20260827)
+    let instruct = qwenSamplingValues(profiles, "instruct", 20260827)
+    let greedy = qwenSamplingValues(profiles, "greedy", 0)
+    require(thinking.isOkay() and instruct.isOkay() and greedy.isOkay(),
+        "load official profiles without duplicating values")
+    require(thinking.unwrap().sampling and thinking.unwrap().topK == 20 and
+        thinking.unwrap().topP == 0.95 and
+        instruct.unwrap().presencePenalty == 1.5 and
+        not greedy.unwrap().sampling,
+        "preserve official scalar profile identity")
+    require(qwenSamplingValues(profiles, "greedy", 1).isErr() and
+        qwenSamplingValues(profiles, "unknown", 0).isErr(),
+        "reject seed-policy and profile errors")
+
+    let rng = createQwenSampler(20260827 as UInt64)
+    let rngFirst = qwenSamplerNext24(rng).unwrap()
+    let rngSecond = qwenSamplerNext24(rng).unwrap()
+    let rngThird = qwenSamplerNext24(rng).unwrap()
+    let rngFourth = qwenSamplerNext24(rng).unwrap()
+    let rngFifth = qwenSamplerNext24(rng).unwrap()
+    let rngSixth = qwenSamplerNext24(rng).unwrap()
+    let rngSeventh = qwenSamplerNext24(rng).unwrap()
+    let rngEighth = qwenSamplerNext24(rng).unwrap()
+    require(rngFirst == (12895245 as UInt64) and
+        rngSecond == (5889182 as UInt64) and
+        rngThird == (7097424 as UInt64) and
+        rngFourth == (733511 as UInt64) and
+        rngFifth == (14913692 as UInt64) and
+        rngSixth == (5117147 as UInt64) and
+        rngSeventh == (9045593 as UInt64) and
+        rngEighth == (12379888 as UInt64),
+        "match locked xorshift64-star 24-bit stream")
+    require(rng.drawCount() == (8 as UInt64), "count successful RNG draws")
+    rng.reset()
+    require(qwenSamplerNext24(rng).unwrap() == (12895245 as UInt64),
+        "reset to the exact initial stream")
+    rng.close(); rng.close()
+    require(qwenSamplerNext24(rng).isErr() and
+        rng.drawCount() == (0 as UInt64), "close sampler idempotently")
+
+    let uniformValues = Array<Float>()
+    uniformValues.push(0.0); uniformValues.push(0.0)
+    uniformValues.push(0.0); uniformValues.push(0.0)
+    let uniform = samplerTensor(uniformValues)
+    let emptyHistory = Array<Int>()
+    let neutral = qwenCustomSamplingValues(profiles, 1.0, 1.0, 4, 0.0,
+        1.0, 0.0, 1).unwrap()
+    let first = createQwenSampler(1 as UInt64)
+    require(select(uniform, emptyHistory, neutral, first) == 1 and
+        select(uniform, emptyHistory, neutral, first) == 2 and
+        select(uniform, emptyHistory, neutral, first) == 2 and
+        select(uniform, emptyHistory, neutral, first) == 1 and
+        select(uniform, emptyHistory, neutral, first) == 0 and
+        select(uniform, emptyHistory, neutral, first) == 3 and
+        select(uniform, emptyHistory, neutral, first) == 3 and
+        select(uniform, emptyHistory, neutral, first) == 2,
+        "sample categorical probabilities in stable token-ID order")
+    require(first.drawCount() == (8 as UInt64),
+        "consume one draw for every successful sampling call")
+
+    let rankedValues = Array<Float>()
+    rankedValues.push(5.0); rankedValues.push(4.0); rankedValues.push(4.0)
+    rankedValues.push(0.0); rankedValues.push(-1.0)
+    let ranked = samplerTensor(rankedValues)
+    let tieBoundary = qwenCustomSamplingValues(profiles, 1.0, 1.0, 2, 0.0,
+        1.0, 0.0, 1).unwrap()
+    let tieRng = createQwenSampler(1 as UInt64)
+    let tieExpected = Array<Int>()
+    tieExpected.push(0); tieExpected.push(1); tieExpected.push(1)
+    tieExpected.push(0); tieExpected.push(0); tieExpected.push(1)
+    tieExpected.push(2); tieExpected.push(1)
+    var sawOne = false; var sawTwo = false; var index = 0
+    while index < 128 {
+        let token = select(ranked, emptyHistory, tieBoundary, tieRng)
+        if index < tieExpected.length() {
+            require(token == tieExpected[index],
+                "match the independent top-k tie sampling vector")
+        }
+        require(token >= 0 and token <= 2,
+            "top-k includes the complete kth-score tie and nothing below it")
+        if token == 1 { sawOne = true }
+        if token == 2 { sawTwo = true }
+        index = index + 1
+    }
+    require(sawOne and sawTwo, "sample both sides of the top-k boundary tie")
+
+    let nucleus = qwenCustomSamplingValues(profiles, 1.0, 0.50, 5, 0.0,
+        1.0, 0.0, 1).unwrap()
+    let nucleusRng = createQwenSampler(1 as UInt64)
+    index = 0
+    while index < 32 {
+        require(select(ranked, emptyHistory, nucleus, nucleusRng) == 0,
+            "top-p keeps the crossing token and at least one candidate")
+        index = index + 1
+    }
+    let minp = qwenCustomSamplingValues(profiles, 1.0, 1.0, 5, 0.5,
+        1.0, 0.0, 1).unwrap()
+    let minpRng = createQwenSampler(1 as UInt64)
+    index = 0
+    while index < 32 {
+        require(select(ranked, emptyHistory, minp, minpRng) == 0,
+            "min-p is relative to the maximum post-temperature probability")
+        index = index + 1
+    }
+
+    let penaltyValues = Array<Float>()
+    penaltyValues.push(2.0); penaltyValues.push(1.8); penaltyValues.push(-1.0)
+    let penaltyLogits = samplerTensor(penaltyValues)
+    let history = Array<Int>(); history.push(0); history.push(0)
+    let penalized = qwenCustomSamplingValues(profiles, 1.0, 0.01, 1, 0.0,
+        2.0, 0.5, 9).unwrap()
+    let penaltyRng = createQwenSampler(9 as UInt64)
+    require(select(penaltyLogits, history, penalized, penaltyRng) == 1,
+        "apply repetition once per distinct token then presence once")
+    require(penaltyRng.drawCount() == (1 as UInt64),
+        "advance a valid degenerate sampling distribution")
+
+    let greedyRng = createQwenSampler(0 as UInt64)
+    require(select(ranked, emptyHistory, greedy.unwrap(), greedyRng) == 0 and
+        greedyRng.drawCount() == (0 as UInt64),
+        "greedy profile consumes no RNG draw")
+    let badHistory = Array<Int>(); badHistory.push(5)
+    require(cpuSampleQwenToken(ranked, badHistory, tieBoundary, tieRng,
+        5 as UInt64, 262144 as UInt64, 248320 as UInt64).isErr(),
+        "reject out-of-range history without repair")
+    require(cpuSampleQwenToken(ranked, emptyHistory, tieBoundary, tieRng,
+        5 as UInt64, 0 as UInt64, 248320 as UInt64).isOkay(),
+        "accept empty history at a zero history limit")
+    let oneHistory = Array<Int>(); oneHistory.push(0)
+    let drawsBefore = tieRng.drawCount()
+    require(cpuSampleQwenToken(ranked, oneHistory, tieBoundary, tieRng,
+        5 as UInt64, 0 as UInt64, 248320 as UInt64).isErr() and
+        tieRng.drawCount() == drawsBefore,
+        "reject history-limit violations without consuming RNG")
+    let wrongSeed = createQwenSampler(2 as UInt64)
+    require(cpuSampleQwenToken(ranked, emptyHistory, tieBoundary, wrongSeed,
+        5 as UInt64, 1 as UInt64, 248320 as UInt64).isErr() and
+        wrongSeed.drawCount() == (0 as UInt64),
+        "reject mismatched sampler ownership without consuming RNG")
+
+    let mutated = qwenCustomSamplingValues(profiles, 1.0, 1.0, 5, 0.0,
+        1.0, 0.0, 1).unwrap()
+    let mutatedRng = createQwenSampler(1 as UInt64)
+    mutated.temperature = 2.000001
+    require(cpuSampleQwenToken(ranked, emptyHistory, mutated, mutatedRng,
+        5 as UInt64, 1 as UInt64, 248320 as UInt64).isErr(),
+        "revalidate a mutated policy at the execution boundary")
+    mutated.temperature = 1.0; mutated.presencePenalty = 2.000001
+    require(cpuSampleQwenToken(ranked, emptyHistory, mutated, mutatedRng,
+        5 as UInt64, 1 as UInt64, 248320 as UInt64).isErr(),
+        "reject a mutated presence penalty without consuming RNG")
+    mutated.presencePenalty = 0.0
+    require(cpuSampleQwenToken(ranked, emptyHistory, mutated, mutatedRng,
+        5 as UInt64, 262145 as UInt64, 248320 as UInt64).isErr() and
+        mutatedRng.drawCount() == (0 as UInt64),
+        "reject an admission limit beyond the native context")
+
+    let boundaryValues = Array<Float>()
+    index = 0
+    while index < 248320 {
+        boundaryValues.push(if index == 248319 { 7.0 } else { 0.0 })
+        index = index + 1
+    }
+    let boundary = samplerTensor(boundaryValues)
+    let boundaryPolicy = qwenCustomSamplingValues(profiles, 1.0, 1.0, 1,
+        0.0, 1.0, 0.0, 17).unwrap()
+    let boundaryRng = createQwenSampler(17 as UInt64)
+    require(select(boundary, emptyHistory, boundaryPolicy, boundaryRng) ==
+        248319, "sample the final ID at the complete 248320-token boundary")
+    require(cpuSampleQwenToken(boundary, emptyHistory, boundaryPolicy,
+        boundaryRng, 248321 as UInt64, 1 as UInt64,
+        248320 as UInt64).isErr(),
+        "reject vocabulary geometry beyond the official bound")
+
+    first.close(); tieRng.close(); nucleusRng.close(); minpRng.close()
+    penaltyRng.close(); greedyRng.close(); wrongSeed.close()
+    mutatedRng.close(); boundaryRng.close()
+    uniform.close(); ranked.close(); penaltyLogits.close(); boundary.close()
+    uniformValues.free(); rankedValues.free(); penaltyValues.free()
+    boundaryValues.free()
+    emptyHistory.free(); history.free(); badHistory.free(); oneHistory.free()
+    tieExpected.free()
+    println("PASS: QWN-044B deterministic official sampler, filters, RNG, bounds, and cleanup")
+    return 0
+}
+
+main()

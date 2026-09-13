@@ -1026,6 +1026,19 @@ class QwenSamplingProfiles {
     var custom: QwenSamplingProfile
 }
 
+/// Validated scalar sampling policy. The values are copied from the locked
+/// profile document so callers never duplicate preset values in code.
+pub class QwenSamplingValues {
+    var sampling: Bool
+    var temperature: Float
+    var topP: Float
+    var topK: Int
+    var minP: Float
+    var repetitionPenalty: Float
+    var presencePenalty: Float
+    var seed: UInt64
+}
+
 fun samplingError(code: String, field: String, message: String)
     r: QwenSamplingError {
     return QwenSamplingError{ code: code, field: field, message: message,
@@ -1272,6 +1285,71 @@ fun validateQwenCustomValues(bounds: QwenSamplingBounds,
             "seed is outside the non-negative signed 64-bit range"))
     }
     return Ok<Bool, QwenSamplingError>(true)
+}
+
+fun qwenSamplingValuesFromProfile(profile: QwenSamplingProfile, seed: Int)
+    r: QwenSamplingValues {
+    return QwenSamplingValues{
+        sampling: profile.mode != "greedy",
+        temperature: profile.temperature, topP: profile.topP,
+        topK: profile.topK, minP: profile.minP,
+        repetitionPenalty: profile.repetitionPenalty,
+        presencePenalty: profile.presencePenalty, seed: seed as UInt64
+    }
+}
+
+/// Resolve one immutable named preset and validate its explicit seed policy.
+pub fun qwenSamplingValues(text: String, profileName: String, seed: Int)
+    r: Result<QwenSamplingValues, QwenSamplingError> {
+    let parsed = parseQwenSamplingProfilesInternal(text)
+    if parsed.isErr() {
+        return Err<QwenSamplingValues, QwenSamplingError>(parsed.unwrapErr())
+    }
+    let profiles = parsed.unwrap()
+    if profileName != "thinking" and profileName != "instruct" and
+        profileName != "greedy" and profileName != "custom" {
+        return Err<QwenSamplingValues, QwenSamplingError>(samplingError(
+            "qwen.sampling.unknown-profile", profileName,
+            "unknown sampling profile"))
+    }
+    let profile = if profileName == "thinking" { profiles.thinking }
+        else if profileName == "instruct" { profiles.instruct }
+        else if profileName == "greedy" { profiles.greedy }
+        else { profiles.custom }
+    let valid = validateQwenCustomValues(profiles.bounds, profile.temperature,
+        profile.topP, profile.topK, profile.minP, profile.repetitionPenalty,
+        profile.presencePenalty, seed)
+    if valid.isErr() {
+        return Err<QwenSamplingValues, QwenSamplingError>(valid.unwrapErr())
+    }
+    if profile.seedPolicy == "unused" and seed != 0 {
+        return Err<QwenSamplingValues, QwenSamplingError>(samplingError(
+            "qwen.sampling.seed-policy", profileName + ".seed",
+            "greedy mode does not consume a seed"))
+    }
+    return Ok<QwenSamplingValues, QwenSamplingError>(
+        qwenSamplingValuesFromProfile(profile, seed))
+}
+
+/// Validate an explicit custom policy against the bounds in the locked file.
+pub fun qwenCustomSamplingValues(text: String, temperature: Float,
+    topP: Float, topK: Int, minP: Float, repetitionPenalty: Float,
+    presencePenalty: Float, seed: Int)
+    r: Result<QwenSamplingValues, QwenSamplingError> {
+    let parsed = parseQwenSamplingProfilesInternal(text)
+    if parsed.isErr() {
+        return Err<QwenSamplingValues, QwenSamplingError>(parsed.unwrapErr())
+    }
+    let valid = validateQwenCustomValues(parsed.unwrap().bounds, temperature,
+        topP, topK, minP, repetitionPenalty, presencePenalty, seed)
+    if valid.isErr() {
+        return Err<QwenSamplingValues, QwenSamplingError>(valid.unwrapErr())
+    }
+    return Ok<QwenSamplingValues, QwenSamplingError>(QwenSamplingValues{
+        sampling: true, temperature: temperature, topP: topP, topK: topK,
+        minP: minP, repetitionPenalty: repetitionPenalty,
+        presencePenalty: presencePenalty, seed: seed as UInt64
+    })
 }
 
 fun validateProfile(profile: QwenSamplingProfile, bounds: QwenSamplingBounds)

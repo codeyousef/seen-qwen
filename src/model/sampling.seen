@@ -1,0 +1,316 @@
+///
+/// Deterministic Seen-owned Qwen sampler.
+///
+/// Processor order follows pinned Transformers commit
+/// 562cfd944ee1f20702cfb0f4404014ee27c24813: repetition penalty,
+/// temperature, top-k, top-p, then min-p. Presence penalty follows the
+/// official Qwen OpenAI-compatible preset semantics and is applied once to
+/// every distinct token present in prompt or generated history. Sampling uses
+/// an explicitly seeded xorshift64* stream, stable token-ID tie ordering, and
+/// one draw per successful non-greedy selection. Greedy selection consumes no
+/// draw. Inputs are borrowed and the sampler owns only its scalar RNG state.
+///
+
+import core.result.{Result}
+import math.math.{exp, isfinite}
+import seen_qwen.model.cpu_head.{cpuGreedyToken}
+import seen_qwen.model.cpu_reference.{CpuReferenceError, CpuTensor, f32,
+    cpuReferenceError, validateCpuTensor}
+import seen_qwen.tokenizer.tokenizer.{QwenSamplingValues}
+
+const QWEN_SAMPLER_MAX_VOCABULARY: UInt64 = 248320 as UInt64
+const QWEN_SAMPLER_MAX_HISTORY: UInt64 = 262144 as UInt64
+const QWEN_SAMPLER_MAX_SEED: UInt64 = 0x7FFFFFFFFFFFFFFF as UInt64
+
+pub class QwenSampler {
+    var initialSeed: UInt64
+    var state: UInt64
+    var draws: UInt64
+    var closed: Bool
+
+    fun drawCount() r: UInt64 {
+        if this.closed { return 0 as UInt64 }
+        return this.draws
+    }
+
+    fun reset() r: Void {
+        if this.closed { return }
+        this.state = samplerSeedState(this.initialSeed)
+        this.draws = 0 as UInt64
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.initialSeed = 0 as UInt64
+        this.state = 0 as UInt64
+        this.draws = 0 as UInt64
+        this.closed = true
+    }
+}
+
+fun samplerError(code: String, operation: String, message: String,
+    exitCode: Int = 2) r: CpuReferenceError {
+    return cpuReferenceError(code, operation, message, exitCode)
+}
+
+fun samplerSeedState(seed: UInt64) r: UInt64 {
+    if seed == (0 as UInt64) { return 0x9E3779B97F4A7C15 as UInt64 }
+    return seed
+}
+
+pub fun createQwenSampler(seed: UInt64) r: QwenSampler {
+    return QwenSampler{ initialSeed: seed, state: samplerSeedState(seed),
+        draws: 0 as UInt64, closed: false }
+}
+
+/// Return the next 24-bit uniform numerator and advance exactly once.
+pub fun qwenSamplerNext24(sampler: QwenSampler)
+    r: Result<UInt64, CpuReferenceError> {
+    if sampler.closed {
+        return Err<UInt64, CpuReferenceError>(samplerError(
+            "qwen.sampling.closed", "sampling.rng",
+            "sampler is closed", 11))
+    }
+    if sampler.draws == (0xFFFFFFFFFFFFFFFF as UInt64) {
+        return Err<UInt64, CpuReferenceError>(samplerError(
+            "qwen.sampling.exhausted", "sampling.rng",
+            "sampler draw counter is exhausted", 11))
+    }
+    var value = sampler.state
+    value = value ^ (value >> 12)
+    value = value ^ (value << 25)
+    value = value ^ (value >> 27)
+    sampler.state = value
+    sampler.draws = sampler.draws + (1 as UInt64)
+    return Ok<UInt64, CpuReferenceError>(
+        (value * (0x2545F4914F6CDD1D as UInt64)) >> 40)
+}
+
+fun samplerBetter(left: Int, right: Int, scores: Array<Float>) r: Bool {
+    return scores[left] > scores[right] or
+        (scores[left] == scores[right] and left < right)
+}
+
+fun samplerSiftDown(ids: Array<Int>, count: Int, root: Int,
+    scores: Array<Float>) r: Void {
+    var current = root
+    var active = true
+    while active {
+        let left = current * 2 + 1
+        if left >= count {
+            active = false
+        } else {
+            var best = left
+            let right = left + 1
+            if right < count and samplerBetter(ids[right], ids[left], scores) {
+                best = right
+            }
+            if samplerBetter(ids[best], ids[current], scores) {
+                let temporary = ids[current]
+                ids[current] = ids[best]
+                ids[best] = temporary
+                current = best
+            } else {
+                active = false
+            }
+        }
+    }
+}
+
+/// Heap-sort token IDs from worst to best. Reverse traversal is therefore
+/// descending score with the lowest token ID first on exact ties.
+fun samplerSort(ids: Array<Int>, scores: Array<Float>) r: Void {
+    var root = ids.length() / 2
+    while root > 0 {
+        root = root - 1
+        samplerSiftDown(ids, ids.length(), root, scores)
+    }
+    var end = ids.length()
+    while end > 1 {
+        end = end - 1
+        let temporary = ids[0]
+        ids[0] = ids[end]
+        ids[end] = temporary
+        samplerSiftDown(ids, end, 0, scores)
+    }
+}
+
+fun samplerMarkHistory(history: Array<Int>, vocabularySize: Int,
+    historyLimit: UInt64) r: Result<Array<Bool>, CpuReferenceError> {
+    if (history.length() as UInt64) > historyLimit {
+        return Err<Array<Bool>, CpuReferenceError>(samplerError(
+            "qwen.sampling.limit", "sampling.history",
+            "token history exceeds the explicit limit"))
+    }
+    let seen = Array<Bool>()
+    var token = 0
+    while token < vocabularySize { seen.push(false); token = token + 1 }
+    var index = 0
+    while index < history.length() {
+        let value = history[index]
+        if value < 0 or value >= vocabularySize {
+            seen.free()
+            return Err<Array<Bool>, CpuReferenceError>(samplerError(
+                "qwen.sampling.bounds", "sampling.history",
+                "token history contains an out-of-range ID"))
+        }
+        seen[value] = true
+        index = index + 1
+    }
+    return Ok<Array<Bool>, CpuReferenceError>(seen)
+}
+
+pub fun cpuSampleQwenToken(logits: CpuTensor, history: Array<Int>,
+    policy: QwenSamplingValues, sampler: QwenSampler,
+    vocabularySize: UInt64, historyLimit: UInt64, elementLimit: UInt64)
+    r: Result<Int, CpuReferenceError> {
+    let operation = "sampling.official"
+    let valid = validateCpuTensor(logits, elementLimit, operation)
+    if valid.isErr() { return Err<Int, CpuReferenceError>(valid.unwrapErr()) }
+    if sampler.closed {
+        return Err<Int, CpuReferenceError>(samplerError(
+            "qwen.sampling.closed", operation, "sampler is closed", 11))
+    }
+    if logits.shape.length() == 0 or vocabularySize == (0 as UInt64) or
+        vocabularySize > QWEN_SAMPLER_MAX_VOCABULARY {
+        return Err<Int, CpuReferenceError>(samplerError(
+            "qwen.sampling.shape", operation,
+            "vocabulary size is outside the locked Qwen bound"))
+    }
+    if historyLimit > QWEN_SAMPLER_MAX_HISTORY {
+        return Err<Int, CpuReferenceError>(samplerError(
+            "qwen.sampling.limit", operation,
+            "history limit exceeds the native context bound"))
+    }
+    let width = logits.shape[logits.shape.length() - 1]
+    if vocabularySize > width or policy.topK < 1 or
+        policy.topK > (vocabularySize as Int) {
+        return Err<Int, CpuReferenceError>(samplerError(
+            "qwen.sampling.bounds", operation,
+            "sampling policy exceeds the logits vocabulary"))
+    }
+    if not isfinite(policy.temperature) or policy.temperature <= 0.0 or
+        policy.temperature > 2.0 or
+        not isfinite(policy.topP) or policy.topP <= 0.0 or policy.topP > 1.0 or
+        not isfinite(policy.minP) or policy.minP < 0.0 or policy.minP > 1.0 or
+        not isfinite(policy.repetitionPenalty) or
+        policy.repetitionPenalty <= 0.0 or policy.repetitionPenalty > 2.0 or
+        not isfinite(policy.presencePenalty) or
+        policy.presencePenalty < -2.0 or policy.presencePenalty > 2.0 or
+        policy.seed > QWEN_SAMPLER_MAX_SEED {
+        return Err<Int, CpuReferenceError>(samplerError(
+            "qwen.sampling.policy", operation,
+            "sampling policy is outside the locked bounds"))
+    }
+    if not policy.sampling {
+        if policy.seed != (0 as UInt64) {
+            return Err<Int, CpuReferenceError>(samplerError(
+                "qwen.sampling.seed", operation,
+                "greedy policy must not own a seed"))
+        }
+        return cpuGreedyToken(logits, vocabularySize, elementLimit)
+    }
+    if policy.seed != sampler.initialSeed {
+        return Err<Int, CpuReferenceError>(samplerError(
+            "qwen.sampling.seed", operation,
+            "policy seed does not match sampler ownership"))
+    }
+    let marked = samplerMarkHistory(history, vocabularySize as Int, historyLimit)
+    if marked.isErr() { return Err<Int, CpuReferenceError>(marked.unwrapErr()) }
+    let seen = marked.unwrap()
+    let scores = Array<Float>()
+    let kept = Array<Bool>()
+    let ids = Array<Int>()
+    let rowStart = logits.values.length() - (width as Int)
+    var token = 0
+    while token < (vocabularySize as Int) {
+        var score = logits.values[rowStart + token]
+        if seen[token] {
+            if score < 0.0 { score = f32(score * policy.repetitionPenalty) }
+            else { score = f32(score / policy.repetitionPenalty) }
+            score = f32(score - policy.presencePenalty)
+        }
+        score = f32(score / policy.temperature)
+        if not isfinite(score) {
+            seen.free(); scores.free(); kept.free(); ids.free()
+            return Err<Int, CpuReferenceError>(samplerError(
+                "qwen.sampling.non-finite", operation,
+                "sampling transform produced a non-finite score"))
+        }
+        scores.push(score); kept.push(false); ids.push(token)
+        token = token + 1
+    }
+    seen.free()
+    samplerSort(ids, scores)
+    let best = ids[ids.length() - 1]
+    let kthScore = scores[ids[ids.length() - policy.topK]]
+    token = 0
+    while token < scores.length() {
+        kept[token] = scores[token] >= kthScore
+        token = token + 1
+    }
+    let maximum = scores[best]
+    var total: Float = 0.0
+    token = 0
+    while token < scores.length() {
+        if kept[token] { total = total + exp(scores[token] - maximum) }
+        token = token + 1
+    }
+    let removable = (1.0 - policy.topP) * total
+    var removed: Float = 0.0
+    var rank = 0
+    while rank < ids.length() - 1 {
+        let candidate = ids[rank]
+        if kept[candidate] {
+            let weight = exp(scores[candidate] - maximum)
+            if removed + weight <= removable {
+                kept[candidate] = false
+                removed = removed + weight
+            }
+        }
+        rank = rank + 1
+    }
+    if policy.minP > 0.0 {
+        token = 0
+        while token < scores.length() {
+            if kept[token] and token != best and
+                exp(scores[token] - maximum) < policy.minP {
+                kept[token] = false
+            }
+            token = token + 1
+        }
+    }
+    total = 0.0
+    token = 0
+    while token < scores.length() {
+        if kept[token] { total = total + exp(scores[token] - maximum) }
+        token = token + 1
+    }
+    if not isfinite(total) or total <= 0.0 {
+        scores.free(); kept.free(); ids.free()
+        return Err<Int, CpuReferenceError>(samplerError(
+            "qwen.sampling.non-finite", operation,
+            "sampling distribution is empty or non-finite"))
+    }
+    let draw = qwenSamplerNext24(sampler)
+    if draw.isErr() {
+        scores.free(); kept.free(); ids.free()
+        return Err<Int, CpuReferenceError>(draw.unwrapErr())
+    }
+    let threshold = ((draw.unwrap() as Float) / 16777216.0) * total
+    var cumulative: Float = 0.0
+    var selected = best
+    token = 0
+    while token < scores.length() {
+        if kept[token] {
+            cumulative = cumulative + exp(scores[token] - maximum)
+            if cumulative > threshold {
+                selected = token
+                token = scores.length()
+            }
+        }
+        token = token + 1
+    }
+    scores.free(); kept.free(); ids.free()
+    return Ok<Int, CpuReferenceError>(selected)
+}
