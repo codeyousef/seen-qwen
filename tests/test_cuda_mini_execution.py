@@ -64,7 +64,8 @@ class CudaMiniExecutionContractTest(unittest.TestCase):
         for required in (
             "max_abs_error", "greedy_token_ids", "decode_logits",
             "!engine.decode", "engine.cancel", "engine.reset",
-            "engine.close", "engine.close",
+            "engine.close", "engine.close", "fail_allocation_at",
+            "certify_allocation_failures", "failure <= 4",
         ):
             self.assertIn(required, self.harness)
         for required in (

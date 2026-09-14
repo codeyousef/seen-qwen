@@ -84,4 +84,4 @@ toolchain_hash_after=$(find "$TOOLCHAIN_ROOT" -type f -print0 | sort -z | xargs 
 [ "$toolchain_hash_after" = "$toolchain_hash_before" ] || exit 126
 outside_objects_after=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o -type f \( -name '*.o' -o -name '*.sig' -o -name '*.a' \) -print0 | sort -z | xargs -0 -r sha256sum | sha256sum | awk '{print $1}')
 [ "$outside_objects_after" = "$outside_objects_before" ] || exit 126
-echo "PASS: QWN-045B v0.20.9 end-to-end CUDA mini-model, CPU differential, reset, cancellation, sanitizer, RTX 4090, and cleanup gates"
+echo "PASS: QWN-045B v0.20.9 end-to-end CUDA mini-model, CPU differential, injected OOM, reset, cancellation, sanitizer, RTX 4090, and cleanup gates"

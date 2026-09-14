@@ -19,6 +19,12 @@ state deterministically; cancellation rejects new work; close releases IDs,
 state, scratch, weights, event, and stream in reverse ownership order and is
 idempotent.
 
+Deterministic allocation-failure injection rejects each of the four device
+allocation steps in turn. Every partial construction releases all earlier
+allocations plus the event and stream before returning failure; repeated close
+remains safe. CUDA memcheck certifies those simulated OOM paths leak no device
+or host resource without consuming the machine's remaining VRAM.
+
 Three small model-specific FP32 adapters complete the already ledgered
 primitive surface: bounded row-major linear projection, GDN convolution-output
 preparation, and GDN scalar-parameter transformation. They accept only fixed
