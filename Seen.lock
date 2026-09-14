@@ -14,8 +14,8 @@ manifest_sha256 = "d8d42e55830583013872b80a691bc13b8191a54ec276614981ae7b154e0a5
 # compatibility_manifest_sha256 = "426530e3eb99e367ec06b2805aefc7bcad10cc18e1265ff3d5d4263b6a607ba2"
 # merged_main_ci_run = "34764685768"
 # release_run = "34769194978"
-# ci_llvm_image = "docker.io/silkeh/clang@sha256:a370fe4e8ecd284143bbfde1185bef4c1b6b72f45af4823812b9afe84cd1a14d"
-# ci_llvm_version = "21.1.8"
+# local_verification_llvm_image = "docker.io/silkeh/clang@sha256:a370fe4e8ecd284143bbfde1185bef4c1b6b72f45af4823812b9afe84cd1a14d"
+# local_verification_llvm_version = "21.1.8"
 # compatibility = "seen-compatibility-manifest-v1; compiler=0.20.9; layout=seen-layout-abi-v2; object-cache=seen-object-cache-abi-v3; package-interface=seen-package-interface-v2; package-object-manifest=seen-package-object-manifest-v2; prebuilt-package=seen-prebuilt-package-v2; package-client=0.20.9/SEENPKG1; runtime=runtime-v4; stdlib=0.5.0/manifest-v1; llvm-min=19; target=linux-x86_64; cpu=x86-64; determinism=installed-archive+signed-evidence"
 
 [root]

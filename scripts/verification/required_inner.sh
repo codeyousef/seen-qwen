@@ -8,11 +8,11 @@ SEEN_COMPILER="$TOOLCHAIN_ROOT/bin/seen"
 SEEN_PACKAGE_CLIENT="$TOOLCHAIN_ROOT/bin/seen-pkg"
 COMPATIBILITY_MANIFEST="$TOOLCHAIN_ROOT/bin/compatibility-manifest.json"
 ASSET_ROOT="$ROOT_DIR/.seen/oracle-assets-qwen38"
-OUTPUT_ROOT="$ROOT_DIR/.seen/ci/output"
-ARTIFACT_ROOT="$ROOT_DIR/.seen/ci/artifacts"
+OUTPUT_ROOT="$ROOT_DIR/.seen/verification/output"
+ARTIFACT_ROOT="$ROOT_DIR/.seen/verification/artifacts"
 
 fail() {
-    echo "ci-inner: $*" >&2
+    echo "verification-inner: $*" >&2
     exit 126
 }
 
@@ -26,10 +26,10 @@ read_cgroup() {
 
 report_metrics() {
     local status=$?
-    echo "ci-inner: exit_status=$status"
+    echo "verification-inner: exit_status=$status"
     for metric in memory.current memory.peak memory.events pids.current pids.peak pids.events; do
         if [ -r "/sys/fs/cgroup/$metric" ]; then
-            echo "ci-inner: $metric"
+            echo "verification-inner: $metric"
             cat "/sys/fs/cgroup/$metric"
         fi
     done
@@ -47,7 +47,7 @@ oom_group=$(read_cgroup memory.oom.group)
 [ "$swap_max" = "0" ] || fail "memory.swap.max is not zero"
 [ "$pids_max" = "24" ] || fail "pids.max is not 24"
 case "$oom_group" in 0|1) ;; *) fail "memory.oom.group is not numeric" ;; esac
-echo "ci-inner: verified cgroup=/sys/fs/cgroup memory.max=$memory_max memory.swap.max=$swap_max memory.oom.group=$oom_group pids.max=$pids_max"
+echo "verification-inner: verified cgroup=/sys/fs/cgroup memory.max=$memory_max memory.swap.max=$swap_max memory.oom.group=$oom_group pids.max=$pids_max"
 
 ulimit -v "${SEEN_MAIN_VMEM_KB:?missing Seen virtual-memory cap}"
 [ "$(ulimit -v)" = "$SEEN_MAIN_VMEM_KB" ] ||
@@ -102,7 +102,7 @@ outside_objects_before=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o \
 "$SEEN_COMPILER" --version | grep -Fx 'Seen 0.20.9'
 "$SEEN_PACKAGE_CLIENT" --expect-version 0.20.9 version |
     grep -Fx 'seen-pkg 0.20.9 (SEENPKG1)'
-python3 -m unittest tests/test_ci_contract.py tests/test_cuda_reference_primitives.py \
+python3 -m unittest tests/test_local_verification_contract.py tests/test_cuda_reference_primitives.py \
     tests/test_cuda_reference_utilities.py tests/test_cuda_gdn_state.py \
     tests/test_cuda_gdn_recurrent_decode.py tests/test_cuda_gdn_recurrent_prefill.py \
     tests/test_cuda_gdn_gated_output.py tests/test_cuda_attention_qk.py \
@@ -498,7 +498,7 @@ clang -shared -fPIC -O2 -Wl,--no-undefined \
 toolchain_hash_after=$(find "$TOOLCHAIN_ROOT" -type f -print0 | sort -z |
     xargs -0 sha256sum | sha256sum | awk '{print $1}')
 [ "$toolchain_hash_after" = "$toolchain_hash_before" ] ||
-    fail "compiler installation changed during required CI"
+    fail "compiler installation changed during required local verification"
 
 outside_objects_after=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o \
     -type f \( -name '*.o' -o -name '*.sig' -o -name '*.a' \) -print0 |

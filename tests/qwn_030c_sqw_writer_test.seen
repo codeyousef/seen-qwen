@@ -6,10 +6,10 @@ import fs.types.{DirectIoPolicy, OpenOptions, Path}
 import seen_qwen.formats.sqw_reader.{SqwReader, SqwReaderPolicy}
 import seen_qwen.formats.sqw_writer.{SqwWriter}
 
-let SOURCE: String = ".seen/ci/output/qwn_030b/valid.sqw"
-let CORRUPT_SOURCE: String = ".seen/ci/output/qwn_030b/wrong_magic.sqw"
-let DESTINATION: String = ".seen/ci/output/qwn_030c/promoted.sqw"
-let SECOND_DESTINATION: String = ".seen/ci/output/qwn_030c/promoted_again.sqw"
+let SOURCE: String = ".seen/verification/output/qwn_030b/valid.sqw"
+let CORRUPT_SOURCE: String = ".seen/verification/output/qwn_030b/wrong_magic.sqw"
+let DESTINATION: String = ".seen/verification/output/qwn_030c/promoted.sqw"
+let SECOND_DESTINATION: String = ".seen/verification/output/qwn_030c/promoted_again.sqw"
 let MODEL_LOCK_SHA256: String =
     "824dff67e12a89b9666ef2e6a4bb096a90237bc17a9b035f17d4bc9d1087a3e7"
 let SOURCE_LOCK_SHA256: String =
@@ -58,7 +58,7 @@ fun discardPath(path: String) r: Void {
 }
 
 fun ensureOutputDirectory() r: Void {
-    let parsed = Path.fromString(".seen/ci/output/qwn_030c")
+    let parsed = Path.fromString(".seen/verification/output/qwn_030c")
     require(parsed.isOkay(), "writer output directory path must be valid")
     let created = createDirectoryPath(context(false), parsed.unwrap(),
         448 as UInt64)

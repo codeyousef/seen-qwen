@@ -4,16 +4,16 @@ import seen_qwen.formats.sqw_reader.{SQW_COMPONENT_DATA,
     SQW_COMPONENT_METADATA, SQW_COMPONENT_SCALE, SQW_COMPONENT_ZERO,
     SqwReader, SqwReaderPolicy, SqwTensorView}
 
-let FIXTURE_ROOT: String = ".seen/ci/output/qwn_030b"
-let VALID_PATH: String = ".seen/ci/output/qwn_030b/valid.sqw"
+let FIXTURE_ROOT: String = ".seen/verification/output/qwn_030b"
+let VALID_PATH: String = ".seen/verification/output/qwn_030b/valid.sqw"
 let Q4_VALID_PATH: String =
-    ".seen/ci/output/qwn_030b/q4_odd_row_valid.sqw"
+    ".seen/verification/output/qwn_030b/q4_odd_row_valid.sqw"
 let Q4_NONZERO_TAIL_PATH: String =
-    ".seen/ci/output/qwn_030b/q4_odd_row_nonzero_tail.sqw"
+    ".seen/verification/output/qwn_030b/q4_odd_row_nonzero_tail.sqw"
 let EVIDENCE_VALID_PATH: String =
-    ".seen/ci/output/qwn_030b/evidence_valid.sqw"
+    ".seen/verification/output/qwn_030b/evidence_valid.sqw"
 let EVIDENCE_CORRUPT_PATH: String =
-    ".seen/ci/output/qwn_030b/evidence_corrupt.sqw"
+    ".seen/verification/output/qwn_030b/evidence_corrupt.sqw"
 
 let MODEL_LOCK_SHA256: String =
     "824dff67e12a89b9666ef2e6a4bb096a90237bc17a9b035f17d4bc9d1087a3e7"

@@ -17,12 +17,12 @@ import str.string.{replaceFirst}
 
 extern "C" fun seen_string_release_owned(value: String) r: Void
 
-let SOURCE: String = ".seen/ci/output/qwn_032d/valid.sqw"
-let CORRUPT_SOURCE: String = ".seen/ci/output/qwn_032d/corrupt_payload.sqw"
-let TRUNCATED_SOURCE: String = ".seen/ci/output/qwn_032d/truncated.sqw"
+let SOURCE: String = ".seen/verification/output/qwn_032d/valid.sqw"
+let CORRUPT_SOURCE: String = ".seen/verification/output/qwn_032d/corrupt_payload.sqw"
+let TRUNCATED_SOURCE: String = ".seen/verification/output/qwn_032d/truncated.sqw"
 let REORDERED_JOURNAL: String =
-    ".seen/ci/output/qwn_032d/reordered_journal.json"
-let DESTINATION: String = ".seen/ci/output/qwn_032d/runtime/promoted.sqw"
+    ".seen/verification/output/qwn_032d/reordered_journal.json"
+let DESTINATION: String = ".seen/verification/output/qwn_032d/runtime/promoted.sqw"
 let MODEL_LOCK: String =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 let SOURCE_LOCK: String =
@@ -68,7 +68,7 @@ fun discardPath(path: String) r: Void {
 }
 
 fun ensureOutputDirectory() r: Void {
-    let parsed = Path.fromString(".seen/ci/output/qwn_032d/runtime")
+    let parsed = Path.fromString(".seen/verification/output/qwn_032d/runtime")
     require(parsed.isOkay(), "finalizer output path must be valid")
     let created = createDirectoryPath(context(), parsed.unwrap(),
         448 as UInt64)

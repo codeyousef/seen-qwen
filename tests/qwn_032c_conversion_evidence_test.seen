@@ -102,7 +102,7 @@ fun main() r: Int {
         catalog).unwrapErr().code == "qwen.convert.json",
         "reject a truncated resume journal")
 
-    let journalPath = ".seen/ci/output/qwn_032c/journal.json"
+    let journalPath = ".seen/verification/output/qwn_032c/journal.json"
     require(persistQwenResumeJournal(journalPath, rendered, identity,
         plan, catalog).unwrap(), "persist only a prevalidated journal atomically")
     require(readText(journalPath) == rendered,
@@ -112,11 +112,11 @@ fun main() r: Int {
         readText(journalPath) == rendered,
         "preserve the prior journal when replacement validation fails")
     require(persistQwenResumeJournal(
-        ".seen/ci/output/qwn_032c/missing/journal.json", rendered,
+        ".seen/verification/output/qwn_032c/missing/journal.json", rendered,
         identity, plan, catalog).unwrapErr().code == "qwen.convert.io",
         "report atomic persistence failure without a partial destination")
     require(not exists(
-        ".seen/ci/output/qwn_032c/missing/journal.json"),
+        ".seen/verification/output/qwn_032c/missing/journal.json"),
         "leave no destination after failed atomic persistence")
 
     let incomplete = QwenTensorChecksum.begin(1,

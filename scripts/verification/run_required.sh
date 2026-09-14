@@ -3,20 +3,20 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd -P -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
-PREPARE_INPUTS="$ROOT_DIR/scripts/ci/prepare_inputs.sh"
-INNER_GATE="$ROOT_DIR/scripts/ci/required_inner.sh"
-CI_ROOT="$ROOT_DIR/.seen/ci"
+PREPARE_INPUTS="$ROOT_DIR/scripts/verification/prepare_inputs.sh"
+INNER_GATE="$ROOT_DIR/scripts/verification/required_inner.sh"
+VERIFICATION_ROOT="$ROOT_DIR/.seen/verification"
 GIT_COMMON_DIR="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)"
 SHARED_ROOT="${GIT_COMMON_DIR%/.git}"
 TOOLCHAIN_ROOT="$SHARED_ROOT/.seen/toolchains/seen-0.20.9-linux-x64"
-CI_IMAGE="silkeh/clang@sha256:a370fe4e8ecd284143bbfde1185bef4c1b6b72f45af4823812b9afe84cd1a14d"
+VERIFICATION_IMAGE="silkeh/clang@sha256:a370fe4e8ecd284143bbfde1185bef4c1b6b72f45af4823812b9afe84cd1a14d"
 MEMORY_CEILING_BYTES=7516192768
 MEMORY_RESERVE_BYTES=1073741824
 TASKS_MAX=24
 TIMEOUT_SECS=1500
 
 fail() {
-    echo "ci-required: $*" >&2
+    echo "verification-required: $*" >&2
     exit 126
 }
 
@@ -42,17 +42,17 @@ memory_bytes=$((memory_available_bytes - MEMORY_RESERVE_BYTES))
 memory_vmem_kib=$((memory_bytes / 1024))
 [ "$memory_vmem_kib" -ge 1048576 ] ||
     fail "derived hard scope is below the 1 GiB minimum"
-echo "ci-required: host MemTotal=${memory_total_kib}KiB MemAvailable=${memory_available_kib}KiB derived_memory.max=${memory_bytes} memory.swap.max=0 pids.max=${TASKS_MAX}"
+echo "verification-required: host MemTotal=${memory_total_kib}KiB MemAvailable=${memory_available_kib}KiB derived_memory.max=${memory_bytes} memory.swap.max=0 pids.max=${TASKS_MAX}"
 
 before_status=$(git -C "$ROOT_DIR" status --porcelain=v1 --untracked-files=all)
 "$PREPARE_INPUTS"
 [ -d "$TOOLCHAIN_ROOT" ] && [ ! -L "$TOOLCHAIN_ROOT" ] ||
     fail "shared v0.20.9 toolchain root is missing or unsafe"
 
-mkdir -p -- "$CI_ROOT/artifacts" "$CI_ROOT/home" "$CI_ROOT/output" "$CI_ROOT/tmp"
-for writable in "$CI_ROOT/artifacts" "$CI_ROOT/home" "$CI_ROOT/output" "$CI_ROOT/tmp"; do
+mkdir -p -- "$VERIFICATION_ROOT/artifacts" "$VERIFICATION_ROOT/home" "$VERIFICATION_ROOT/output" "$VERIFICATION_ROOT/tmp"
+for writable in "$VERIFICATION_ROOT/artifacts" "$VERIFICATION_ROOT/home" "$VERIFICATION_ROOT/output" "$VERIFICATION_ROOT/tmp"; do
     [ -d "$writable" ] && [ ! -L "$writable" ] ||
-        fail "CI writable root is unsafe: $writable"
+        fail "local verification writable root is unsafe: $writable"
 done
 
 runner_uid=$(id -u)
@@ -61,7 +61,7 @@ case "$runner_uid:$runner_gid" in
     *[!0-9:]*|:|*::*) fail "runner uid/gid are invalid" ;;
 esac
 
-docker pull "$CI_IMAGE"
+docker pull "$VERIFICATION_IMAGE"
 docker run --rm --platform linux/amd64 \
     --network none \
     --read-only \
@@ -77,11 +77,11 @@ docker run --rm --platform linux/amd64 \
     --mount "type=bind,src=$ROOT_DIR,dst=/workspace,readonly" \
     --mount "type=bind,src=$ROOT_DIR/.seen,dst=/workspace/.seen" \
     --mount "type=bind,src=$TOOLCHAIN_ROOT,dst=/workspace/.seen/toolchains/seen-0.20.9-linux-x64,readonly" \
-    --mount "type=bind,src=$CI_ROOT/tmp,dst=/tmp" \
+    --mount "type=bind,src=$VERIFICATION_ROOT/tmp,dst=/tmp" \
     --workdir /workspace \
-    --env HOME=/workspace/.seen/ci/home \
+    --env HOME=/workspace/.seen/verification/home \
     --env TMPDIR=/tmp \
-    --env SEEN_ARTIFACT_ROOT=/workspace/.seen/ci/artifacts \
+    --env SEEN_ARTIFACT_ROOT=/workspace/.seen/verification/artifacts \
     --env SEEN_LOW_MEMORY=1 \
     --env SEEN_JOBS=1 \
     --env SEEN_OPT_JOBS=1 \
@@ -93,12 +93,12 @@ docker run --rm --platform linux/amd64 \
     --env OMP_NUM_THREADS=1 \
     --env OPENBLAS_NUM_THREADS=1 \
     --env GOMAXPROCS=1 \
-    "$CI_IMAGE" \
+    "$VERIFICATION_IMAGE" \
     timeout --foreground --signal=KILL "$TIMEOUT_SECS" \
-        /workspace/scripts/ci/required_inner.sh
+        /workspace/scripts/verification/required_inner.sh
 
 after_status=$(git -C "$ROOT_DIR" status --porcelain=v1 --untracked-files=all)
 [ "$after_status" = "$before_status" ] ||
-    fail "required CI changed tracked or untracked repository state"
+    fail "required local verification changed tracked or untracked repository state"
 
-echo "PASS: required Seen Qwen CI gates"
+echo "PASS: required Seen Qwen local verification gates"

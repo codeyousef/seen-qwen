@@ -20,7 +20,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 READER_SOURCE = ROOT / "src/formats/sqw_reader.seen"
 SEEN_READER_TEST = ROOT / "tests/qwn_030b_sqw_reader_test.seen"
-OUTPUT = ROOT / ".seen/ci/output/qwn_030b"
+OUTPUT = ROOT / ".seen/verification/output/qwn_030b"
 
 HEADER_BYTES = 256
 DIRECTORY_ENTRY_BYTES = 256
@@ -777,7 +777,7 @@ class SqwReaderOracleTests(unittest.TestCase):
         ))
         self.assertEqual(
             OUTPUT.relative_to(ROOT).parts,
-            (".seen", "ci", "output", "qwn_030b"),
+            (".seen", "verification", "output", "qwn_030b"),
         )
         self.assertIn("/.seen/", (ROOT / ".gitignore").read_text(encoding="utf-8"))
         self.assertFalse(list((ROOT / "tests/fixtures").rglob("*.sqw")))
@@ -1116,7 +1116,7 @@ class SqwReaderOracleTests(unittest.TestCase):
     def test_public_seen_regression_consumes_generated_oracles(self) -> None:
         self.assertTrue(SEEN_READER_TEST.is_file(), SEEN_READER_TEST)
         source = SEEN_READER_TEST.read_text(encoding="utf-8")
-        self.assertIn(".seen/ci/output/qwn_030b", source)
+        self.assertIn(".seen/verification/output/qwn_030b", source)
         for spelling in ("SqwReader", "SqwReaderPolicy", "SqwTensorView", "valid.sqw", "sqw."):
             self.assertIn(spelling, source)
         self.assertGreaterEqual(source.count(".close()"), 2)

@@ -27,7 +27,7 @@ fun main() r: Int {
     policy.maxHeaderBytes = 1048576 as UInt64
     policy.maxTensors = 124 as UInt64
     let minimal = SafeTensorFile.open(
-        ".seen/ci/output/qwn_023b_minimal.safetensors", policy)
+        ".seen/verification/output/qwn_023b_minimal.safetensors", policy)
     require(minimal.isOkay(), "open a one-tensor valid Safetensors file")
     let minimalFile = minimal.unwrap()
     require(minimalFile.metadata.names.length() == 1,
@@ -68,12 +68,12 @@ fun main() r: Int {
     require(file.close().isOkay(), "close the mapped fixture deterministically")
 
     require(SafeTensorFile.open(
-        ".seen/ci/output/qwn_023b_truncated.safetensors", policy).isErr(),
+        ".seen/verification/output/qwn_023b_truncated.safetensors", policy).isErr(),
         "reject a truncated header")
     require(SafeTensorFile.open(
-        ".seen/ci/output/qwn_023b_unsupported_dtype.safetensors", policy).isErr(),
+        ".seen/verification/output/qwn_023b_unsupported_dtype.safetensors", policy).isErr(),
         "reject an unsupported dtype")
-    require(SafeTensorFile.open(".seen/ci/output/missing.safetensors", policy).isErr(),
+    require(SafeTensorFile.open(".seen/verification/output/missing.safetensors", policy).isErr(),
         "reject a missing fixture")
     policy.allowPrefixes.free()
     policy.denyPrefixes.free()

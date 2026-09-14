@@ -4,7 +4,7 @@ set -euo pipefail
 umask 022
 
 ROOT_DIR="$(cd -P -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
-CI_ROOT="$ROOT_DIR/.seen/ci"
+VERIFICATION_ROOT="$ROOT_DIR/.seen/verification"
 ASSET_ROOT="$ROOT_DIR/.seen/oracle-assets-qwen38"
 
 SEEN_ARCHIVE_URL="https://github.com/codeyousef/SeenLang/releases/download/v0.20.9/seen-0.20.9-linux-x64.tar.gz"
@@ -30,7 +30,7 @@ QWEN_GENERATION_BYTES=202
 QWEN_MODEL_CARD_BYTES=65012
 
 fail() {
-    echo "ci-inputs: $*" >&2
+    echo "verification-inputs: $*" >&2
     exit 1
 }
 
@@ -190,7 +190,7 @@ DOWNLOAD_ROOT="$TOOLCHAIN_DOWNLOADS_ROOT/v0.20.9"
 TOOLCHAIN_ROOT="$TOOLCHAINS_ROOT/seen-0.20.9-linux-x64"
 
 ensure_local_directory "$ROOT_DIR/.seen"
-ensure_local_directory "$CI_ROOT"
+ensure_local_directory "$VERIFICATION_ROOT"
 ensure_local_directory "$SHARED_ROOT/.seen"
 ensure_local_directory "$TOOLCHAINS_ROOT"
 ensure_local_directory "$TOOLCHAIN_DOWNLOADS_ROOT"
@@ -200,11 +200,11 @@ ensure_local_directory "$ASSET_ROOT"
 archive="$DOWNLOAD_ROOT/seen-0.20.9-linux-x64.tar.gz"
 download_verified "$SEEN_ARCHIVE_URL" "$archive" "$SEEN_ARCHIVE_SHA256"
 
-extract_root=$(mktemp -d "$CI_ROOT/toolchain.extract.XXXXXX")
+extract_root=$(mktemp -d "$VERIFICATION_ROOT/toolchain.extract.XXXXXX")
 cleanup_extract() {
     local status=$?
     case "$extract_root" in
-        "$CI_ROOT"/toolchain.extract.*)
+        "$VERIFICATION_ROOT"/toolchain.extract.*)
             [ -d "$extract_root" ] && [ ! -L "$extract_root" ] &&
                 rm -rf -- "$extract_root"
             ;;

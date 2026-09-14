@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static fail-closed contracts for the standalone Seen Qwen CI workflow."""
+"""Static fail-closed contracts for Seen Qwen local verification."""
 
 from pathlib import Path
 import os
@@ -12,33 +12,23 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
-RUNNER = ROOT / "scripts/ci/run_required.sh"
-PREPARE = ROOT / "scripts/ci/prepare_inputs.sh"
-INNER = ROOT / "scripts/ci/required_inner.sh"
+RUNNER = ROOT / "scripts/verification/run_required.sh"
+PREPARE = ROOT / "scripts/verification/prepare_inputs.sh"
+INNER = ROOT / "scripts/verification/required_inner.sh"
 LOCK = ROOT / "Seen.lock"
 
 
-class CiContractTests(unittest.TestCase):
+class LocalVerificationContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.workflow = WORKFLOW.read_text(encoding="utf-8")
         cls.runner = RUNNER.read_text(encoding="utf-8")
         cls.prepare = PREPARE.read_text(encoding="utf-8")
         cls.inner = INNER.read_text(encoding="utf-8")
         cls.lock = LOCK.read_text(encoding="utf-8")
 
-    def test_workflow_identity_and_triggers_are_pinned(self) -> None:
-        self.assertIn("push:\n    branches: [main]", self.workflow)
-        self.assertIn("pull_request:", self.workflow)
-        self.assertIn("workflow_dispatch:", self.workflow)
-        self.assertIn("runs-on: ubuntu-24.04", self.workflow)
-        self.assertIn("timeout-minutes: 30", self.workflow)
+    def test_hosted_ci_is_absent_and_local_gate_is_bounded(self) -> None:
+        self.assertFalse(WORKFLOW.exists())
         self.assertIn("TIMEOUT_SECS=1500", self.runner)
-        self.assertIn(
-            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-            self.workflow,
-        )
-        self.assertNotRegex(self.workflow, r"uses: [^\n]+@(v|main|master)")
 
     def test_container_scope_is_immutable_and_bounded(self) -> None:
         self.assertIn(
@@ -59,9 +49,9 @@ class CiContractTests(unittest.TestCase):
             'dst=/tmp',
         ):
             self.assertIn(required, self.runner)
-        self.assertNotIn("sudo", self.workflow + self.runner + self.prepare + self.inner)
-        self.assertNotIn("pkexec", self.workflow + self.runner + self.prepare + self.inner)
-        self.assertNotIn("/usr/local/bin/seen", self.workflow + self.runner + self.inner)
+        self.assertNotIn("sudo", self.runner + self.prepare + self.inner)
+        self.assertNotIn("pkexec", self.runner + self.prepare + self.inner)
+        self.assertNotIn("/usr/local/bin/seen", self.runner + self.inner)
 
     def test_inputs_match_dependency_and_oracle_locks(self) -> None:
         identities = (

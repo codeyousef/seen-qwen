@@ -252,7 +252,7 @@ odd 65-element row accepts a zero unused high nibble and rejects a nonzero one
 as `sqw.q4_tail`. These small fixtures prove the generic mechanism; they do not
 replace the production `SqwReaderPolicy.qwen38` requirement of 866 tensors.
 Affected frontend and native CPU regressions run under the repository's serial,
-current-memory-derived, swap-disabled hard scope and required CI.
+current-memory-derived, swap-disabled hard scope and required local verification.
 
 QWN-030B does not write or mutate SQW files. Unique temporary creation,
 conversion journaling, full reopen-before-promotion, `fsync`, and atomic
