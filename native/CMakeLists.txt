@@ -133,3 +133,11 @@ target_compile_options(qwn_044a_cuda_test PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Werror>
   $<$<COMPILE_LANGUAGE:CUDA>:--threads=1;--Werror=cross-execution-space-call>)
 set_target_properties(qwn_044a_cuda_test PROPERTIES BUILD_RPATH "$ORIGIN;$ORIGIN/seen_cuda_build")
+
+add_executable(qwn_045b_cuda_test tests/mini_model_execution_test.cu)
+target_link_libraries(qwn_045b_cuda_test PRIVATE seen_qwen_cuda seen_cuda CUDA::cudart)
+target_compile_options(qwn_045b_cuda_test PRIVATE
+  $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Werror>
+  $<$<COMPILE_LANGUAGE:CUDA>:--threads=1;--Werror=cross-execution-space-call>)
+set_target_properties(qwn_045b_cuda_test PROPERTIES
+  BUILD_RPATH "$ORIGIN;$ORIGIN/seen_cuda_build")
