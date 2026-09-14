@@ -34,8 +34,9 @@ pub let QWEN_BACKEND_CUDA: Int32 = 1 as Int32
 pub let QWEN_BACKEND_CPU_REFERENCE: Int32 = 2 as Int32
 
 const QWEN_MINI_LAYERS: Int = 8
+const QWEN_FULL_LAYERS: Int = 64
 const QWEN_MINI_CONTEXT: UInt64 = 128 as UInt64
-const QWEN_PLAN_MAX_STEPS: Int = 128
+const QWEN_PLAN_MAX_STEPS: Int = 512
 const QWEN_ENGINE_MAX_SESSIONS: UInt64 = 1024 as UInt64
 
 pub class QwenEngineError {
@@ -98,12 +99,12 @@ fun appendLayerPlan(steps: Array<QwenExecutionStep>, layer: Int,
         ordinal, true))
 }
 
-fun buildPhasePlan(prefill: Bool, includeMtp: Bool)
+fun buildPhasePlan(prefill: Bool, includeMtp: Bool, layerCount: Int)
     r: Array<QwenExecutionStep> {
     let steps = Array<QwenExecutionStep>()
     steps.push(qwenPlanStep(QWEN_PLAN_EMBEDDING, -1 as Int32, 0, true))
     var layer = 0
-    while layer < QWEN_MINI_LAYERS {
+    while layer < layerCount {
         appendLayerPlan(steps, layer, prefill); layer = layer + 1
     }
     var ordinal = steps.length()
@@ -144,8 +145,9 @@ fun qwenStepKindValid(kind: Int32, prefill: Bool) r: Bool {
 }
 
 fun validatePhasePlan(steps: Array<QwenExecutionStep>, prefill: Bool,
-    includeMtp: Bool) r: Bool {
-    let expected = if includeMtp { 53 } else { 52 }
+    includeMtp: Bool, layerCount: Int) r: Bool {
+    let terminal = 1 + layerCount * 6
+    let expected = terminal + (if includeMtp { 4 } else { 3 })
     if steps.length() != expected or steps.length() > QWEN_PLAN_MAX_STEPS {
         return false
     }
@@ -164,12 +166,12 @@ fun validatePhasePlan(steps: Array<QwenExecutionStep>, prefill: Bool,
         index = index + 1
     }
     if steps[0].kind != QWEN_PLAN_EMBEDDING or
-        steps[49].kind != QWEN_PLAN_FINAL_NORM or
-        steps[50].kind != QWEN_PLAN_LM_HEAD or
-        steps[51].kind != QWEN_PLAN_SAMPLE {
+        steps[terminal].kind != QWEN_PLAN_FINAL_NORM or
+        steps[terminal + 1].kind != QWEN_PLAN_LM_HEAD or
+        steps[terminal + 2].kind != QWEN_PLAN_SAMPLE {
         return false
     }
-    return not includeMtp or steps[52].kind == QWEN_PLAN_MTP
+    return not includeMtp or steps[terminal + 3].kind == QWEN_PLAN_MTP
 }
 
 @move
@@ -184,6 +186,7 @@ pub class QwenExecutionPlan {
     var fallbackPolicy: Int32
     var referenceValidated: Bool
     var includeMtp: Bool
+    var modelLayers: Int
     var closed: Bool
 
     fun validate() r: Bool {
@@ -197,8 +200,12 @@ pub class QwenExecutionPlan {
             (this.fallbackPolicy == QWEN_FALLBACK_PROHIBITED or
              this.fallbackPolicy == QWEN_FALLBACK_EXPLICIT_CPU_REFERENCE and
                 this.referenceValidated) and
-            validatePhasePlan(this.prefillSteps, true, this.includeMtp) and
-            validatePhasePlan(this.decodeSteps, false, this.includeMtp)
+            (this.modelLayers == QWEN_MINI_LAYERS or
+             this.modelLayers == QWEN_FULL_LAYERS) and
+            validatePhasePlan(this.prefillSteps, true, this.includeMtp,
+                this.modelLayers) and
+            validatePhasePlan(this.decodeSteps, false, this.includeMtp,
+                this.modelLayers)
     }
 
     fun close() r: Void {
@@ -232,17 +239,51 @@ pub fun createQwenMiniExecutionPlan(engineIdentity: String,
     let plan = QwenExecutionPlan{
         engineIdentity: seen_string_clone_owned(engineIdentity),
         manifestIdentity: seen_string_clone_owned(manifestIdentity),
-        prefillSteps: buildPhasePlan(true, includeMtp),
-        decodeSteps: buildPhasePlan(false, includeMtp),
+        prefillSteps: buildPhasePlan(true, includeMtp, QWEN_MINI_LAYERS),
+        decodeSteps: buildPhasePlan(false, includeMtp, QWEN_MINI_LAYERS),
         deviceOrdinal: deviceOrdinal, maxContext: maxContext,
         maxGenerated: maxGenerated, fallbackPolicy: fallbackPolicy,
         referenceValidated: referenceValidated, includeMtp: includeMtp,
+        modelLayers: QWEN_MINI_LAYERS,
         closed: false }
     if not plan.validate() {
         plan.close()
         return Err<QwenExecutionPlan, QwenEngineError>(qwenEngineError(
             "qwen.engine.plan", "engine.plan",
             "constructed execution plan failed closed validation",
+            deviceOrdinal))
+    }
+    return Ok<QwenExecutionPlan, QwenEngineError>(plan)
+}
+
+pub fun createQwenFullExecutionPlan(engineIdentity: String,
+    manifestIdentity: String, deviceOrdinal: Int32, maxContext: UInt64,
+    maxGenerated: UInt64, includeMtp: Bool)
+    r: Result<QwenExecutionPlan, QwenEngineError> {
+    if not qwenDigestValid(engineIdentity) or
+        not qwenDigestValid(manifestIdentity) or deviceOrdinal < (0 as Int32) or
+        maxContext == (0 as UInt64) or maxContext > QWEN_MINI_CONTEXT or
+        maxGenerated == (0 as UInt64) or maxGenerated > maxContext {
+        return Err<QwenExecutionPlan, QwenEngineError>(qwenEngineError(
+            "qwen.engine.plan", "engine.plan.full",
+            "full execution plan identity or bounded geometry is invalid",
+            deviceOrdinal))
+    }
+    let plan = QwenExecutionPlan{
+        engineIdentity: seen_string_clone_owned(engineIdentity),
+        manifestIdentity: seen_string_clone_owned(manifestIdentity),
+        prefillSteps: buildPhasePlan(true, includeMtp, QWEN_FULL_LAYERS),
+        decodeSteps: buildPhasePlan(false, includeMtp, QWEN_FULL_LAYERS),
+        deviceOrdinal: deviceOrdinal, maxContext: maxContext,
+        maxGenerated: maxGenerated,
+        fallbackPolicy: QWEN_FALLBACK_PROHIBITED,
+        referenceValidated: false, includeMtp: includeMtp,
+        modelLayers: QWEN_FULL_LAYERS, closed: false }
+    if not plan.validate() {
+        plan.close()
+        return Err<QwenExecutionPlan, QwenEngineError>(qwenEngineError(
+            "qwen.engine.plan", "engine.plan.full",
+            "constructed full execution plan failed closed validation",
             deviceOrdinal))
     }
     return Ok<QwenExecutionPlan, QwenEngineError>(plan)

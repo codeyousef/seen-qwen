@@ -1,0 +1,121 @@
+/// QWN-046A Seen-owned complete-model CUDA residency.
+
+import accelerator.cuda.mod.{CudaAllocation, CudaDevice, CudaStream}
+import accelerator.cuda.error.{CudaError}
+import core.result.{Result}
+import seen_qwen.runtime.full_model_memory.{QwenFullMemoryPlan,
+    QWEN_FULL_Q4_WEIGHT_BYTES, createQwenFullMemoryPlan}
+
+fun qwenFullCudaError(deviceOrdinal: Int32, operation: String,
+    message: String) r: CudaError {
+    return CudaError{ code: 1 as Int32, nativeCode: 0 as Int32,
+        deviceOrdinal: deviceOrdinal, maturity: 2 as Int32,
+        operation: operation, message: message,
+        sourceFile: "<qwen-full-model-cuda>", sourceLine: 0,
+        sourceColumn: 0 }
+}
+
+fun closeQwenFullAllocations(allocations: Array<CudaAllocation>) r: Bool {
+    var okay = true
+    var index = allocations.length()
+    while index > 0 {
+        index = index - 1
+        let closed = allocations[index].close()
+        if closed.isErr() { okay = false }
+    }
+    allocations.free()
+    return okay
+}
+
+/// Owns ten coarse allocation classes and exactly one Seen CUDA stream.
+/// Index zero is the compact Q4 weights allocation; later indices follow the
+/// memory-plan field order. No layer owns or creates an allocation.
+@move
+pub class QwenFullCudaResidency {
+    var plan: QwenFullMemoryPlan
+    var allocations: Array<CudaAllocation>
+    var stream: CudaStream
+    var freeBytesBefore: UInt64
+    var closed: Bool
+
+    fun close() r: Result<Bool, CudaError> {
+        if this.closed { return Ok<Bool, CudaError>(false) }
+        let allocationsClosed = closeQwenFullAllocations(this.allocations)
+        let streamClosed = this.stream.close()
+        this.freeBytesBefore = 0 as UInt64; this.closed = true
+        if not allocationsClosed {
+            return Err<Bool, CudaError>(qwenFullCudaError(
+                this.plan.deviceOrdinal, "qwen.full.close",
+                "one or more complete-model allocations failed to close"))
+        }
+        if streamClosed.isErr() {
+            return Err<Bool, CudaError>(streamClosed.unwrapErr())
+        }
+        return Ok<Bool, CudaError>(true)
+    }
+}
+
+pub fun createQwenFullCudaResidency(deviceOrdinal: Int32,
+    contextTokens: UInt64)
+    r: Result<QwenFullCudaResidency, CudaError> {
+    let opened = CudaDevice.open(deviceOrdinal)
+    if opened.isErr() {
+        return Err<QwenFullCudaResidency, CudaError>(opened.unwrapErr())
+    }
+    let device = opened.unwrap()
+    if device.computeMajor != 8 or device.computeMinor != 9 {
+        return Err<QwenFullCudaResidency, CudaError>(qwenFullCudaError(
+            deviceOrdinal, "qwen.full.device",
+            "complete-model certification requires an SM89 device"))
+    }
+    let planned = createQwenFullMemoryPlan(deviceOrdinal,
+        device.totalMemoryBytes, QWEN_FULL_Q4_WEIGHT_BYTES, contextTokens)
+    if planned.isErr() {
+        return Err<QwenFullCudaResidency, CudaError>(qwenFullCudaError(
+            deviceOrdinal, "qwen.full.plan",
+            "device failed the checked complete-model memory plan"))
+    }
+    let plan = planned.unwrap()
+    if device.freeMemoryBytes < plan.allocationBytes {
+        return Err<QwenFullCudaResidency, CudaError>(qwenFullCudaError(
+            deviceOrdinal, "qwen.full.free-memory",
+            "current free memory cannot admit every planned allocation"))
+    }
+    let madeStream = CudaStream.create(deviceOrdinal)
+    if madeStream.isErr() {
+        return Err<QwenFullCudaResidency, CudaError>(madeStream.unwrapErr())
+    }
+    let stream = madeStream.unwrap()
+    let sizes = Array<UInt64>()
+    sizes.push(plan.weightBytes); sizes.push(plan.gdnStateBytes)
+    sizes.push(plan.convolutionStateBytes); sizes.push(plan.kvBytes)
+    sizes.push(plan.activationBytes); sizes.push(plan.logitsBytes)
+    sizes.push(plan.cublasLtWorkspaceBytes); sizes.push(plan.scratchBytes)
+    sizes.push(plan.graphBytes); sizes.push(plan.telemetryBytes)
+    let allocations = Array<CudaAllocation>()
+    var index = 0
+    while index < sizes.length() {
+        let made = CudaAllocation.allocate(deviceOrdinal, sizes[index])
+        if made.isErr() {
+            sizes.free(); closeQwenFullAllocations(allocations)
+            let streamClosed = stream.close()
+            return Err<QwenFullCudaResidency, CudaError>(made.unwrapErr())
+        }
+        let allocation = made.unwrap()
+        if allocation.handle == (0 as UInt64) or
+            allocation.data == (null as *Void) or
+            allocation.byteLength != sizes[index] or
+            allocation.device != deviceOrdinal {
+            allocation.close(); sizes.free()
+            closeQwenFullAllocations(allocations); stream.close()
+            return Err<QwenFullCudaResidency, CudaError>(qwenFullCudaError(
+                deviceOrdinal, "qwen.full.allocate",
+                "CUDA allocation identity differs from its plan"))
+        }
+        allocations.push(allocation); index = index + 1
+    }
+    sizes.free()
+    return Ok<QwenFullCudaResidency, CudaError>(QwenFullCudaResidency{
+        plan: plan, allocations: allocations, stream: stream,
+        freeBytesBefore: device.freeMemoryBytes, closed: false })
+}
