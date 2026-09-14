@@ -1,0 +1,179 @@
+///
+/// QWN-046A fail-closed memory admission for the complete Qwen3.8-27B model.
+///
+/// The experimental Q4 profile is intentionally explicit and has no fallback
+/// or offload path. The safety reserve remains unallocated. All other values
+/// are exact allocation bounds for one batch and at most 128 tokens.
+///
+
+import core.result.{Result}
+import inference.scalars.{checkedAdd64, checkedMultiply64}
+
+pub let QWEN_FULL_Q4_WEIGHT_BYTES: UInt64 = 14515042384 as UInt64
+pub let QWEN_FULL_MAX_CONTEXT: UInt64 = 128 as UInt64
+pub let QWEN_FULL_ACTIVATION_BYTES: UInt64 = 536870912 as UInt64
+pub let QWEN_FULL_LOGITS_BYTES: UInt64 = 1048576 as UInt64
+pub let QWEN_FULL_CUBLASLT_WORKSPACE_BYTES: UInt64 = 536870912 as UInt64
+pub let QWEN_FULL_SCRATCH_BYTES: UInt64 = 536870912 as UInt64
+pub let QWEN_FULL_GRAPH_BYTES: UInt64 = 268435456 as UInt64
+pub let QWEN_FULL_TELEMETRY_BYTES: UInt64 = 67108864 as UInt64
+pub let QWEN_FULL_MINIMUM_RESERVE_BYTES: UInt64 = 536870912 as UInt64
+
+pub class QwenFullMemoryError {
+    var code: String
+    var field: String
+    var message: String
+    var retryable: Bool
+    var requiredBytes: UInt64
+    var deviceBytes: UInt64
+}
+
+pub class QwenFullMemoryPlan {
+    var deviceOrdinal: Int32
+    var deviceBytes: UInt64
+    var weightBytes: UInt64
+    var gdnStateBytes: UInt64
+    var convolutionStateBytes: UInt64
+    var kvBytes: UInt64
+    var activationBytes: UInt64
+    var logitsBytes: UInt64
+    var cublasLtWorkspaceBytes: UInt64
+    var scratchBytes: UInt64
+    var graphBytes: UInt64
+    var telemetryBytes: UInt64
+    var allocationBytes: UInt64
+    var safetyReserveBytes: UInt64
+    var admittedBytes: UInt64
+    var contextTokens: UInt64
+    var fallbackAllowed: Bool
+    var offloadAllowed: Bool
+}
+
+fun qwenFullMemoryError(code: String, field: String, message: String,
+    retryable: Bool = false, requiredBytes: UInt64 = 0 as UInt64,
+    deviceBytes: UInt64 = 0 as UInt64) r: QwenFullMemoryError {
+    return QwenFullMemoryError{ code: code, field: field, message: message,
+        retryable: retryable, requiredBytes: requiredBytes,
+        deviceBytes: deviceBytes }
+}
+
+fun qwenMemoryAdd(total: UInt64, value: UInt64, field: String)
+    r: Result<UInt64, QwenFullMemoryError> {
+    let added = checkedAdd64(total, value)
+    if added.isNone() {
+        return Err<UInt64, QwenFullMemoryError>(qwenFullMemoryError(
+            "qwen.memory.overflow", field,
+            "checked 64-bit memory geometry overflowed"))
+    }
+    return Ok<UInt64, QwenFullMemoryError>(added.unwrap())
+}
+
+pub fun createQwenFullMemoryPlan(deviceOrdinal: Int32, deviceBytes: UInt64,
+    weightBytes: UInt64, contextTokens: UInt64)
+    r: Result<QwenFullMemoryPlan, QwenFullMemoryError> {
+    if deviceOrdinal < (0 as Int32) {
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(qwenFullMemoryError(
+            "qwen.memory.device", "device_ordinal",
+            "CUDA device ordinal must be nonnegative"))
+    }
+    if weightBytes != QWEN_FULL_Q4_WEIGHT_BYTES {
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(qwenFullMemoryError(
+            "qwen.memory.profile", "weight_bytes",
+            "weights do not match the exact experimental Q4 profile"))
+    }
+    if contextTokens == (0 as UInt64) or
+        contextTokens > QWEN_FULL_MAX_CONTEXT {
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(qwenFullMemoryError(
+            "qwen.memory.context", "context_tokens",
+            "QWN-046A context must be within 1 through 128"))
+    }
+
+    var next = checkedMultiply64(48 as UInt64, 48 as UInt64)
+    if next.isNone() {
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(qwenFullMemoryError(
+            "qwen.memory.overflow", "gdn_state", "GDN state overflowed"))
+    }
+    next = checkedMultiply64(next.unwrap(), 128 as UInt64)
+    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+        qwenFullMemoryError("qwen.memory.overflow", "gdn_state",
+            "GDN state overflowed")) }
+    next = checkedMultiply64(next.unwrap(), 128 as UInt64)
+    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+        qwenFullMemoryError("qwen.memory.overflow", "gdn_state",
+            "GDN state overflowed")) }
+    next = checkedMultiply64(next.unwrap(), 4 as UInt64)
+    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+        qwenFullMemoryError("qwen.memory.overflow", "gdn_state",
+            "GDN state overflowed")) }
+    let gdnStateBytes = next.unwrap()
+    let convolutionStateBytes = 5898240 as UInt64
+
+    next = checkedMultiply64(16 as UInt64, 4 as UInt64)
+    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+        qwenFullMemoryError("qwen.memory.overflow", "kv", "KV size overflowed")) }
+    next = checkedMultiply64(next.unwrap(), 256 as UInt64)
+    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+        qwenFullMemoryError("qwen.memory.overflow", "kv", "KV size overflowed")) }
+    next = checkedMultiply64(next.unwrap(), 2 as UInt64)
+    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+        qwenFullMemoryError("qwen.memory.overflow", "kv", "KV size overflowed")) }
+    next = checkedMultiply64(next.unwrap(), 2 as UInt64)
+    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+        qwenFullMemoryError("qwen.memory.overflow", "kv", "KV size overflowed")) }
+    next = checkedMultiply64(next.unwrap(), contextTokens)
+    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+        qwenFullMemoryError("qwen.memory.overflow", "kv", "KV size overflowed")) }
+    let kvBytes = next.unwrap()
+
+    var total = weightBytes
+    var added = qwenMemoryAdd(total, gdnStateBytes, "gdn_state")
+    if added.isErr() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(added.unwrapErr()) }
+    total = added.unwrap()
+    added = qwenMemoryAdd(total, convolutionStateBytes, "convolution_state")
+    if added.isErr() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(added.unwrapErr()) }
+    total = added.unwrap()
+    added = qwenMemoryAdd(total, kvBytes, "kv")
+    if added.isErr() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(added.unwrapErr()) }
+    total = added.unwrap()
+    let fixed = Array<UInt64>()
+    fixed.push(QWEN_FULL_ACTIVATION_BYTES); fixed.push(QWEN_FULL_LOGITS_BYTES)
+    fixed.push(QWEN_FULL_CUBLASLT_WORKSPACE_BYTES)
+    fixed.push(QWEN_FULL_SCRATCH_BYTES); fixed.push(QWEN_FULL_GRAPH_BYTES)
+    fixed.push(QWEN_FULL_TELEMETRY_BYTES)
+    var index = 0
+    while index < fixed.length() {
+        added = qwenMemoryAdd(total, fixed[index], "workspace")
+        if added.isErr() {
+            fixed.free()
+            return Err<QwenFullMemoryPlan, QwenFullMemoryError>(added.unwrapErr())
+        }
+        total = added.unwrap(); index = index + 1
+    }
+    fixed.free()
+    var reserve = (deviceBytes / (100 as UInt64)) * (3 as UInt64)
+    if reserve < QWEN_FULL_MINIMUM_RESERVE_BYTES {
+        reserve = QWEN_FULL_MINIMUM_RESERVE_BYTES
+    }
+    added = qwenMemoryAdd(total, reserve, "safety_reserve")
+    if added.isErr() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(added.unwrapErr()) }
+    let admitted = added.unwrap()
+    if admitted > deviceBytes {
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(qwenFullMemoryError(
+            "qwen.memory.capacity", "device_bytes",
+            "device cannot admit the complete model and safety reserve", true,
+            admitted, deviceBytes))
+    }
+    return Ok<QwenFullMemoryPlan, QwenFullMemoryError>(QwenFullMemoryPlan{
+        deviceOrdinal: deviceOrdinal, deviceBytes: deviceBytes,
+        weightBytes: weightBytes, gdnStateBytes: gdnStateBytes,
+        convolutionStateBytes: convolutionStateBytes, kvBytes: kvBytes,
+        activationBytes: QWEN_FULL_ACTIVATION_BYTES,
+        logitsBytes: QWEN_FULL_LOGITS_BYTES,
+        cublasLtWorkspaceBytes: QWEN_FULL_CUBLASLT_WORKSPACE_BYTES,
+        scratchBytes: QWEN_FULL_SCRATCH_BYTES,
+        graphBytes: QWEN_FULL_GRAPH_BYTES,
+        telemetryBytes: QWEN_FULL_TELEMETRY_BYTES,
+        allocationBytes: total, safetyReserveBytes: reserve,
+        admittedBytes: admitted, contextTokens: contextTokens,
+        fallbackAllowed: false, offloadAllowed: false })
+}

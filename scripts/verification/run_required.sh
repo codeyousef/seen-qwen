@@ -8,7 +8,7 @@ INNER_GATE="$ROOT_DIR/scripts/verification/required_inner.sh"
 VERIFICATION_ROOT="$ROOT_DIR/.seen/verification"
 GIT_COMMON_DIR="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)"
 SHARED_ROOT="${GIT_COMMON_DIR%/.git}"
-TOOLCHAIN_ROOT="$SHARED_ROOT/.seen/toolchains/seen-0.20.9-linux-x64"
+TOOLCHAIN_ROOT="$SHARED_ROOT/.seen/toolchains/seen-0.20.10-linux-x64"
 VERIFICATION_IMAGE="silkeh/clang@sha256:a370fe4e8ecd284143bbfde1185bef4c1b6b72f45af4823812b9afe84cd1a14d"
 MEMORY_CEILING_BYTES=7516192768
 MEMORY_RESERVE_BYTES=1073741824
@@ -21,6 +21,8 @@ fail() {
 }
 
 [ "$(uname -s)" = "Linux" ] || fail "Linux is required"
+[ -x /opt/cuda/bin/nvcc ] && [ ! -L /opt/cuda/bin/nvcc ] ||
+    fail "the pinned local CUDA toolkit is required"
 [ -x "$PREPARE_INPUTS" ] && [ ! -L "$PREPARE_INPUTS" ] ||
     fail "input preparation entrypoint is missing or unsafe"
 [ -x "$INNER_GATE" ] && [ ! -L "$INNER_GATE" ] ||
@@ -47,7 +49,7 @@ echo "verification-required: host MemTotal=${memory_total_kib}KiB MemAvailable=$
 before_status=$(git -C "$ROOT_DIR" status --porcelain=v1 --untracked-files=all)
 "$PREPARE_INPUTS"
 [ -d "$TOOLCHAIN_ROOT" ] && [ ! -L "$TOOLCHAIN_ROOT" ] ||
-    fail "shared v0.20.9 toolchain root is missing or unsafe"
+    fail "shared v0.20.10 toolchain root is missing or unsafe"
 
 mkdir -p -- "$VERIFICATION_ROOT/artifacts" "$VERIFICATION_ROOT/home" "$VERIFICATION_ROOT/output" "$VERIFICATION_ROOT/tmp"
 for writable in "$VERIFICATION_ROOT/artifacts" "$VERIFICATION_ROOT/home" "$VERIFICATION_ROOT/output" "$VERIFICATION_ROOT/tmp"; do
@@ -63,6 +65,7 @@ esac
 
 docker pull "$VERIFICATION_IMAGE"
 docker run --rm --platform linux/amd64 \
+    --gpus all \
     --network none \
     --read-only \
     --cap-drop ALL \
@@ -76,10 +79,16 @@ docker run --rm --platform linux/amd64 \
     --ulimit nofile=1024:1024 \
     --mount "type=bind,src=$ROOT_DIR,dst=/workspace,readonly" \
     --mount "type=bind,src=$ROOT_DIR/.seen,dst=/workspace/.seen" \
-    --mount "type=bind,src=$TOOLCHAIN_ROOT,dst=/workspace/.seen/toolchains/seen-0.20.9-linux-x64,readonly" \
+    --mount "type=bind,src=$TOOLCHAIN_ROOT,dst=/workspace/.seen/toolchains/seen-0.20.10-linux-x64,readonly" \
+    --mount "type=bind,src=/opt/cuda,dst=/opt/cuda,readonly" \
     --mount "type=bind,src=$VERIFICATION_ROOT/tmp,dst=/tmp" \
     --workdir /workspace \
     --env HOME=/workspace/.seen/verification/home \
+    --env PYTHONPATH=/workspace/.seen/verification/python \
+    --env PATH=/opt/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    --env CUDAToolkit_ROOT=/opt/cuda \
+    --env NVCC_CCBIN=/usr/bin/clang++ \
+    --env CUDAHOSTCXX=/usr/bin/clang++ \
     --env TMPDIR=/tmp \
     --env SEEN_ARTIFACT_ROOT=/workspace/.seen/verification/artifacts \
     --env SEEN_LOW_MEMORY=1 \

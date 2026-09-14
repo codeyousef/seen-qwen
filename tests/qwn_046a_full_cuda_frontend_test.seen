@@ -1,0 +1,10 @@
+import seen_qwen.runtime.full_model_cuda.{createQwenFullCudaResidency}
+
+fun main() r: Int {
+    // Hardware execution is owned by scripts/cuda/run_qwn_046a.sh. Importing
+    // here forces frontend validation without locating a CUDA SDK at runtime.
+    println("PASS: QWN-046A complete-model CUDA ownership frontend")
+    return 0
+}
+
+main()

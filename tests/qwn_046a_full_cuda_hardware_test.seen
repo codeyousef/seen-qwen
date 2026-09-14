@@ -1,0 +1,22 @@
+import seen_qwen.runtime.full_model_cuda.{createQwenFullCudaResidency}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun main() r: Int {
+    let made = createQwenFullCudaResidency(0 as Int32, 128 as UInt64)
+    require(made.isOkay(), "create the complete Seen-owned CUDA residency")
+    let residency = made.unwrap()
+    require(residency.allocations.length() == 10 and
+        residency.plan.allocationBytes == (16627529808 as UInt64) and
+        residency.stream.handle != (0 as UInt64) and not residency.closed,
+        "own every coarse allocation and the exact Seen stream")
+    require(residency.close().isOkay() and
+        residency.close().unwrap() == false,
+        "close complete residency deterministically and idempotently")
+    println("PASS: QWN-046A Seen-owned complete CUDA residency")
+    return 0
+}
+
+main()

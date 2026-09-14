@@ -34,3 +34,8 @@ counters. QWN-045B owns actual operator execution as specified by
 `qwen-cuda-mini-execution-contract.md`.
 QWN-045A does not add a second CUDA resource stack, allocation policy, synchronization,
 offload, precision change, or default-stream path.
+
+QWN-046A extends plan construction with the complete 64-layer 3:1 hybrid
+schedule for the explicitly experimental short-context Q4 bring-up profile.
+The full plan remains capped at 128 tokens, always prohibits fallback, and
+does not claim token or logit correctness; QWN-046B owns that certification.

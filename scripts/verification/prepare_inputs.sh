@@ -7,14 +7,17 @@ ROOT_DIR="$(cd -P -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
 VERIFICATION_ROOT="$ROOT_DIR/.seen/verification"
 ASSET_ROOT="$ROOT_DIR/.seen/oracle-assets-qwen38"
 
-SEEN_ARCHIVE_URL="https://github.com/codeyousef/SeenLang/releases/download/v0.20.9/seen-0.20.9-linux-x64.tar.gz"
-SEEN_ARCHIVE_SHA256="455f558c7f72b913ae81e141c54434ae9bf4ee218dc4abdeb23a1319968cb4eb"
-SEEN_COMPILER_SHA256="c2c7f814359d699a7c5d7659184c8bb3fb8e6ffb063c1e8865b7fa121f05b5cc"
-SEEN_PACKAGE_CLIENT_SHA256="b672c79a8d40254447c7a02214b3e3eb9ba22b74009e79a9355d770c68a96935"
-SEEN_COMPATIBILITY_SHA256="426530e3eb99e367ec06b2805aefc7bcad10cc18e1265ff3d5d4263b6a607ba2"
-SEEN_SOURCE_COMMIT="4589dd890231d9c458a0b82ca1b3215e2aa28bfc"
-SEEN_BUILD_ID="9ad1afa96e2a848ce4fd75651dce4ee0f41a5755"
+SEEN_ARCHIVE_URL="https://github.com/codeyousef/SeenLang/releases/download/v0.20.10/seen-0.20.10-linux-x64.tar.gz"
+SEEN_ARCHIVE_SHA256="4a43cab0ff2ef932222c33e006a685e78969242305fa5f640071e366a5f7f9d9"
+SEEN_COMPILER_SHA256="7b71bba386641ce6655f1d7e5a124dbd5828709709af498b9f8b03fa1e7bda30"
+SEEN_PACKAGE_CLIENT_SHA256="3a7f5a172f6e4bc2834547634762107327ed9ac865ba457431f1e804fbd3c8c4"
+SEEN_COMPATIBILITY_SHA256="af7209cc9407c3933f969cdcf74164956ede888993eba021e15519ff25fcf53e"
+SEEN_SOURCE_COMMIT="f714d85d0e53ca907ada16b0c58149fd93250211"
+SEEN_BUILD_ID="b10cc4127407b12265b8538fe67d000df0fdd2c2"
 SEEN_CPU_BASELINE="x86-64"
+NUMPY_WHEEL_URL="https://files.pythonhosted.org/packages/f5/10/ca162f45a102738958dcec8023062dad0cbc17d1ab99d68c4e4a6c45fb2b/numpy-2.3.5-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+NUMPY_WHEEL_SHA256="11e06aa0af8c0f05104d56450d6093ee639e15f24ecf62d417329d06e522e017"
+NUMPY_WHEEL_BYTES=16597430
 QWEN_REVISION="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 QWEN_VOCAB_URL="https://huggingface.co/Qwen/Qwen3.8-27B/resolve/$QWEN_REVISION/vocab.json?download=true"
 QWEN_MERGES_URL="https://huggingface.co/Qwen/Qwen3.8-27B/resolve/$QWEN_REVISION/merges.txt?download=true"
@@ -96,7 +99,7 @@ verify_provenance() {
     [ -f "$verifier" ] && [ -x "$verifier" ] && [ ! -L "$verifier" ] ||
         return 1
     [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
-    "$verifier" "$manifest" "$root/bin/seen" 0.20.9 || return 1
+    "$verifier" "$manifest" "$root/bin/seen" 0.20.10 || return 1
     grep -Fqx -- "source_commit=$SEEN_SOURCE_COMMIT" "$manifest" || return 1
     grep -Fqx -- "compiler_build_id=$SEEN_BUILD_ID" "$manifest" || return 1
     grep -Fqx -- "cpu_baseline=$SEEN_CPU_BASELINE" "$manifest" || return 1
@@ -186,8 +189,8 @@ GIT_COMMON_DIR="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-comm
 SHARED_ROOT="${GIT_COMMON_DIR%/.git}"
 TOOLCHAINS_ROOT="$SHARED_ROOT/.seen/toolchains"
 TOOLCHAIN_DOWNLOADS_ROOT="$TOOLCHAINS_ROOT/downloads"
-DOWNLOAD_ROOT="$TOOLCHAIN_DOWNLOADS_ROOT/v0.20.9"
-TOOLCHAIN_ROOT="$TOOLCHAINS_ROOT/seen-0.20.9-linux-x64"
+DOWNLOAD_ROOT="$TOOLCHAIN_DOWNLOADS_ROOT/v0.20.10"
+TOOLCHAIN_ROOT="$TOOLCHAINS_ROOT/seen-0.20.10-linux-x64"
 
 ensure_local_directory "$ROOT_DIR/.seen"
 ensure_local_directory "$VERIFICATION_ROOT"
@@ -196,8 +199,9 @@ ensure_local_directory "$TOOLCHAINS_ROOT"
 ensure_local_directory "$TOOLCHAIN_DOWNLOADS_ROOT"
 ensure_local_directory "$DOWNLOAD_ROOT"
 ensure_local_directory "$ASSET_ROOT"
+ensure_local_directory "$VERIFICATION_ROOT/python-wheels"
 
-archive="$DOWNLOAD_ROOT/seen-0.20.9-linux-x64.tar.gz"
+archive="$DOWNLOAD_ROOT/seen-0.20.10-linux-x64.tar.gz"
 download_verified "$SEEN_ARCHIVE_URL" "$archive" "$SEEN_ARCHIVE_SHA256"
 
 extract_root=$(mktemp -d "$VERIFICATION_ROOT/toolchain.extract.XXXXXX")
@@ -215,7 +219,7 @@ cleanup_extract() {
 trap cleanup_extract EXIT
 while IFS= read -r member; do
     case "$member" in
-        seen-0.20.9-linux-x64|seen-0.20.9-linux-x64/*) ;;
+        seen-0.20.10-linux-x64|seen-0.20.10-linux-x64/*) ;;
         *) fail "release archive contains an unsafe member: $member" ;;
     esac
     case "/$member/" in
@@ -223,7 +227,7 @@ while IFS= read -r member; do
     esac
 done < <(tar -tzf "$archive")
 tar -xzf "$archive" -C "$extract_root" --no-same-owner --no-same-permissions
-extracted="$extract_root/seen-0.20.9-linux-x64"
+extracted="$extract_root/seen-0.20.10-linux-x64"
 [ -d "$extracted" ] && [ ! -L "$extracted" ] ||
     fail "release archive did not contain the expected root"
 unexpected_type=$(find "$extracted" -mindepth 1 ! -type f ! -type d -print -quit)
@@ -260,4 +264,37 @@ download_verified "$QWEN_GENERATION_URL" "$ASSET_ROOT/generation_config.json" \
 download_verified "$QWEN_MODEL_CARD_URL" "$ASSET_ROOT/README.md" \
     "$QWEN_MODEL_CARD_SHA256" "$QWEN_MODEL_CARD_BYTES"
 
-echo "PASS: exact Seen v0.20.9 toolchain and Qwen tokenizer/sampling inputs verified"
+numpy_wheel="$VERIFICATION_ROOT/python-wheels/numpy-2.3.5-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+download_verified "$NUMPY_WHEEL_URL" "$numpy_wheel" \
+    "$NUMPY_WHEEL_SHA256" "$NUMPY_WHEEL_BYTES"
+numpy_site="$VERIFICATION_ROOT/python"
+if [ -e "$numpy_site" ]; then
+    [ -d "$numpy_site" ] && [ ! -L "$numpy_site" ] ||
+        fail "NumPy site-packages root is unsafe"
+    [ -f "$numpy_site/.wheel-sha256" ] && [ ! -L "$numpy_site/.wheel-sha256" ] ||
+        fail "NumPy site-packages provenance is missing"
+    [ "$(cat "$numpy_site/.wheel-sha256")" = "$NUMPY_WHEEL_SHA256" ] ||
+        fail "NumPy site-packages provenance differs from the pinned wheel"
+else
+    numpy_stage=$(mktemp -d "$VERIFICATION_ROOT/python.extract.XXXXXX")
+    python3 - "$numpy_wheel" "$numpy_stage" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+wheel = pathlib.Path(sys.argv[1])
+destination = pathlib.Path(sys.argv[2]).resolve()
+with zipfile.ZipFile(wheel) as archive:
+    for member in archive.infolist():
+        target = (destination / member.filename).resolve()
+        if destination not in target.parents and target != destination:
+            raise SystemExit("wheel member escapes extraction root")
+        if (member.external_attr >> 16) & 0o170000 == 0o120000:
+            raise SystemExit("wheel contains a symlink")
+    archive.extractall(destination)
+PY
+    printf '%s\n' "$NUMPY_WHEEL_SHA256" > "$numpy_stage/.wheel-sha256"
+    mv -- "$numpy_stage" "$numpy_site"
+fi
+
+echo "PASS: exact Seen v0.20.10 toolchain, pinned NumPy wheel, and Qwen tokenizer/sampling inputs verified"

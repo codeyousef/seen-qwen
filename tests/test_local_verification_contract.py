@@ -37,6 +37,7 @@ class LocalVerificationContractTests(unittest.TestCase):
         )
         for required in (
             '--network none',
+            '--gpus all',
             '--read-only',
             '--cap-drop ALL',
             '--security-opt no-new-privileges',
@@ -46,7 +47,12 @@ class LocalVerificationContractTests(unittest.TestCase):
             '--ulimit stack=8388608:8388608',
             'dst=/workspace,readonly',
             'dst=/workspace/.seen',
+            'src=/opt/cuda,dst=/opt/cuda,readonly',
             'dst=/tmp',
+            'PYTHONPATH=/workspace/.seen/verification/python',
+            'CUDAToolkit_ROOT=/opt/cuda',
+            'NVCC_CCBIN=/usr/bin/clang++',
+            'CUDAHOSTCXX=/usr/bin/clang++',
         ):
             self.assertIn(required, self.runner)
         self.assertNotIn("sudo", self.runner + self.prepare + self.inner)
@@ -55,17 +61,18 @@ class LocalVerificationContractTests(unittest.TestCase):
 
     def test_inputs_match_dependency_and_oracle_locks(self) -> None:
         identities = (
-            "4589dd890231d9c458a0b82ca1b3215e2aa28bfc",
-            "c7c8a653842c0fe10bd44a4b3559dcbbf91691a4",
-            "268c751c13d18e51643151512b741e5e5df48395",
-            "455f558c7f72b913ae81e141c54434ae9bf4ee218dc4abdeb23a1319968cb4eb",
-            "c2c7f814359d699a7c5d7659184c8bb3fb8e6ffb063c1e8865b7fa121f05b5cc",
-            "b672c79a8d40254447c7a02214b3e3eb9ba22b74009e79a9355d770c68a96935",
-            "426530e3eb99e367ec06b2805aefc7bcad10cc18e1265ff3d5d4263b6a607ba2",
+            "f714d85d0e53ca907ada16b0c58149fd93250211",
+            "827fbbb6784fa9a2123b21d8b9d84035f01a9657",
+            "af055801804a458183e7b2d3048ed62809e2c272",
+            "4a43cab0ff2ef932222c33e006a685e78969242305fa5f640071e366a5f7f9d9",
+            "7b71bba386641ce6655f1d7e5a124dbd5828709709af498b9f8b03fa1e7bda30",
+            "3a7f5a172f6e4bc2834547634762107327ed9ac865ba457431f1e804fbd3c8c4",
+            "af7209cc9407c3933f969cdcf74164956ede888993eba021e15519ff25fcf53e",
             "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
             "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
             "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
             "57e4bdb258ee1a7d2635c5174ebd4e56abe392505cdb5f8bbb356b0dc4293641",
+            "11e06aa0af8c0f05104d56450d6093ee639e15f24ecf62d417329d06e522e017",
             "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
             "a370fe4e8ecd284143bbfde1185bef4c1b6b72f45af4823812b9afe84cd1a14d",
         )
@@ -79,6 +86,21 @@ class LocalVerificationContractTests(unittest.TestCase):
             '"$OUTPUT_ROOT/qwn_034a_engine_artifact_test"',
         ):
             self.assertIn(required, self.inner)
+
+    def test_complete_model_memory_gate_is_required(self) -> None:
+        for required in (
+            "tests/test_qwn_046a_q4_artifact.py",
+            "tests/test_qwn_046a_full_cuda_contract.py",
+            "tests/qwn_046a_full_memory_plan_test.seen --frozen",
+            "tests/qwn_046a_full_cuda_frontend_test.seen --frozen",
+            "qwn_046a_full_memory_plan_test_fast",
+            '"$OUTPUT_ROOT/qwn_046a_full_memory_plan_test"',
+        ):
+            self.assertIn(required, self.inner)
+
+        manifest = (ROOT / "Seen.toml").read_text(encoding="utf-8")
+        self.assertIn("[native.dependencies]", manifest)
+        self.assertIn("seen_cuda = { bundled = true }", manifest)
 
     def test_cuda_reference_contract_is_required(self) -> None:
         self.assertIn("tests/test_cuda_reference_primitives.py", self.inner)
@@ -164,28 +186,28 @@ class LocalVerificationContractTests(unittest.TestCase):
 
     def test_seen_release_provenance_is_exact_and_current(self) -> None:
         compiler_sha256 = (
-            "c2c7f814359d699a7c5d7659184c8bb3fb8e6ffb063c1e8865b7fa121f05b5cc"
+            "7b71bba386641ce6655f1d7e5a124dbd5828709709af498b9f8b03fa1e7bda30"
         )
         archive_sha256 = (
-            "455f558c7f72b913ae81e141c54434ae9bf4ee218dc4abdeb23a1319968cb4eb"
+            "4a43cab0ff2ef932222c33e006a685e78969242305fa5f640071e366a5f7f9d9"
         )
-        source_commit = "4589dd890231d9c458a0b82ca1b3215e2aa28bfc"
-        build_id = "9ad1afa96e2a848ce4fd75651dce4ee0f41a5755"
+        source_commit = "f714d85d0e53ca907ada16b0c58149fd93250211"
+        build_id = "b10cc4127407b12265b8538fe67d000df0fdd2c2"
 
         for lock_entry in (
-            '# release_tag = "v0.20.9"',
+            '# release_tag = "v0.20.10"',
             f'# certified_commit = "{source_commit}"',
             f'# linux_x64_archive_sha256 = "{archive_sha256}"',
             f'# packaged_compiler_sha256 = "{compiler_sha256}"',
             f'# compiler_build_id = "{build_id}"',
-            "compiler=0.20.9",
+            "compiler=0.20.10",
             "target=linux-x86_64",
             "cpu=x86-64",
         ):
             self.assertIn(lock_entry, self.lock)
 
         for prepare_entry in (
-            "releases/download/v0.20.9/seen-0.20.9-linux-x64.tar.gz",
+            "releases/download/v0.20.10/seen-0.20.10-linux-x64.tar.gz",
             archive_sha256,
             compiler_sha256,
             source_commit,
@@ -204,9 +226,9 @@ class LocalVerificationContractTests(unittest.TestCase):
             self.assertIn(prepare_entry, self.prepare)
 
         for inner_entry in (
-            "seen-0.20.9-linux-x64",
+            "seen-0.20.10-linux-x64",
             compiler_sha256,
-            "Seen 0.20.9",
+            "Seen 0.20.10",
             "--target-cpu=x86-64",
         ):
             self.assertIn(inner_entry, self.inner)

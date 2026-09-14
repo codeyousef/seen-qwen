@@ -1,0 +1,69 @@
+import seen_qwen.runtime.full_model_memory.{QWEN_FULL_Q4_WEIGHT_BYTES,
+    createQwenFullMemoryPlan}
+import seen_qwen.runtime.engine.{QWEN_FALLBACK_PROHIBITED,
+    createQwenFullExecutionPlan}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun main() r: Int {
+    let deviceBytes = 25757220864 as UInt64
+    let made = createQwenFullMemoryPlan(0 as Int32, deviceBytes,
+        QWEN_FULL_Q4_WEIGHT_BYTES, 128 as UInt64)
+    require(made.isOkay(), "admit the exact 4090 short-context Q4 plan")
+    let plan = made.unwrap()
+    require(plan.weightBytes == (14515042384 as UInt64) and
+        plan.gdnStateBytes == (150994944 as UInt64) and
+        plan.convolutionStateBytes == (5898240 as UInt64) and
+        plan.kvBytes == (8388608 as UInt64) and
+        plan.allocationBytes == (16627529808 as UInt64) and
+        plan.safetyReserveBytes == (772716624 as UInt64) and
+        plan.admittedBytes == (17400246432 as UInt64),
+        "retain every exact memory-plan component")
+    require(not plan.fallbackAllowed and not plan.offloadAllowed,
+        "prohibit implicit fallback and offload")
+
+    require(createQwenFullMemoryPlan(-1 as Int32, deviceBytes,
+        QWEN_FULL_Q4_WEIGHT_BYTES, 128 as UInt64).unwrapErr().code ==
+        "qwen.memory.device", "reject invalid device")
+    require(createQwenFullMemoryPlan(0 as Int32, deviceBytes,
+        QWEN_FULL_Q4_WEIGHT_BYTES + (1 as UInt64), 128 as UInt64).
+        unwrapErr().code == "qwen.memory.profile", "reject another codec size")
+    require(createQwenFullMemoryPlan(0 as Int32, deviceBytes,
+        QWEN_FULL_Q4_WEIGHT_BYTES, 0 as UInt64).unwrapErr().code ==
+        "qwen.memory.context", "reject empty context")
+    require(createQwenFullMemoryPlan(0 as Int32, deviceBytes,
+        QWEN_FULL_Q4_WEIGHT_BYTES, 129 as UInt64).unwrapErr().code ==
+        "qwen.memory.context", "reject context above the bounded profile")
+    let capacity = createQwenFullMemoryPlan(0 as Int32,
+        17164400719 as UInt64, QWEN_FULL_Q4_WEIGHT_BYTES,
+        128 as UInt64).unwrapErr()
+    require(capacity.code == "qwen.memory.capacity" and capacity.retryable and
+        capacity.requiredBytes == (17164400720 as UInt64) and
+        capacity.deviceBytes == (17164400719 as UInt64),
+        "report exact capacity and fail before allocation")
+
+    let engineId = "1111111111111111111111111111111111111111111111111111111111111111"
+    let manifestId = "2222222222222222222222222222222222222222222222222222222222222222"
+    let madeExecution = createQwenFullExecutionPlan(engineId, manifestId,
+        0 as Int32, 128 as UInt64, 8 as UInt64, true)
+    require(madeExecution.isOkay(), "construct the complete 64-layer plan")
+    let execution = madeExecution.unwrap()
+    require(execution.modelLayers == 64 and
+        execution.prefillSteps.length() == 389 and
+        execution.decodeSteps.length() == 389 and
+        execution.fallbackPolicy == QWEN_FALLBACK_PROHIBITED and
+        execution.prefillSteps[2].kind != execution.prefillSteps[20].kind and
+        execution.prefillSteps[20].layer == (3 as Int32) and
+        execution.prefillSteps[388].kind == (12 as Int32),
+        "retain the exact 3:1 hybrid schedule and MTP terminal step")
+    execution.close(); execution.close()
+    require(createQwenFullExecutionPlan(engineId, manifestId, 0 as Int32,
+        129 as UInt64, 8 as UInt64, true).isErr(),
+        "reject a plan above the admitted short context")
+    println("PASS: QWN-046A checked complete-model memory admission")
+    return 0
+}
+
+main()

@@ -24,6 +24,8 @@ modules = [
     "src/model/sampling.seen",
     "src/model/cpu_engine.seen",
     "src/runtime/engine.seen",
+    "src/runtime/full_model_memory.seen",
+    "src/runtime/full_model_cuda.seen",
     "src/quant/calibration.seen",
     "src/quant/policy.seen",
     "src/quant/sensitivity.seen",
@@ -40,3 +42,6 @@ optimize = "speed"
 profile = "release"
 
 [dependencies]
+
+[native.dependencies]
+seen_cuda = { bundled = true }
