@@ -1,4 +1,4 @@
-// CPU-only CI linker fixture. Every entry traps if reached: this supplies ABI
+// CPU-only local-verification linker fixture. Every entry traps if reached: this supplies ABI
 // symbols for pre-CUDA validation tests without emulating CUDA or falling back.
 
 #define SEEN_LINK_ONLY_STUB(name) \

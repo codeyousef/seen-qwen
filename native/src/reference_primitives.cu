@@ -148,6 +148,81 @@ __global__ void copy_f32(const float *input, float *output, uint64_t count) {
     if (index < count) output[index] = input[index];
 }
 
+__global__ void linear_f32(const float *input, const float *weight,
+                           float *output, uint64_t count,
+                           uint64_t input_width, uint64_t output_width) {
+    const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+        threadIdx.x;
+    if (index >= count) return;
+    const uint64_t row = index / output_width;
+    const uint64_t output_column = index - row * output_width;
+    float sum = 0.0f;
+    for (uint64_t input_column = 0; input_column < input_width;
+         ++input_column)
+        sum = __fadd_rn(sum, __fmul_rn(
+            input[row * input_width + input_column],
+            weight[output_column * input_width + input_column]));
+    output[index] = sum;
+}
+
+__global__ void gdn_prepare_f32(const float *convolution, float *query,
+                                float *key, float *value,
+                                uint64_t token_count, uint64_t value_heads,
+                                uint64_t key_heads, uint64_t head_dim,
+                                float epsilon) {
+    const uint64_t row = static_cast<uint64_t>(blockIdx.x);
+    if (row >= token_count * value_heads || threadIdx.x != 0) return;
+    const uint64_t token = row / value_heads;
+    const uint64_t head = row - token * value_heads;
+    const uint64_t repeat = value_heads / key_heads;
+    const uint64_t source_head = head / repeat;
+    const uint64_t convolution_width =
+        (2 * key_heads + value_heads) * head_dim;
+    const uint64_t query_source = token * convolution_width +
+        source_head * head_dim;
+    const uint64_t key_source = token * convolution_width +
+        key_heads * head_dim + source_head * head_dim;
+    const uint64_t value_source = token * convolution_width +
+        2 * key_heads * head_dim + head * head_dim;
+    float query_sum = 0.0f;
+    float key_sum = 0.0f;
+    for (uint64_t dimension = 0; dimension < head_dim; ++dimension) {
+        const float query_value = convolution[query_source + dimension];
+        const float key_value = convolution[key_source + dimension];
+        query_sum = __fadd_rn(query_sum,
+            __fmul_rn(query_value, query_value));
+        key_sum = __fadd_rn(key_sum, __fmul_rn(key_value, key_value));
+    }
+    const float query_inverse = __fdividef(rsqrtf(__fadd_rn(
+        query_sum, epsilon)), sqrtf(static_cast<float>(head_dim)));
+    const float key_inverse = rsqrtf(__fadd_rn(key_sum, epsilon));
+    const uint64_t output_base = row * head_dim;
+    for (uint64_t dimension = 0; dimension < head_dim; ++dimension) {
+        query[output_base + dimension] = __fmul_rn(
+            convolution[query_source + dimension], query_inverse);
+        key[output_base + dimension] = __fmul_rn(
+            convolution[key_source + dimension], key_inverse);
+        value[output_base + dimension] =
+            convolution[value_source + dimension];
+    }
+}
+
+__global__ void gdn_parameters_f32(const float *beta_projection,
+                                    const float *decay_projection,
+                                    const float *a_log, const float *dt_bias,
+                                    float *beta, float *log_decay,
+                                    uint64_t count, uint64_t heads) {
+    const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+        threadIdx.x;
+    if (index >= count) return;
+    const uint64_t head = index % heads;
+    beta[index] = __fdividef(1.0f,
+        __fadd_rn(1.0f, expf(-beta_projection[index])));
+    const float x = __fadd_rn(decay_projection[index], dt_bias[head]);
+    const float softplus = x > 20.0f ? x : log1pf(expf(x));
+    log_decay[index] = __fmul_rn(-expf(a_log[head]), softplus);
+}
+
 __global__ void transpose_f32(const float *input, float *output,
                               uint64_t rows, uint64_t columns,
                               uint64_t count) {
@@ -778,6 +853,140 @@ extern "C" SeenCudaStatus seen_qwen_copy_f32(
         return invalid(token->device_ordinal, op,
                        "partially overlapping copy buffers are unsupported");
     copy_f32<<<blocks, kThreads, 0, stream>>>(pointer<const float>(input), pointer<float>(output), count);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_linear_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView weight, SeenQwenCudaBufferView output,
+    uint64_t rows, uint64_t input_width, uint64_t output_width) {
+    constexpr const char *op = "seen_qwen_linear_f32";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t input_count = 0, weight_count = 0, output_count = 0;
+    uint64_t input_bytes = 0, weight_bytes = 0, output_bytes = 0;
+    uint32_t blocks = 0;
+    if (!checked_multiply(rows, input_width, &input_count) ||
+        !checked_multiply(output_width, input_width, &weight_count) ||
+        !checked_multiply(rows, output_width, &output_count) ||
+        !checked_multiply(input_count, sizeof(float), &input_bytes) ||
+        !checked_multiply(weight_count, sizeof(float), &weight_bytes) ||
+        !checked_multiply(output_count, sizeof(float), &output_bytes) ||
+        !launch_shape(output_count, &blocks))
+        return invalid(token->device_ordinal, op,
+                       "invalid bounded FP32 linear geometry");
+    for (const auto &pair : {
+             std::pair<SeenQwenCudaBufferView, uint64_t>{input, input_bytes},
+             {weight, weight_bytes}, {output, output_bytes}}) {
+        checked = validate_view(pair.first, pair.second,
+                                token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    if (overlaps(input, input_bytes, output, output_bytes) ||
+        overlaps(weight, weight_bytes, output, output_bytes))
+        return invalid(token->device_ordinal, op,
+                       "FP32 linear output must not overlap inputs");
+    linear_f32<<<blocks, kThreads, 0, stream>>>(pointer<const float>(input),
+        pointer<const float>(weight), pointer<float>(output), output_count,
+        input_width, output_width);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_gdn_prepare_f32(
+    const SeenCudaStreamLaunchToken *token,
+    SeenQwenCudaBufferView convolution,
+    SeenQwenCudaBufferView query, SeenQwenCudaBufferView key,
+    SeenQwenCudaBufferView value, uint64_t token_count,
+    uint64_t value_heads, uint64_t key_heads, uint64_t head_dim,
+    float epsilon) {
+    constexpr const char *op = "seen_qwen_gdn_prepare_f32";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t convolution_width = 0, convolution_count = 0;
+    uint64_t output_count = 0, convolution_bytes = 0, output_bytes = 0;
+    uint64_t twice_key_heads = 0, all_heads = 0, rows = 0;
+    if (!checked_multiply(key_heads, 2, &twice_key_heads) ||
+        !checked_multiply(value_heads, token_count, &rows) ||
+        twice_key_heads > UINT64_MAX - value_heads ||
+        (all_heads = twice_key_heads + value_heads) == 0 ||
+        !checked_multiply(all_heads, head_dim, &convolution_width) ||
+        !checked_multiply(token_count, convolution_width,
+                          &convolution_count) ||
+        !checked_multiply(rows, head_dim, &output_count) ||
+        !checked_multiply(convolution_count, sizeof(float),
+                          &convolution_bytes) ||
+        !checked_multiply(output_count, sizeof(float), &output_bytes) ||
+        token_count == 0 || value_heads == 0 || key_heads == 0 ||
+        value_heads % key_heads != 0 || head_dim == 0 ||
+        rows > UINT32_MAX || !(epsilon > 0.0f) || !std::isfinite(epsilon))
+        return invalid(token->device_ordinal, op,
+                       "invalid bounded GDN preparation geometry");
+    const std::pair<SeenQwenCudaBufferView, uint64_t> views[] = {
+        {convolution, convolution_bytes}, {query, output_bytes},
+        {key, output_bytes}, {value, output_bytes},
+    };
+    for (const auto &pair : views) {
+        checked = validate_view(pair.first, pair.second,
+                                token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    for (size_t left = 0; left < sizeof(views) / sizeof(views[0]); ++left)
+        for (size_t right = left + 1;
+             right < sizeof(views) / sizeof(views[0]); ++right)
+            if (overlaps(views[left].first, views[left].second,
+                         views[right].first, views[right].second))
+                return invalid(token->device_ordinal, op,
+                               "GDN preparation buffers must be disjoint");
+    gdn_prepare_f32<<<static_cast<uint32_t>(rows), 1, 0, stream>>>(
+        pointer<const float>(convolution), pointer<float>(query),
+        pointer<float>(key), pointer<float>(value), token_count,
+        value_heads, key_heads, head_dim, epsilon);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_gdn_parameters_f32(
+    const SeenCudaStreamLaunchToken *token,
+    SeenQwenCudaBufferView beta_projection,
+    SeenQwenCudaBufferView decay_projection,
+    SeenQwenCudaBufferView a_log, SeenQwenCudaBufferView dt_bias,
+    SeenQwenCudaBufferView beta, SeenQwenCudaBufferView log_decay,
+    uint64_t token_count, uint64_t heads) {
+    constexpr const char *op = "seen_qwen_gdn_parameters_f32";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    uint64_t count = 0, bytes = 0, head_bytes = 0;
+    uint32_t blocks = 0;
+    if (!checked_multiply(token_count, heads, &count) ||
+        !checked_multiply(count, sizeof(float), &bytes) ||
+        !checked_multiply(heads, sizeof(float), &head_bytes) ||
+        !launch_shape(count, &blocks))
+        return invalid(token->device_ordinal, op,
+                       "invalid bounded GDN parameter geometry");
+    const std::pair<SeenQwenCudaBufferView, uint64_t> views[] = {
+        {beta_projection, bytes}, {decay_projection, bytes},
+        {a_log, head_bytes}, {dt_bias, head_bytes}, {beta, bytes},
+        {log_decay, bytes},
+    };
+    for (const auto &pair : views) {
+        checked = validate_view(pair.first, pair.second,
+                                token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    for (size_t left = 0; left < sizeof(views) / sizeof(views[0]); ++left)
+        for (size_t right = left + 1;
+             right < sizeof(views) / sizeof(views[0]); ++right)
+            if (overlaps(views[left].first, views[left].second,
+                         views[right].first, views[right].second))
+                return invalid(token->device_ordinal, op,
+                               "GDN parameter buffers must be disjoint");
+    gdn_parameters_f32<<<blocks, kThreads, 0, stream>>>(
+        pointer<const float>(beta_projection),
+        pointer<const float>(decay_projection), pointer<const float>(a_log),
+        pointer<const float>(dt_bias), pointer<float>(beta),
+        pointer<float>(log_decay), count, heads);
     return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
 }
 

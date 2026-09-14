@@ -40,6 +40,6 @@ official pinned model shards 1 and 18; their exact hashes are recorded in the
 asset manifest. In particular, the gated attention `q_proj` stores twice the
 logical query width while `o_proj` consumes the ungated query width.
 Generation writes and fsyncs a private temporary directory before atomically
-promoting the complete asset directory. CI regenerates every file, compares every byte,
+promoting the complete asset directory. Required local verification regenerates every file, compares every byte,
 validates header geometry independently, and opens the result through Seen's
 released Safetensors reader with deterministic mapped-file cleanup.

@@ -30,6 +30,7 @@ Generation admission is bounded by the hybrid mini-model's 128-token context,
 an explicit generated-token limit, at most 1,024 live sessions, and a future
 deadline epoch. Cancellation invalidates active work before commit. Late, cancelled,
 over-context, or over-generation commits fail without mutating visible token
-counters. QWN-045B owns actual operator execution.
+counters. QWN-045B owns actual operator execution as specified by
+`qwen-cuda-mini-execution-contract.md`.
 QWN-045A does not add a second CUDA resource stack, allocation policy, synchronization,
 offload, precision change, or default-stream path.

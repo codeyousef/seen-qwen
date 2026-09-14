@@ -34,6 +34,24 @@ SeenCudaStatus seen_qwen_transpose_2d_f32(
 SeenCudaStatus seen_qwen_copy_f32(
     const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
     SeenQwenCudaBufferView output, uint64_t count);
+SeenCudaStatus seen_qwen_linear_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView weight, SeenQwenCudaBufferView output,
+    uint64_t rows, uint64_t input_width, uint64_t output_width);
+SeenCudaStatus seen_qwen_gdn_prepare_f32(
+    const SeenCudaStreamLaunchToken *token,
+    SeenQwenCudaBufferView convolution,
+    SeenQwenCudaBufferView query, SeenQwenCudaBufferView key,
+    SeenQwenCudaBufferView value, uint64_t token_count,
+    uint64_t value_heads, uint64_t key_heads, uint64_t head_dim,
+    float epsilon);
+SeenCudaStatus seen_qwen_gdn_parameters_f32(
+    const SeenCudaStreamLaunchToken *token,
+    SeenQwenCudaBufferView beta_projection,
+    SeenQwenCudaBufferView decay_projection,
+    SeenQwenCudaBufferView a_log, SeenQwenCudaBufferView dt_bias,
+    SeenQwenCudaBufferView beta, SeenQwenCudaBufferView log_decay,
+    uint64_t token_count, uint64_t heads);
 SeenCudaStatus seen_qwen_embedding_gather_f32(
     const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView table,
     SeenQwenCudaBufferView token_ids, SeenQwenCudaBufferView output,
