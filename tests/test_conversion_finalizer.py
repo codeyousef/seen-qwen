@@ -10,7 +10,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / ".seen/ci/output/qwn_032d"
+OUTPUT = ROOT / ".seen/verification/output/qwn_032d"
 INDEX = ROOT / "tests/fixtures/qwen3_8_model.safetensors.index.json"
 READER_ORACLE = ROOT / "tests/test_sqw_reader.py"
 

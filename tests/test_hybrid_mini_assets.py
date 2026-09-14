@@ -67,7 +67,7 @@ class HybridMiniAssetTests(unittest.TestCase):
         cls.raw = (ASSETS / "model.safetensors").read_bytes()
         cls.header, cls.payload = decode_safetensors(cls.raw)
         cls.manifest = json.loads((ASSETS / "manifest.json").read_text())
-        output = ROOT / ".seen/ci/output"
+        output = ROOT / ".seen/verification/output"
         output.mkdir(parents=True, exist_ok=True)
         minimal_header = json.dumps({
             "x": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}
@@ -124,7 +124,7 @@ class HybridMiniAssetTests(unittest.TestCase):
         self.assertEqual(config["special_tokens"], [])
 
     def test_generator_reproduces_every_byte(self) -> None:
-        with tempfile.TemporaryDirectory(dir=ROOT / ".seen/ci") as directory:
+        with tempfile.TemporaryDirectory(dir=ROOT / ".seen/verification") as directory:
             output = Path(directory) / "assets"
             subprocess.run(
                 [sys.executable, str(GENERATOR), "--output-dir", str(output)],

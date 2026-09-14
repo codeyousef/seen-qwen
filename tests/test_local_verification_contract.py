@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static fail-closed contracts for the standalone Seen Qwen CI workflow."""
+"""Static fail-closed contracts for Seen Qwen local verification."""
 
 from pathlib import Path
 import os
@@ -12,33 +12,23 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
-RUNNER = ROOT / "scripts/ci/run_required.sh"
-PREPARE = ROOT / "scripts/ci/prepare_inputs.sh"
-INNER = ROOT / "scripts/ci/required_inner.sh"
+RUNNER = ROOT / "scripts/verification/run_required.sh"
+PREPARE = ROOT / "scripts/verification/prepare_inputs.sh"
+INNER = ROOT / "scripts/verification/required_inner.sh"
 LOCK = ROOT / "Seen.lock"
 
 
-class CiContractTests(unittest.TestCase):
+class LocalVerificationContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.workflow = WORKFLOW.read_text(encoding="utf-8")
         cls.runner = RUNNER.read_text(encoding="utf-8")
         cls.prepare = PREPARE.read_text(encoding="utf-8")
         cls.inner = INNER.read_text(encoding="utf-8")
         cls.lock = LOCK.read_text(encoding="utf-8")
 
-    def test_workflow_identity_and_triggers_are_pinned(self) -> None:
-        self.assertIn("push:\n    branches: [main]", self.workflow)
-        self.assertIn("pull_request:", self.workflow)
-        self.assertIn("workflow_dispatch:", self.workflow)
-        self.assertIn("runs-on: ubuntu-24.04", self.workflow)
-        self.assertIn("timeout-minutes: 30", self.workflow)
+    def test_hosted_ci_is_absent_and_local_gate_is_bounded(self) -> None:
+        self.assertFalse(WORKFLOW.exists())
         self.assertIn("TIMEOUT_SECS=1500", self.runner)
-        self.assertIn(
-            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-            self.workflow,
-        )
-        self.assertNotRegex(self.workflow, r"uses: [^\n]+@(v|main|master)")
 
     def test_container_scope_is_immutable_and_bounded(self) -> None:
         self.assertIn(
@@ -59,19 +49,19 @@ class CiContractTests(unittest.TestCase):
             'dst=/tmp',
         ):
             self.assertIn(required, self.runner)
-        self.assertNotIn("sudo", self.workflow + self.runner + self.prepare + self.inner)
-        self.assertNotIn("pkexec", self.workflow + self.runner + self.prepare + self.inner)
-        self.assertNotIn("/usr/local/bin/seen", self.workflow + self.runner + self.inner)
+        self.assertNotIn("sudo", self.runner + self.prepare + self.inner)
+        self.assertNotIn("pkexec", self.runner + self.prepare + self.inner)
+        self.assertNotIn("/usr/local/bin/seen", self.runner + self.inner)
 
     def test_inputs_match_dependency_and_oracle_locks(self) -> None:
         identities = (
-            "dac7f87934b90319f1f7099884f544ef3a0515ac",
-            "a39f99a35e36d764125a59f64042d90e0e4cef7b",
-            "288b8ab93da4b41ba7dd4892a53a136425a31faa",
-            "3706f5d35d657eaceb352359608ba6ac4b8edaeb47b09dca45b23f1e9801f450",
-            "76833346fbe3e01cda0aeb2b34d585a2115086ccee3e87205059b055d22ac2b6",
-            "9cfeeb645ed31f51d2a32f3348b9e586027363a7e2085c2316a793f132049b7e",
-            "6bc6cc29032f834035a0c65391ddee25069b5fb3496f24a33a0c9eaf4eada7ee",
+            "4589dd890231d9c458a0b82ca1b3215e2aa28bfc",
+            "c7c8a653842c0fe10bd44a4b3559dcbbf91691a4",
+            "268c751c13d18e51643151512b741e5e5df48395",
+            "455f558c7f72b913ae81e141c54434ae9bf4ee218dc4abdeb23a1319968cb4eb",
+            "c2c7f814359d699a7c5d7659184c8bb3fb8e6ffb063c1e8865b7fa121f05b5cc",
+            "b672c79a8d40254447c7a02214b3e3eb9ba22b74009e79a9355d770c68a96935",
+            "426530e3eb99e367ec06b2805aefc7bcad10cc18e1265ff3d5d4263b6a607ba2",
             "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
             "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
             "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
@@ -163,30 +153,39 @@ class CiContractTests(unittest.TestCase):
         self.assertIn("clang -shared -fPIC -O2 -Wl,--no-undefined", self.inner)
         self.assertNotIn("nvcc", self.inner)
 
+    def test_qwen_engine_ownership_contract_is_required(self) -> None:
+        for required in (
+            "tests/test_qwen_engine_ownership.py",
+            "tests/qwn_045a_engine_ownership_test.seen --frozen",
+            "qwn_045a_engine_ownership_test_fast",
+            "qwn_045a_engine_ownership_test",
+        ):
+            self.assertIn(required, self.inner)
+
     def test_seen_release_provenance_is_exact_and_current(self) -> None:
         compiler_sha256 = (
-            "76833346fbe3e01cda0aeb2b34d585a2115086ccee3e87205059b055d22ac2b6"
+            "c2c7f814359d699a7c5d7659184c8bb3fb8e6ffb063c1e8865b7fa121f05b5cc"
         )
         archive_sha256 = (
-            "3706f5d35d657eaceb352359608ba6ac4b8edaeb47b09dca45b23f1e9801f450"
+            "455f558c7f72b913ae81e141c54434ae9bf4ee218dc4abdeb23a1319968cb4eb"
         )
-        source_commit = "dac7f87934b90319f1f7099884f544ef3a0515ac"
-        build_id = "33dfad8d2671de0176409fa1c197a3c4c2a03329"
+        source_commit = "4589dd890231d9c458a0b82ca1b3215e2aa28bfc"
+        build_id = "9ad1afa96e2a848ce4fd75651dce4ee0f41a5755"
 
         for lock_entry in (
-            '# release_tag = "v0.20.8"',
+            '# release_tag = "v0.20.9"',
             f'# certified_commit = "{source_commit}"',
             f'# linux_x64_archive_sha256 = "{archive_sha256}"',
             f'# packaged_compiler_sha256 = "{compiler_sha256}"',
             f'# compiler_build_id = "{build_id}"',
-            "compiler=0.20.8",
+            "compiler=0.20.9",
             "target=linux-x86_64",
             "cpu=x86-64",
         ):
             self.assertIn(lock_entry, self.lock)
 
         for prepare_entry in (
-            "releases/download/v0.20.8/seen-0.20.8-linux-x64.tar.gz",
+            "releases/download/v0.20.9/seen-0.20.9-linux-x64.tar.gz",
             archive_sha256,
             compiler_sha256,
             source_commit,
@@ -205,9 +204,9 @@ class CiContractTests(unittest.TestCase):
             self.assertIn(prepare_entry, self.prepare)
 
         for inner_entry in (
-            "seen-0.20.8-linux-x64",
+            "seen-0.20.9-linux-x64",
             compiler_sha256,
-            "Seen 0.20.8",
+            "Seen 0.20.9",
             "--target-cpu=x86-64",
         ):
             self.assertIn(inner_entry, self.inner)

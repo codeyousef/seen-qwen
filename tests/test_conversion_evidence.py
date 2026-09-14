@@ -6,7 +6,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src/converter/conversion_evidence.seen"
-OUTPUT = ROOT / ".seen/ci/output/qwn_032c"
+OUTPUT = ROOT / ".seen/verification/output/qwn_032c"
 
 
 class ConversionEvidenceTests(unittest.TestCase):

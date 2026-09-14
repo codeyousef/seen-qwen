@@ -10,8 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src/formats/sqw_writer.seen"
 SEEN_TEST = ROOT / "tests/qwn_030c_sqw_writer_test.seen"
 MANIFEST = ROOT / "Seen.toml"
-INNER = ROOT / "scripts/ci/required_inner.sh"
-OUTPUT = ROOT / ".seen/ci/output/qwn_030c"
+INNER = ROOT / "scripts/verification/required_inner.sh"
+OUTPUT = ROOT / ".seen/verification/output/qwn_030c"
 
 
 class SqwWriterContractTests(unittest.TestCase):

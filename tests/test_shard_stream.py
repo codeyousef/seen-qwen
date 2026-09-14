@@ -8,7 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 INDEX = ROOT / "tests/fixtures/qwen3_8_model.safetensors.index.json"
-OUTPUT = ROOT / ".seen/ci/output"
+OUTPUT = ROOT / ".seen/verification/output"
 SOURCE_ROOT = OUTPUT / "qwn_032b_source"
 MISMATCH_ROOT = OUTPUT / "qwn_032b_mismatch"
 UNKNOWN_ROOT = OUTPUT / "qwn_032b_unknown"

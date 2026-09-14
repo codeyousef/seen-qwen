@@ -62,9 +62,11 @@ QWN-020A. Do not skip phase or capability gates because a leaf appears
 individually unblocked.
 
 An issue is Done only after implementation and exact evidence are complete,
-the branch is merged to `main`, required merged-main CI is green, and Linear
+the branch is merged to `main`, and the repository-certified local verification
+gate passes for the exact merge candidate under the required hard scope. Linear
 contains commands, artifacts, hardware/environment identity, PR, merge SHA,
-and CI evidence. Reviews and decisions require their stated owner approval.
+and local-verification evidence. Reviews and decisions require their stated
+owner approval. Hosted CI is intentionally not used.
 
 ## Cross-repository ownership
 
@@ -173,10 +175,10 @@ public claims, and the G5 proceed/pivot/stop decision require their stated owner
 ## Release discipline
 
 The target fixed-point release is v0.15.0. Before its single tag push, certify
-the exact final clean tree locally with CI and release parity under the hard
-scope, merge it to `main`, and verify exact-SHA merged-main CI. Create one
-annotated tag only after that run succeeds. Do not poll CI or create concurrent
-runs. After completion, verify the exact tag peel, release identity, unique
+the exact final clean tree locally with release parity under the hard scope,
+merge it to `main`, and locally verify the exact merged SHA. Create one
+annotated tag only after that verification succeeds. After completion, verify
+the exact tag peel, release identity, unique
 assets, checksums, signatures, source digest, package versions, CPU baseline,
 and installed compiler/package smoke before reporting the release verified.
 
@@ -203,4 +205,3 @@ Last validation run:
 
 Do not store private progress diaries or handoff notes in tracked public files.
 Do not add co-author trailers unless explicitly requested.
-
