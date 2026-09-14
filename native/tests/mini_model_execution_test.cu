@@ -161,6 +161,8 @@ struct MiniEngine {
     float *state = nullptr;
     int32_t *ids = nullptr;
     uint64_t position = 0;
+    uint64_t allocation_attempts = 0;
+    uint64_t fail_allocation_at = 0;
     int32_t last_token = -1;
     bool prefilled = false;
     bool cancelled = false;
@@ -188,6 +190,12 @@ struct MiniEngine {
         if (!model.tensor(name, elements, &offset)) return view(nullptr, 0);
         return view(static_cast<uint8_t *>(model_device) + offset,
                     elements * sizeof(float));
+    }
+
+    bool allocate(uint64_t bytes, SeenCudaHandle *allocation) {
+        ++allocation_attempts;
+        if (fail_allocation_at == allocation_attempts) return false;
+        return seen_cuda_malloc(0, bytes, allocation).code == SEEN_CUDA_OK;
     }
 
     bool reject_invalid_composition() const {
@@ -222,18 +230,19 @@ struct MiniEngine {
         return true;
     }
 
-    bool open(const char *model_path) {
+    bool open(const char *model_path, uint64_t injected_failure = 0) {
         REQUIRE(model.openea(model_path));
+        fail_allocation_at = injected_failure;
         CUDA_OK(seen_cuda_stream_create(0, &stream));
         CUDA_OK(seen_cuda_event_create(0, &event));
-        CUDA_OK(seen_cuda_malloc(0, model.bytes.size(), &model_allocation));
-        CUDA_OK(seen_cuda_malloc(0,
-            kScratchSlots * kScratchSlotFloats * sizeof(float),
-            &scratch_allocation));
-        CUDA_OK(seen_cuda_malloc(0, kPersistentFloats * sizeof(float),
-            &state_allocation));
-        CUDA_OK(seen_cuda_malloc(0, kContext * sizeof(int32_t),
-            &ids_allocation));
+        if (!allocate(model.bytes.size(), &model_allocation) ||
+            !allocate(kScratchSlots * kScratchSlotFloats * sizeof(float),
+                &scratch_allocation) ||
+            !allocate(kPersistentFloats * sizeof(float), &state_allocation) ||
+            !allocate(kContext * sizeof(int32_t), &ids_allocation)) {
+            close();
+            return false;
+        }
         uint64_t bytes = 0; int32_t ordinal = -1;
         CUDA_OK(seen_cuda_allocation_address(model_allocation, &model_device,
             &bytes, &ordinal));
@@ -580,7 +589,20 @@ bool compare_logits(const std::vector<float> &actual,
     return true;
 }
 
+bool certify_allocation_failures(const char *model_path) {
+    for (uint64_t failure = 1; failure <= 4; ++failure) {
+        MiniEngine engine;
+        REQUIRE(!engine.open(model_path, failure));
+        REQUIRE(engine.closed && engine.stream == 0 && engine.event == 0 &&
+            engine.model_allocation == 0 && engine.scratch_allocation == 0 &&
+            engine.state_allocation == 0 && engine.ids_allocation == 0);
+        REQUIRE(engine.close());
+    }
+    return true;
+}
+
 bool run(const char *model_path, const char *oracle_path) {
+    REQUIRE(certify_allocation_failures(model_path));
     const auto oracle_bytes = read_bytes(oracle_path);
     REQUIRE(!oracle_bytes.empty());
     const std::string oracle(reinterpret_cast<const char *>(oracle_bytes.data()),
