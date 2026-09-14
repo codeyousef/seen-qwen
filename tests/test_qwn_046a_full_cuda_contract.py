@@ -32,7 +32,9 @@ class FullCudaContractTests(unittest.TestCase):
             "kTensorCount = 866", "kWeightBytes = 14515042384ULL",
             "seen_cuda_malloc", "seen_cuda_memcpy_async",
             "seen_cuda_stream_synchronize", "seen_cuda_free",
-            "free_memory_bytes - resident.free_memory_bytes",
+            "allocated_bytes == kAllocationBytes",
+            "resident.total_memory_bytes - allocated_bytes",
+            "allocations[index - 1].handle == 0", "host == 0 && stream == 0",
         ):
             self.assertIn(required, native)
         self.assertNotIn("cudaDeviceSynchronize", native)
