@@ -1,0 +1,200 @@
+import seen_qwen.runtime.engine.{QWEN_BACKEND_CPU_REFERENCE,
+    QWEN_BACKEND_CUDA, QWEN_FALLBACK_EXPLICIT_CPU_REFERENCE,
+    QWEN_FALLBACK_PROHIBITED, QWEN_PLAN_ATTENTION_DECODE,
+    QWEN_PLAN_ATTENTION_PREFILL, QWEN_PLAN_EMBEDDING,
+    QWEN_PLAN_GDN_DECODE, QWEN_PLAN_GDN_PREFILL, QWEN_PLAN_LM_HEAD,
+    QWEN_PLAN_MTP, QWEN_PLAN_SAMPLE, createQwenEngine,
+    createQwenMiniExecutionPlan}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun main() r: Int {
+    let engineId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    let manifestId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    let madePlan = createQwenMiniExecutionPlan(engineId, manifestId,
+        0 as Int32, 128 as UInt64, 8 as UInt64,
+        QWEN_FALLBACK_PROHIBITED, false, true)
+    require(madePlan.isOkay(), "create exact bounded mini execution plan")
+    let plan = madePlan.unwrap()
+    require(plan.validate() and plan.prefillSteps.length() == 53 and
+        plan.decodeSteps.length() == 53,
+        "validate complete prefill and decode schedules")
+    require(plan.prefillSteps[0].kind == QWEN_PLAN_EMBEDDING and
+        plan.prefillSteps[2].kind == QWEN_PLAN_GDN_PREFILL and
+        plan.prefillSteps[20].kind == QWEN_PLAN_ATTENTION_PREFILL and
+        plan.prefillSteps[44].kind == QWEN_PLAN_ATTENTION_PREFILL and
+        plan.decodeSteps[2].kind == QWEN_PLAN_GDN_DECODE and
+        plan.decodeSteps[20].kind == QWEN_PLAN_ATTENTION_DECODE and
+        plan.decodeSteps[44].kind == QWEN_PLAN_ATTENTION_DECODE and
+        plan.prefillSteps[50].kind == QWEN_PLAN_LM_HEAD and
+        plan.prefillSteps[51].kind == QWEN_PLAN_SAMPLE and
+        plan.prefillSteps[52].kind == QWEN_PLAN_MTP,
+        "freeze numeric hybrid schedule without string dispatch")
+    plan.prefillSteps[0].dependency = 7 as Int32
+    require(not plan.validate(), "fail closed after public plan mutation")
+    plan.prefillSteps[0].dependency = -1 as Int32
+    require(plan.validate(), "restore exact immutable plan identity")
+
+    let madeEngine = createQwenEngine(plan, 1 as UInt64, 101 as UInt64)
+    require(madeEngine.isOkay(), "create move-owned engine")
+    let engine = madeEngine.unwrap()
+    let madeSession = engine.createSession(20260827 as UInt64)
+    require(madeSession.isOkay() and engine.openSessions == (1 as UInt64),
+        "admit one explicitly owned session")
+    let session = madeSession.unwrap()
+    require(engine.createSession(1 as UInt64).isErr(),
+        "enforce aggregate live-session admission bound")
+    require(engine.close().isErr(),
+        "refuse engine teardown while a session remains live")
+    require(session.beginGeneration(120 as UInt64, 10 as UInt64,
+        20 as UInt64).isOkay(), "begin a bounded future-deadline generation")
+    require(session.commitToken(11 as UInt64).isOkay() and
+        session.tokenCount == (121 as UInt64) and
+        session.generated == (1 as UInt64),
+        "commit only live on-time work")
+    let beforeFallback = session.fallbackCount
+    require(session.requestFallback(9 as Int32, true, true).isErr() and
+        session.activeBackend == QWEN_BACKEND_CUDA and
+        session.fallbackCount == beforeFallback and
+        session.lastFallbackReason == (0 as Int32),
+        "prohibited fallback cannot change backend or counters")
+    require(session.cancel().isOkay() and
+        session.commitToken(12 as UInt64).isErr() and
+        session.tokenCount == (121 as UInt64),
+        "late cancelled completion cannot resurrect state")
+    require(session.reset().isOkay() and
+        session.tokenCount == (0 as UInt64) and
+        session.fallbackCount == (0 as UInt64) and
+        session.activeBackend == QWEN_BACKEND_CUDA,
+        "reset scalar state and owned sampler deterministically")
+    require(engine.releaseSession(session).isOkay() and
+        engine.openSessions == (0 as UInt64),
+        "return session to its exact engine owner")
+    require(engine.close().isOkay() and engine.close().unwrap() == false,
+        "close engine and plan idempotently")
+
+    let fallbackPlan = createQwenMiniExecutionPlan(engineId, manifestId,
+        0 as Int32, 128 as UInt64, 4 as UInt64,
+        QWEN_FALLBACK_EXPLICIT_CPU_REFERENCE, true, false)
+    require(fallbackPlan.isOkay(),
+        "admit only a prevalidated explicit reference fallback")
+    let fallbackEngine = createQwenEngine(fallbackPlan.unwrap(),
+        2 as UInt64, 202 as UInt64).unwrap()
+    let fallbackSession = fallbackEngine.createSession(7 as UInt64).unwrap()
+    require(fallbackSession.requestFallback(1 as Int32, true, false).isErr() and
+        fallbackSession.requestFallback(1 as Int32, false, true).isErr() and
+        fallbackSession.fallbackCount == (0 as UInt64),
+        "reject unapproved or nonequivalent fallback requests")
+    require(fallbackSession.requestFallback(1 as Int32, true, true).isOkay() and
+        fallbackSession.activeBackend == QWEN_BACKEND_CPU_REFERENCE and
+        fallbackSession.fallbackCount == (1 as UInt64) and
+        fallbackSession.lastFallbackReason == (1 as Int32),
+        "count an explicitly approved equivalent fallback")
+    require(fallbackSession.requestFallback(2 as Int32, true, true).isErr() and
+        fallbackSession.fallbackCount == (1 as UInt64) and
+        fallbackSession.lastFallbackReason == (1 as Int32),
+        "reject duplicate fallback after the backend transition")
+    require(fallbackEngine.releaseSession(fallbackSession).isOkay() and
+        fallbackEngine.close().isOkay(), "close explicit fallback owner")
+
+    let ownerPlan = createQwenMiniExecutionPlan(engineId, manifestId,
+        0 as Int32, 128 as UInt64, 1 as UInt64,
+        QWEN_FALLBACK_PROHIBITED, false, false).unwrap()
+    let ownerEngine = createQwenEngine(ownerPlan, 1 as UInt64,
+        606 as UInt64).unwrap()
+    let wrongPlan = createQwenMiniExecutionPlan(engineId, manifestId,
+        0 as Int32, 128 as UInt64, 1 as UInt64,
+        QWEN_FALLBACK_PROHIBITED, false, false).unwrap()
+    let wrongEngine = createQwenEngine(wrongPlan, 1 as UInt64,
+        707 as UInt64).unwrap()
+    let ownedSession = ownerEngine.createSession(10 as UInt64).unwrap()
+    require(wrongEngine.releaseSession(ownedSession).isErr() and
+        not ownedSession.closed and
+        ownerEngine.openSessions == (1 as UInt64) and
+        wrongEngine.openSessions == (0 as UInt64),
+        "wrong owner rejects without consuming or mutating the session")
+    require(ownerEngine.releaseSession(ownedSession).isOkay() and
+        ownerEngine.openSessions == (0 as UInt64) and
+        ownerEngine.close().isOkay() and wrongEngine.close().isOkay(),
+        "true owner releases the retained session after rejection")
+
+    require(createQwenMiniExecutionPlan("A", manifestId, 0 as Int32,
+        128 as UInt64, 4 as UInt64, QWEN_FALLBACK_PROHIBITED,
+        false, true).isErr(), "reject malformed identity before allocation")
+    require(createQwenMiniExecutionPlan(engineId, manifestId, 0 as Int32,
+        129 as UInt64, 4 as UInt64, QWEN_FALLBACK_PROHIBITED,
+        false, true).isErr(), "reject context beyond the mini-model contract")
+    require(createQwenMiniExecutionPlan(engineId, manifestId, 0 as Int32,
+        128 as UInt64, 4 as UInt64,
+        QWEN_FALLBACK_EXPLICIT_CPU_REFERENCE, false, true).isErr(),
+        "reject unvalidated fallback at plan construction")
+
+    let limitPlan = createQwenMiniExecutionPlan(engineId, manifestId,
+        0 as Int32, 128 as UInt64, 2 as UInt64,
+        QWEN_FALLBACK_PROHIBITED, false, false).unwrap()
+    let limitEngine = createQwenEngine(limitPlan, 1 as UInt64,
+        303 as UInt64).unwrap()
+    let limitSession = limitEngine.createSession(8 as UInt64).unwrap()
+    require(limitSession.beginGeneration(1 as UInt64, 10 as UInt64,
+        20 as UInt64).isOkay(), "begin generated-token boundary test")
+    require(limitSession.commitToken(11 as UInt64).isOkay() and
+        limitSession.commitToken(12 as UInt64).isOkay() and
+        limitSession.commitToken(13 as UInt64).isErr() and
+        limitSession.generated == (2 as UInt64) and
+        limitSession.tokenCount == (3 as UInt64),
+        "reject generated-token overflow without state mutation")
+    require(limitSession.finishGeneration().isOkay() and
+        limitEngine.releaseSession(limitSession).isOkay() and
+        limitEngine.close().isOkay(), "close generated-token boundary owner")
+
+    let deadlinePlan = createQwenMiniExecutionPlan(engineId, manifestId,
+        0 as Int32, 128 as UInt64, 2 as UInt64,
+        QWEN_FALLBACK_PROHIBITED, false, false).unwrap()
+    let deadlineEngine = createQwenEngine(deadlinePlan, 1 as UInt64,
+        404 as UInt64).unwrap()
+    let deadlineSession = deadlineEngine.createSession(9 as UInt64).unwrap()
+    require(deadlineSession.beginGeneration(1 as UInt64, 10 as UInt64,
+        11 as UInt64).isOkay(), "begin deadline boundary test")
+    let expired = deadlineSession.commitToken(11 as UInt64)
+    require(expired.isErr() and
+        expired.unwrapErr().code == "qwen.session.deadline" and
+        deadlineSession.generated == (0 as UInt64) and
+        deadlineSession.tokenCount == (1 as UInt64),
+        "reject deadline completion without state mutation")
+    require(deadlineEngine.releaseSession(deadlineSession).isOkay() and
+        deadlineEngine.close().isOkay(), "close expired deadline owner")
+
+    let repeatPlan = createQwenMiniExecutionPlan(engineId, manifestId,
+        0 as Int32, 128 as UInt64, 1 as UInt64,
+        QWEN_FALLBACK_PROHIBITED, false, false).unwrap()
+    let repeatEngine = createQwenEngine(repeatPlan, 1 as UInt64,
+        505 as UInt64).unwrap()
+    var repeat = 0
+    while repeat < 1000 {
+        let repeated = repeatEngine.createSession((repeat + 1) as UInt64).unwrap()
+        require(repeated.beginGeneration(1 as UInt64, 1 as UInt64,
+            3 as UInt64).isOkay() and repeated.cancel().isOkay() and
+            repeated.reset().isOkay() and
+            repeatEngine.releaseSession(repeated).isOkay() and
+            repeatEngine.openSessions == (0 as UInt64),
+            "repeat bounded session ownership and deterministic cleanup")
+        repeat = repeat + 1
+    }
+    repeatEngine.nextSessionId = 0xFFFFFFFFFFFFFFFF as UInt64
+    require(repeatEngine.createSession(1 as UInt64).isErr(),
+        "reject exhausted session identity before allocation")
+    require(repeatEngine.close().isOkay(), "close repeated-session engine")
+
+    let badEnginePlan = createQwenMiniExecutionPlan(engineId, manifestId,
+        0 as Int32, 128 as UInt64, 1 as UInt64,
+        QWEN_FALLBACK_PROHIBITED, false, false).unwrap()
+    require(createQwenEngine(badEnginePlan, 1 as UInt64,
+        0 as UInt64).isErr(), "reject zero engine owner identity")
+
+    println("PASS: QWN-045A engine, numeric plan, bounded sessions, exact ownership, cancellation, deadlines, fallback, and deterministic cleanup")
+    return 0
+}
+
+main()

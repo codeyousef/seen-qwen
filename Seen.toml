@@ -23,6 +23,7 @@ modules = [
     "src/model/cpu_head.seen",
     "src/model/sampling.seen",
     "src/model/cpu_engine.seen",
+    "src/runtime/engine.seen",
     "src/quant/calibration.seen",
     "src/quant/policy.seen",
     "src/quant/sensitivity.seen",

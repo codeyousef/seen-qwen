@@ -1,0 +1,466 @@
+///
+/// QWN-045A model-specific engine, execution-plan, and session ownership.
+///
+/// Plan construction is the only place that selects numeric step kinds. The
+/// future QWN-045B executor consumes these bounded arrays directly; it never
+/// dispatches by string or reflection. Engine identity strings and plan arrays
+/// are owned. Sessions own their sampler and scalar sequence state, borrow no
+/// engine or CUDA object past a call, and must be returned to their engine for
+/// deterministic release. No error selects a backend or fallback implicitly.
+///
+
+import core.result.{Result}
+import seen_qwen.model.sampling.{QwenSampler, createQwenSampler}
+
+extern "C" fun seen_string_clone_owned(value: String) r: String
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+pub let QWEN_PLAN_EMBEDDING: Int32 = 1 as Int32
+pub let QWEN_PLAN_RMSNORM: Int32 = 2 as Int32
+pub let QWEN_PLAN_GDN_PREFILL: Int32 = 3 as Int32
+pub let QWEN_PLAN_GDN_DECODE: Int32 = 4 as Int32
+pub let QWEN_PLAN_ATTENTION_PREFILL: Int32 = 5 as Int32
+pub let QWEN_PLAN_ATTENTION_DECODE: Int32 = 6 as Int32
+pub let QWEN_PLAN_MLP: Int32 = 7 as Int32
+pub let QWEN_PLAN_RESIDUAL: Int32 = 8 as Int32
+pub let QWEN_PLAN_FINAL_NORM: Int32 = 9 as Int32
+pub let QWEN_PLAN_LM_HEAD: Int32 = 10 as Int32
+pub let QWEN_PLAN_SAMPLE: Int32 = 11 as Int32
+pub let QWEN_PLAN_MTP: Int32 = 12 as Int32
+
+pub let QWEN_FALLBACK_PROHIBITED: Int32 = 0 as Int32
+pub let QWEN_FALLBACK_EXPLICIT_CPU_REFERENCE: Int32 = 1 as Int32
+pub let QWEN_BACKEND_CUDA: Int32 = 1 as Int32
+pub let QWEN_BACKEND_CPU_REFERENCE: Int32 = 2 as Int32
+
+const QWEN_MINI_LAYERS: Int = 8
+const QWEN_MINI_CONTEXT: UInt64 = 128 as UInt64
+const QWEN_PLAN_MAX_STEPS: Int = 128
+const QWEN_ENGINE_MAX_SESSIONS: UInt64 = 1024 as UInt64
+
+pub class QwenEngineError {
+    var code: String
+    var operation: String
+    var message: String
+    var deviceOrdinal: Int32
+    var recoverable: Bool
+}
+
+fun qwenEngineError(code: String, operation: String, message: String,
+    deviceOrdinal: Int32 = -1 as Int32, recoverable: Bool = false)
+    r: QwenEngineError {
+    return QwenEngineError{ code: code, operation: operation,
+        message: message, deviceOrdinal: deviceOrdinal,
+        recoverable: recoverable }
+}
+
+pub class QwenExecutionStep {
+    var kind: Int32
+    var layer: Int32
+    var inputSlot: Int32
+    var outputSlot: Int32
+    var workspaceSlot: Int32
+    var dependency: Int32
+    var graphEligible: Bool
+}
+
+fun qwenPlanStep(kind: Int32, layer: Int32, ordinal: Int,
+    graphEligible: Bool) r: QwenExecutionStep {
+    return QwenExecutionStep{ kind: kind, layer: layer,
+        inputSlot: (ordinal % 2) as Int32,
+        outputSlot: ((ordinal + 1) % 2) as Int32,
+        workspaceSlot: 0 as Int32,
+        dependency: (ordinal - 1) as Int32,
+        graphEligible: graphEligible }
+}
+
+fun appendLayerPlan(steps: Array<QwenExecutionStep>, layer: Int,
+    prefill: Bool) r: Void {
+    var ordinal = steps.length()
+    steps.push(qwenPlanStep(QWEN_PLAN_RMSNORM, layer as Int32,
+        ordinal, true)); ordinal = ordinal + 1
+    let hybridKind = if layer == 3 or layer == 7 {
+        if prefill { QWEN_PLAN_ATTENTION_PREFILL }
+        else { QWEN_PLAN_ATTENTION_DECODE }
+    } else {
+        if prefill { QWEN_PLAN_GDN_PREFILL }
+        else { QWEN_PLAN_GDN_DECODE }
+    }
+    steps.push(qwenPlanStep(hybridKind, layer as Int32, ordinal, true))
+    ordinal = ordinal + 1
+    steps.push(qwenPlanStep(QWEN_PLAN_RESIDUAL, layer as Int32,
+        ordinal, true)); ordinal = ordinal + 1
+    steps.push(qwenPlanStep(QWEN_PLAN_RMSNORM, layer as Int32,
+        ordinal, true)); ordinal = ordinal + 1
+    steps.push(qwenPlanStep(QWEN_PLAN_MLP, layer as Int32,
+        ordinal, true)); ordinal = ordinal + 1
+    steps.push(qwenPlanStep(QWEN_PLAN_RESIDUAL, layer as Int32,
+        ordinal, true))
+}
+
+fun buildPhasePlan(prefill: Bool, includeMtp: Bool)
+    r: Array<QwenExecutionStep> {
+    let steps = Array<QwenExecutionStep>()
+    steps.push(qwenPlanStep(QWEN_PLAN_EMBEDDING, -1 as Int32, 0, true))
+    var layer = 0
+    while layer < QWEN_MINI_LAYERS {
+        appendLayerPlan(steps, layer, prefill); layer = layer + 1
+    }
+    var ordinal = steps.length()
+    steps.push(qwenPlanStep(QWEN_PLAN_FINAL_NORM, -1 as Int32,
+        ordinal, true)); ordinal = ordinal + 1
+    steps.push(qwenPlanStep(QWEN_PLAN_LM_HEAD, -1 as Int32,
+        ordinal, true)); ordinal = ordinal + 1
+    steps.push(qwenPlanStep(QWEN_PLAN_SAMPLE, -1 as Int32,
+        ordinal, false)); ordinal = ordinal + 1
+    if includeMtp {
+        steps.push(qwenPlanStep(QWEN_PLAN_MTP, -1 as Int32,
+            ordinal, false))
+    }
+    return steps
+}
+
+fun qwenDigestValid(value: String) r: Bool {
+    if value.length() != 64 { return false }
+    var index = 0
+    while index < value.length() {
+        let byte = value.byteAt(index)
+        if not ((byte >= 48 and byte <= 57) or
+            (byte >= 97 and byte <= 102)) { return false }
+        index = index + 1
+    }
+    return true
+}
+
+fun qwenStepKindValid(kind: Int32, prefill: Bool) r: Bool {
+    if kind == QWEN_PLAN_GDN_PREFILL or
+        kind == QWEN_PLAN_ATTENTION_PREFILL { return prefill }
+    if kind == QWEN_PLAN_GDN_DECODE or
+        kind == QWEN_PLAN_ATTENTION_DECODE { return not prefill }
+    return kind == QWEN_PLAN_EMBEDDING or kind == QWEN_PLAN_RMSNORM or
+        kind == QWEN_PLAN_MLP or kind == QWEN_PLAN_RESIDUAL or
+        kind == QWEN_PLAN_FINAL_NORM or kind == QWEN_PLAN_LM_HEAD or
+        kind == QWEN_PLAN_SAMPLE or kind == QWEN_PLAN_MTP
+}
+
+fun validatePhasePlan(steps: Array<QwenExecutionStep>, prefill: Bool,
+    includeMtp: Bool) r: Bool {
+    let expected = if includeMtp { 53 } else { 52 }
+    if steps.length() != expected or steps.length() > QWEN_PLAN_MAX_STEPS {
+        return false
+    }
+    var index = 0
+    while index < steps.length() {
+        let step = steps[index]
+        if not qwenStepKindValid(step.kind, prefill) or
+            step.inputSlot != (index % 2) as Int32 or
+            step.outputSlot != ((index + 1) % 2) as Int32 or
+            step.workspaceSlot != (0 as Int32) or
+            step.dependency != (index - 1) as Int32 or
+            (step.kind == QWEN_PLAN_SAMPLE and step.graphEligible) or
+            (step.kind == QWEN_PLAN_MTP and step.graphEligible) {
+            return false
+        }
+        index = index + 1
+    }
+    if steps[0].kind != QWEN_PLAN_EMBEDDING or
+        steps[49].kind != QWEN_PLAN_FINAL_NORM or
+        steps[50].kind != QWEN_PLAN_LM_HEAD or
+        steps[51].kind != QWEN_PLAN_SAMPLE {
+        return false
+    }
+    return not includeMtp or steps[52].kind == QWEN_PLAN_MTP
+}
+
+@move
+pub class QwenExecutionPlan {
+    var engineIdentity: String
+    var manifestIdentity: String
+    var prefillSteps: Array<QwenExecutionStep>
+    var decodeSteps: Array<QwenExecutionStep>
+    var deviceOrdinal: Int32
+    var maxContext: UInt64
+    var maxGenerated: UInt64
+    var fallbackPolicy: Int32
+    var referenceValidated: Bool
+    var includeMtp: Bool
+    var closed: Bool
+
+    fun validate() r: Bool {
+        return not this.closed and this.deviceOrdinal >= (0 as Int32) and
+            qwenDigestValid(this.engineIdentity) and
+            qwenDigestValid(this.manifestIdentity) and
+            this.maxContext > (0 as UInt64) and
+            this.maxContext <= QWEN_MINI_CONTEXT and
+            this.maxGenerated > (0 as UInt64) and
+            this.maxGenerated <= this.maxContext and
+            (this.fallbackPolicy == QWEN_FALLBACK_PROHIBITED or
+             this.fallbackPolicy == QWEN_FALLBACK_EXPLICIT_CPU_REFERENCE and
+                this.referenceValidated) and
+            validatePhasePlan(this.prefillSteps, true, this.includeMtp) and
+            validatePhasePlan(this.decodeSteps, false, this.includeMtp)
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.prefillSteps.free(); this.decodeSteps.free()
+        seen_string_release_owned(this.engineIdentity)
+        seen_string_release_owned(this.manifestIdentity)
+        this.maxContext = 0 as UInt64; this.maxGenerated = 0 as UInt64
+        this.closed = true
+    }
+}
+
+pub fun createQwenMiniExecutionPlan(engineIdentity: String,
+    manifestIdentity: String, deviceOrdinal: Int32, maxContext: UInt64,
+    maxGenerated: UInt64, fallbackPolicy: Int32,
+    referenceValidated: Bool, includeMtp: Bool)
+    r: Result<QwenExecutionPlan, QwenEngineError> {
+    if not qwenDigestValid(engineIdentity) or
+        not qwenDigestValid(manifestIdentity) or deviceOrdinal < (0 as Int32) or
+        maxContext == (0 as UInt64) or maxContext > QWEN_MINI_CONTEXT or
+        maxGenerated == (0 as UInt64) or maxGenerated > maxContext or
+        (fallbackPolicy != QWEN_FALLBACK_PROHIBITED and
+         fallbackPolicy != QWEN_FALLBACK_EXPLICIT_CPU_REFERENCE) or
+        (fallbackPolicy == QWEN_FALLBACK_EXPLICIT_CPU_REFERENCE and
+         not referenceValidated) {
+        return Err<QwenExecutionPlan, QwenEngineError>(qwenEngineError(
+            "qwen.engine.plan", "engine.plan",
+            "execution plan identity, geometry, or fallback policy is invalid",
+            deviceOrdinal))
+    }
+    let plan = QwenExecutionPlan{
+        engineIdentity: seen_string_clone_owned(engineIdentity),
+        manifestIdentity: seen_string_clone_owned(manifestIdentity),
+        prefillSteps: buildPhasePlan(true, includeMtp),
+        decodeSteps: buildPhasePlan(false, includeMtp),
+        deviceOrdinal: deviceOrdinal, maxContext: maxContext,
+        maxGenerated: maxGenerated, fallbackPolicy: fallbackPolicy,
+        referenceValidated: referenceValidated, includeMtp: includeMtp,
+        closed: false }
+    if not plan.validate() {
+        plan.close()
+        return Err<QwenExecutionPlan, QwenEngineError>(qwenEngineError(
+            "qwen.engine.plan", "engine.plan",
+            "constructed execution plan failed closed validation",
+            deviceOrdinal))
+    }
+    return Ok<QwenExecutionPlan, QwenEngineError>(plan)
+}
+
+@move
+pub class QwenSession {
+    var engineIdentity: String
+    var sessionId: UInt64
+    var ownerToken: UInt64
+    var sampler: QwenSampler
+    var maxContext: UInt64
+    var maxGenerated: UInt64
+    var tokenCount: UInt64
+    var generated: UInt64
+    var cancellationEpoch: UInt64
+    var deadlineEpoch: UInt64
+    var fallbackCount: UInt64
+    var lastFallbackReason: Int32
+    var fallbackPolicy: Int32
+    var activeBackend: Int32
+    var generationActive: Bool
+    var cancelled: Bool
+    var closed: Bool
+
+    fun beginGeneration(promptTokens: UInt64, currentEpoch: UInt64,
+        deadlineEpoch: UInt64) r: Result<Bool, QwenEngineError> {
+        if this.closed or this.generationActive or this.cancelled or
+            promptTokens == (0 as UInt64) or promptTokens > this.maxContext or
+            deadlineEpoch <= currentEpoch {
+            return Err<Bool, QwenEngineError>(qwenEngineError(
+                "qwen.session.state", "session.begin",
+                "session cannot begin the requested bounded generation"))
+        }
+        this.tokenCount = promptTokens; this.generated = 0 as UInt64
+        this.deadlineEpoch = deadlineEpoch; this.generationActive = true
+        return Ok<Bool, QwenEngineError>(true)
+    }
+
+    fun checkpoint(currentEpoch: UInt64)
+        r: Result<Bool, QwenEngineError> {
+        if this.closed or not this.generationActive or this.cancelled or
+            currentEpoch >= this.deadlineEpoch {
+            return Err<Bool, QwenEngineError>(qwenEngineError(
+                if this.cancelled { "qwen.session.cancelled" }
+                else { "qwen.session.deadline" }, "session.checkpoint",
+                "generation checkpoint rejected late or cancelled work",
+                -1 as Int32, true))
+        }
+        return Ok<Bool, QwenEngineError>(true)
+    }
+
+    fun commitToken(currentEpoch: UInt64)
+        r: Result<Bool, QwenEngineError> {
+        let live = this.checkpoint(currentEpoch)
+        if live.isErr() {
+            return Err<Bool, QwenEngineError>(live.unwrapErr())
+        }
+        if this.generated >= this.maxGenerated or
+            this.tokenCount >= this.maxContext {
+            return Err<Bool, QwenEngineError>(qwenEngineError(
+                "qwen.session.limit", "session.commit",
+                "generation would exceed its admitted bounds"))
+        }
+        this.generated = this.generated + (1 as UInt64)
+        this.tokenCount = this.tokenCount + (1 as UInt64)
+        return Ok<Bool, QwenEngineError>(true)
+    }
+
+    fun finishGeneration() r: Result<Bool, QwenEngineError> {
+        if this.closed or not this.generationActive {
+            return Err<Bool, QwenEngineError>(qwenEngineError(
+                "qwen.session.state", "session.finish",
+                "no generation is active"))
+        }
+        this.generationActive = false; this.deadlineEpoch = 0 as UInt64
+        return Ok<Bool, QwenEngineError>(true)
+    }
+
+    fun cancel() r: Result<Bool, QwenEngineError> {
+        if this.closed or this.cancellationEpoch ==
+            (0xFFFFFFFFFFFFFFFF as UInt64) {
+            return Err<Bool, QwenEngineError>(qwenEngineError(
+                "qwen.session.closed", "session.cancel",
+                "session is closed or its cancellation epoch is exhausted"))
+        }
+        this.cancellationEpoch = this.cancellationEpoch + (1 as UInt64)
+        this.cancelled = true; this.generationActive = false
+        this.deadlineEpoch = 0 as UInt64
+        return Ok<Bool, QwenEngineError>(true)
+    }
+
+    fun requestFallback(reasonCode: Int32, semanticEquivalent: Bool,
+        explicitlyApproved: Bool) r: Result<Bool, QwenEngineError> {
+        if this.closed or reasonCode <= (0 as Int32) or
+            this.fallbackPolicy != QWEN_FALLBACK_EXPLICIT_CPU_REFERENCE or
+            this.activeBackend != QWEN_BACKEND_CUDA or
+            not semanticEquivalent or not explicitlyApproved {
+            return Err<Bool, QwenEngineError>(qwenEngineError(
+                "qwen.session.fallback-prohibited", "session.fallback",
+                "fallback was not explicitly admitted and equivalent"))
+        }
+        if this.fallbackCount == (0xFFFFFFFFFFFFFFFF as UInt64) {
+            return Err<Bool, QwenEngineError>(qwenEngineError(
+                "qwen.session.overflow", "session.fallback",
+                "fallback counter is exhausted"))
+        }
+        this.fallbackCount = this.fallbackCount + (1 as UInt64)
+        this.lastFallbackReason = reasonCode
+        this.activeBackend = QWEN_BACKEND_CPU_REFERENCE
+        return Ok<Bool, QwenEngineError>(true)
+    }
+
+    fun reset() r: Result<Bool, QwenEngineError> {
+        if this.closed or this.generationActive {
+            return Err<Bool, QwenEngineError>(qwenEngineError(
+                "qwen.session.state", "session.reset",
+                "active or closed session cannot reset"))
+        }
+        this.tokenCount = 0 as UInt64; this.generated = 0 as UInt64
+        this.deadlineEpoch = 0 as UInt64; this.cancelled = false
+        this.fallbackCount = 0 as UInt64
+        this.lastFallbackReason = 0 as Int32
+        this.activeBackend = QWEN_BACKEND_CUDA; this.sampler.reset()
+        return Ok<Bool, QwenEngineError>(true)
+    }
+
+    fun close() r: Void {
+        if this.closed { return }
+        this.sampler.close(); seen_string_release_owned(this.engineIdentity)
+        this.tokenCount = 0 as UInt64; this.generated = 0 as UInt64
+        this.sessionId = 0 as UInt64; this.ownerToken = 0 as UInt64
+        this.maxContext = 0 as UInt64; this.maxGenerated = 0 as UInt64
+        this.deadlineEpoch = 0 as UInt64; this.fallbackCount = 0 as UInt64
+        this.lastFallbackReason = 0 as Int32
+        this.generationActive = false; this.cancelled = true
+        this.closed = true
+    }
+}
+
+@move
+pub class QwenEngine {
+    var plan: QwenExecutionPlan
+    var nextSessionId: UInt64
+    var openSessions: UInt64
+    var maxSessions: UInt64
+    var ownerToken: UInt64
+    var closed: Bool
+
+    fun createSession(seed: UInt64)
+        r: Result<QwenSession, QwenEngineError> {
+        if this.closed or not this.plan.validate() or
+            this.openSessions >= this.maxSessions or
+            this.nextSessionId == (0xFFFFFFFFFFFFFFFF as UInt64) {
+            return Err<QwenSession, QwenEngineError>(qwenEngineError(
+                "qwen.engine.session-limit", "engine.session.create",
+                "engine cannot create another bounded session",
+                this.plan.deviceOrdinal, true))
+        }
+        this.nextSessionId = this.nextSessionId + (1 as UInt64)
+        this.openSessions = this.openSessions + (1 as UInt64)
+        return Ok<QwenSession, QwenEngineError>(QwenSession{
+            engineIdentity: seen_string_clone_owned(this.plan.engineIdentity),
+            sessionId: this.nextSessionId, ownerToken: this.ownerToken,
+            sampler: createQwenSampler(seed),
+            maxContext: this.plan.maxContext,
+            maxGenerated: this.plan.maxGenerated,
+            tokenCount: 0 as UInt64, generated: 0 as UInt64,
+            cancellationEpoch: 0 as UInt64, deadlineEpoch: 0 as UInt64,
+            fallbackCount: 0 as UInt64,
+            lastFallbackReason: 0 as Int32,
+            fallbackPolicy: this.plan.fallbackPolicy,
+            activeBackend: QWEN_BACKEND_CUDA,
+            generationActive: false, cancelled: false, closed: false })
+    }
+
+    fun releaseSession(borrow session: QwenSession)
+        r: Result<Bool, QwenEngineError> {
+        if this.closed or this.openSessions == (0 as UInt64) or
+            session.closed or session.ownerToken != this.ownerToken or
+            session.engineIdentity != this.plan.engineIdentity {
+            return Err<Bool, QwenEngineError>(qwenEngineError(
+                "qwen.engine.session-owner", "engine.session.release",
+                "session is closed or belongs to another engine",
+                this.plan.deviceOrdinal))
+        }
+        session.close(); this.openSessions = this.openSessions - (1 as UInt64)
+        return Ok<Bool, QwenEngineError>(true)
+    }
+
+    fun close() r: Result<Bool, QwenEngineError> {
+        if this.closed { return Ok<Bool, QwenEngineError>(false) }
+        if this.openSessions != (0 as UInt64) {
+            return Err<Bool, QwenEngineError>(qwenEngineError(
+                "qwen.engine.sessions-live", "engine.close",
+                "engine cannot close while sessions remain live",
+                this.plan.deviceOrdinal, true))
+        }
+        this.plan.close(); this.nextSessionId = 0 as UInt64
+        this.maxSessions = 0 as UInt64; this.ownerToken = 0 as UInt64
+        this.closed = true
+        return Ok<Bool, QwenEngineError>(true)
+    }
+}
+
+pub fun createQwenEngine(plan: QwenExecutionPlan, maxSessions: UInt64,
+    ownerToken: UInt64)
+    r: Result<QwenEngine, QwenEngineError> {
+    if not plan.validate() or ownerToken == (0 as UInt64) or
+        maxSessions == (0 as UInt64) or
+        maxSessions > QWEN_ENGINE_MAX_SESSIONS {
+        if not plan.closed { plan.close() }
+        return Err<QwenEngine, QwenEngineError>(qwenEngineError(
+            "qwen.engine.create", "engine.create",
+            "engine plan or session admission bound is invalid"))
+    }
+    return Ok<QwenEngine, QwenEngineError>(QwenEngine{
+        plan: plan, nextSessionId: 0 as UInt64,
+        openSessions: 0 as UInt64, maxSessions: maxSessions,
+        ownerToken: ownerToken, closed: false })
+}
