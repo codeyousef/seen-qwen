@@ -1053,7 +1053,7 @@ class SqwReaderOracleTests(unittest.TestCase):
                 "if bundleDigest.unwrap() != convertedSha256"
             ),
         )
-        self.assertIn("let error = bundleDigest.unwrapErr()", bundle_error)
+        self.assertIn("let error = sqwTakeError(bundleDigest)", bundle_error)
         self.assertRegex(bundle_error, re.compile(r"return\s+Err[^\n]*\(error\)"))
 
         validate_footer = _balanced_block(
@@ -1070,7 +1070,7 @@ class SqwReaderOracleTests(unittest.TestCase):
             failure = _balanced_block(
                 owner, rf"if\s+{result_name}\.isErr\(\)"
             )
-            self.assertIn(f"{result_name}.unwrapErr()", failure)
+            self.assertIn(f"sqwTakeError({result_name})", failure)
             self.assertNotIn("sqwReaderError", failure)
 
         stable_codes = set(re.findall(r'"(sqw\.[a-z0-9_]+)"', source))

@@ -108,6 +108,12 @@ fun sqwReleaseMovedStringResult(result: Result<String, SqwError>) r: Void {
     result.releaseContainer()
 }
 
+fun sqwTakeError<T>(result: Result<T, SqwError>) r: SqwError {
+    let error = result.unwrapErr()
+    result.releaseContainer()
+    return error
+}
+
 fun sqwReleaseSectionDigests(namesSha256: String, payloadSha256: String,
     evidenceSha256: String, hasEvidence: Bool) r: Void {
     seen_string_release_owned(namesSha256)
@@ -137,11 +143,13 @@ fun sqwCloseTemporaryWindow(window: MappedWindow) r: Void {
     window.free()
 }
 
-fun sqwCloseRejectedFile(borrow file: MappedFile) r: Void {
+fun sqwCloseRejectedFile(file: MappedFile) r: Void {
     let closed = file.close()
     if closed.isErr() {
         abort("sqw.close: rejected mapped-file cleanup failed")
     }
+    closed.releaseContainer()
+    file.free()
 }
 
 fun sqwPointerBytes(data: *const UInt8, length: Int) r: Array<Int> {
@@ -185,7 +193,7 @@ fun sqwHashMappedRange(borrow file: MappedFile, state: Sha256, offset: UInt64,
         let absoluteResult = sqwCheckedAdd(offset, cursor)
         if absoluteResult.isErr() {
             sqwDiscardSha256(state)
-            return Err<Bool, SqwError>(absoluteResult.unwrapErr())
+            return Err<Bool, SqwError>(sqwTakeError(absoluteResult))
         }
         let absolute = absoluteResult.unwrap()
         absoluteResult.releaseContainer()
@@ -226,7 +234,7 @@ fun sqwHashRange(borrow file: MappedFile, offset: UInt64, length: UInt64)
     let state = Sha256.new()
     let updated = sqwHashMappedRange(file, state, offset, length)
     if updated.isErr() {
-        return Err<String, SqwError>(updated.unwrapErr())
+        return Err<String, SqwError>(sqwTakeError(updated))
     }
     updated.releaseContainer()
     let digest = state.finalizeHex()
@@ -246,7 +254,7 @@ fun sqwWholeFileHash(borrow file: MappedFile, header: SqwHeader)
     let updated = sqwHashMappedRange(file, state, 0 as UInt64, file.length,
         header.wholeFileDigestOffset, 32 as UInt64)
     if updated.isErr() {
-        return Err<String, SqwError>(updated.unwrapErr())
+        return Err<String, SqwError>(sqwTakeError(updated))
     }
     updated.releaseContainer()
     let digest = state.finalizeHex()
@@ -778,25 +786,25 @@ fun sqwTensorBundleHash(borrow file: MappedFile, entry: SqwDirectoryEntry)
     let state = Sha256.new()
     let data = sqwHashMappedRange(file, state, entry.dataOffset,
         entry.dataLength)
-    if data.isErr() { return Err<String, SqwError>(data.unwrapErr()) }
+    if data.isErr() { return Err<String, SqwError>(sqwTakeError(data)) }
     data.releaseContainer()
     if entry.scaleLength > (0 as UInt64) {
         let scale = sqwHashMappedRange(file, state, entry.scaleOffset,
             entry.scaleLength)
-        if scale.isErr() { return Err<String, SqwError>(scale.unwrapErr()) }
+        if scale.isErr() { return Err<String, SqwError>(sqwTakeError(scale)) }
         scale.releaseContainer()
     }
     if entry.zeroLength > (0 as UInt64) {
         let zero = sqwHashMappedRange(file, state, entry.zeroOffset,
             entry.zeroLength)
-        if zero.isErr() { return Err<String, SqwError>(zero.unwrapErr()) }
+        if zero.isErr() { return Err<String, SqwError>(sqwTakeError(zero)) }
         zero.releaseContainer()
     }
     if entry.metadataLength > (0 as UInt64) {
         let metadata = sqwHashMappedRange(file, state, entry.metadataOffset,
             entry.metadataLength)
         if metadata.isErr() {
-            return Err<String, SqwError>(metadata.unwrapErr())
+            return Err<String, SqwError>(sqwTakeError(metadata))
         }
         metadata.releaseContainer()
     }
@@ -873,7 +881,7 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
         (SQW_DIRECTORY_ENTRY_BYTES as UInt64), "directory")
     if directoryResult.isErr() {
         return Err<Array<SqwTensorRecord>, SqwError>(
-            directoryResult.unwrapErr())
+            sqwTakeError(directoryResult))
     }
     let directory = directoryResult.unwrap()
     directoryResult.releaseContainer()
@@ -899,7 +907,7 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
         }
         let parsedEntry = parseSqwDirectoryEntry(entryBytes, header)
         if parsedEntry.isErr() {
-            let error = parsedEntry.unwrapErr()
+            let error = sqwTakeError(parsedEntry)
             entryBytes.free(); directory.free()
             sqwCloseTemporaryWindow(namesWindow)
             sqwDestroyRecords(records)
@@ -908,7 +916,7 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
         let entry = parsedEntry.unwrap()
         parsedEntry.releaseContainer()
         if entry.nameOffset < nameCursor {
-            entry.close(); entryBytes.free(); directory.free()
+            entry.close(); entry.free(); entryBytes.free(); directory.free()
             sqwCloseTemporaryWindow(namesWindow)
             sqwDestroyRecords(records)
             return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
@@ -918,7 +926,7 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
         if entry.nameOffset > nameCursor and not sqwPointerRangeZero(
             namesWindow.data, nameCursor as Int,
             (entry.nameOffset - nameCursor) as Int) {
-            entry.close(); entryBytes.free(); directory.free()
+            entry.close(); entry.free(); entryBytes.free(); directory.free()
             sqwCloseTemporaryWindow(namesWindow)
             sqwDestroyRecords(records)
             return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
@@ -927,8 +935,11 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
         let name = seen_string_view_bytes(namesWindow.data +
             (entry.nameOffset as Int), entry.nameLength as Int64)
         let utf8 = validateJsonUtf8(name)
-        if utf8.isErr() or not sqwNameAllowed(name) {
-            entry.close(); entryBytes.free(); directory.free()
+        if utf8.isErr() {
+            let utf8Error = utf8.unwrapErr()
+            utf8Error.free()
+            utf8.releaseContainer()
+            entry.close(); entry.free(); entryBytes.free(); directory.free()
             sqwCloseTemporaryWindow(namesWindow)
             sqwDestroyRecords(records)
             return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
@@ -936,9 +947,17 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
                 "tensor name is invalid UTF-8, contains NUL, or uses a forbidden namespace"))
         }
         utf8.releaseContainer()
+        if not sqwNameAllowed(name) {
+            entry.close(); entry.free(); entryBytes.free(); directory.free()
+            sqwCloseTemporaryWindow(namesWindow)
+            sqwDestroyRecords(records)
+            return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
+                "sqw.name_utf8", "name",
+                "tensor name is invalid UTF-8, contains NUL, or uses a forbidden namespace"))
+        }
         if records.length() > 0 and sqwNameBytesCompare(
             records[records.length() - 1].name, name) >= 0 {
-            entry.close(); entryBytes.free(); directory.free()
+            entry.close(); entry.free(); entryBytes.free(); directory.free()
             sqwCloseTemporaryWindow(namesWindow)
             sqwDestroyRecords(records)
             return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
@@ -954,7 +973,7 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
                 entry.requiredAlignment) or
             not sqwComponentAligned(entry.metadataOffset,
                 entry.metadataLength, entry.requiredAlignment) {
-            entry.close(); entryBytes.free(); directory.free()
+            entry.close(); entry.free(); entryBytes.free(); directory.free()
             sqwCloseTemporaryWindow(namesWindow)
             sqwDestroyRecords(records)
             return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
@@ -962,7 +981,7 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
                 "every present tensor component must obey its alignment"))
         }
         if entry.dataOffset < payloadCursor {
-            entry.close(); entryBytes.free(); directory.free()
+            entry.close(); entry.free(); entryBytes.free(); directory.free()
             sqwCloseTemporaryWindow(namesWindow)
             sqwDestroyRecords(records)
             return Err<Array<SqwTensorRecord>, SqwError>(sqwReaderError(
@@ -972,8 +991,8 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
         let payloadGap = sqwValidateZeroGap(file, payloadCursor,
             entry.dataOffset, "tensor")
         if payloadGap.isErr() {
-            let error = payloadGap.unwrapErr()
-            entry.close(); entryBytes.free(); directory.free()
+            let error = sqwTakeError(payloadGap)
+            entry.close(); entry.free(); entryBytes.free(); directory.free()
             sqwCloseTemporaryWindow(namesWindow)
             sqwDestroyRecords(records)
             return Err<Array<SqwTensorRecord>, SqwError>(error)
@@ -981,8 +1000,8 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
         payloadGap.releaseContainer()
         let componentPadding = sqwValidateComponentPadding(file, entry)
         if componentPadding.isErr() {
-            let error = componentPadding.unwrapErr()
-            entry.close(); entryBytes.free(); directory.free()
+            let error = sqwTakeError(componentPadding)
+            entry.close(); entry.free(); entryBytes.free(); directory.free()
             sqwCloseTemporaryWindow(namesWindow)
             sqwDestroyRecords(records)
             return Err<Array<SqwTensorRecord>, SqwError>(error)
@@ -990,8 +1009,8 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
         componentPadding.releaseContainer()
         let q4Tail = sqwValidateQ4Tail(file, entry)
         if q4Tail.isErr() {
-            let error = q4Tail.unwrapErr()
-            entry.close(); entryBytes.free(); directory.free()
+            let error = sqwTakeError(q4Tail)
+            entry.close(); entry.free(); entryBytes.free(); directory.free()
             sqwCloseTemporaryWindow(namesWindow)
             sqwDestroyRecords(records)
             return Err<Array<SqwTensorRecord>, SqwError>(error)
@@ -1002,8 +1021,8 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
         entryBytes.free()
         let bundleDigest = sqwTensorBundleHash(file, entry)
         if bundleDigest.isErr() {
-            let error = bundleDigest.unwrapErr()
-            entry.close(); directory.free()
+            let error = sqwTakeError(bundleDigest)
+            entry.close(); entry.free(); directory.free()
             sqwCloseTemporaryWindow(namesWindow)
             seen_string_release_owned(sourceSha256)
             seen_string_release_owned(convertedSha256)
@@ -1011,9 +1030,9 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
             return Err<Array<SqwTensorRecord>, SqwError>(error)
         }
         if bundleDigest.unwrap() != convertedSha256 {
-            entry.close(); directory.free()
+            entry.close(); entry.free(); directory.free()
             sqwCloseTemporaryWindow(namesWindow)
-            seen_string_release_owned(bundleDigest.unwrap())
+            sqwReleaseOwnedStringResult(bundleDigest)
             seen_string_release_owned(sourceSha256)
             seen_string_release_owned(convertedSha256)
             sqwDestroyRecords(records)
@@ -1024,9 +1043,9 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
         let manifestItem = manifestTensors.getAt(tensorIndex)
         if manifestItem.isNone() {
             manifestItem.free()
-            entry.close(); directory.free()
+            entry.close(); entry.free(); directory.free()
             sqwCloseTemporaryWindow(namesWindow)
-            seen_string_release_owned(bundleDigest.unwrap())
+            sqwReleaseOwnedStringResult(bundleDigest)
             seen_string_release_owned(sourceSha256)
             seen_string_release_owned(convertedSha256)
             sqwDestroyRecords(records)
@@ -1039,10 +1058,10 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
         let manifestMatch = sqwManifestTensorMatches(manifestValue,
             name, entry, sourceSha256, convertedSha256)
         if manifestMatch.isErr() {
-            let error = manifestMatch.unwrapErr()
-            entry.close(); directory.free()
+            let error = sqwTakeError(manifestMatch)
+            entry.close(); entry.free(); directory.free()
             sqwCloseTemporaryWindow(namesWindow)
-            seen_string_release_owned(bundleDigest.unwrap())
+            sqwReleaseOwnedStringResult(bundleDigest)
             seen_string_release_owned(sourceSha256)
             seen_string_release_owned(convertedSha256)
             sqwDestroyRecords(records)
@@ -1072,7 +1091,7 @@ fun sqwValidateDirectoryAndNames(borrow file: MappedFile, header: SqwHeader,
     let payloadTail = sqwValidateZeroGap(file, payloadCursor,
         payloadEnd, "payload")
     if payloadTail.isErr() {
-        let error = payloadTail.unwrapErr()
+        let error = sqwTakeError(payloadTail)
         sqwDestroyRecords(records)
         return Err<Array<SqwTensorRecord>, SqwError>(error)
     }
@@ -1119,14 +1138,14 @@ fun sqwValidateFooterAndHashes(borrow file: MappedFile, header: SqwHeader,
     let namesResult = sqwHashRange(file, header.namesOffset,
         header.namesLength)
     if namesResult.isErr() {
-        return Err<Bool, SqwError>(namesResult.unwrapErr())
+        return Err<Bool, SqwError>(sqwTakeError(namesResult))
     }
     let namesSha256 = namesResult.unwrap()
     sqwReleaseMovedStringResult(namesResult)
     let payloadResult = sqwHashRange(file, header.payloadOffset,
         header.payloadLength)
     if payloadResult.isErr() {
-        let error = payloadResult.unwrapErr()
+        let error = sqwTakeError(payloadResult)
         seen_string_release_owned(namesSha256)
         return Err<Bool, SqwError>(error)
     }
@@ -1140,7 +1159,7 @@ fun sqwValidateFooterAndHashes(borrow file: MappedFile, header: SqwHeader,
         if evidence.isErr() {
             sqwReleaseSectionDigests(namesSha256, payloadSha256,
                 evidenceSha256, false)
-            return Err<Bool, SqwError>(evidence.unwrapErr())
+            return Err<Bool, SqwError>(sqwTakeError(evidence))
         }
         evidenceSha256 = evidence.unwrap()
         sqwReleaseMovedStringResult(evidence)
@@ -1152,7 +1171,7 @@ fun sqwValidateFooterAndHashes(borrow file: MappedFile, header: SqwHeader,
     if footerResult.isErr() {
         sqwReleaseSectionDigests(namesSha256, payloadSha256,
             evidenceSha256, hasEvidence)
-        return Err<Bool, SqwError>(footerResult.unwrapErr())
+        return Err<Bool, SqwError>(sqwTakeError(footerResult))
     }
     let footer = footerResult.unwrap()
     footerResult.releaseContainer()
@@ -1165,7 +1184,7 @@ fun sqwValidateFooterAndHashes(borrow file: MappedFile, header: SqwHeader,
     let storedWholeSha256 = sqwHexFromArray(headerBytes, 16)
     headerBytes.free()
     if parsedHeader.isErr() {
-        let error = parsedHeader.unwrapErr(); footer.free()
+        let error = sqwTakeError(parsedHeader); footer.free()
         seen_string_release_owned(storedWholeSha256)
         sqwReleaseSectionDigests(namesSha256, payloadSha256,
             evidenceSha256, hasEvidence)
@@ -1198,7 +1217,7 @@ fun sqwValidateFooterAndHashes(borrow file: MappedFile, header: SqwHeader,
         let storedSectionSha256 = sqwHexFromArray(entryBytes, 24)
         entryBytes.free()
         if parsedEntry.isErr() {
-            let error = parsedEntry.unwrapErr(); footer.free()
+            let error = sqwTakeError(parsedEntry); footer.free()
             seen_string_release_owned(storedSectionSha256)
             seen_string_release_owned(storedWholeSha256)
             sqwReleaseSectionDigests(namesSha256, payloadSha256,
@@ -1234,7 +1253,7 @@ fun sqwValidateFooterAndHashes(borrow file: MappedFile, header: SqwHeader,
     footer.free()
     let wholeResult = sqwWholeFileHash(file, header)
     if wholeResult.isErr() {
-        let error = wholeResult.unwrapErr()
+        let error = sqwTakeError(wholeResult)
         seen_string_release_owned(storedWholeSha256)
         sqwReleaseSectionDigests(namesSha256, payloadSha256,
             evidenceSha256, hasEvidence)
@@ -1264,13 +1283,13 @@ fun sqwValidateFile(borrow file: MappedFile, policy: SqwReaderPolicy)
     let headerResult = sqwMapBytes(file, 0 as UInt64,
         SQW_HEADER_BYTES as UInt64, SQW_HEADER_BYTES as UInt64, "header")
     if headerResult.isErr() {
-        return Err<SqwValidatedMetadata, SqwError>(headerResult.unwrapErr())
+        return Err<SqwValidatedMetadata, SqwError>(sqwTakeError(headerResult))
     }
     let headerBytes = headerResult.unwrap()
     headerResult.releaseContainer()
     let parsedHeader = parseSqwHeader(headerBytes, file.length)
     if parsedHeader.isErr() {
-        let error = parsedHeader.unwrapErr(); headerBytes.free()
+        let error = sqwTakeError(parsedHeader); headerBytes.free()
         return Err<SqwValidatedMetadata, SqwError>(error)
     }
     let header = parsedHeader.unwrap()
@@ -1284,18 +1303,22 @@ fun sqwValidateFile(borrow file: MappedFile, policy: SqwReaderPolicy)
     seen_string_release_owned(headerModelSha256)
     seen_string_release_owned(headerPolicySha256)
     if not headerIdentityMatches {
+        header.free()
         return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
             "sqw.identity", "header",
             "header model or conversion-policy digest mismatches policy"))
     }
     if header.tensorCount != policy.expectedTensorCount {
+        header.free()
         return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
             "sqw.tensor_count", "directory",
             "SQW tensor count mismatches the explicit reader policy"))
     }
     let padding = sqwValidateOuterPadding(file, header)
     if padding.isErr() {
-        return Err<SqwValidatedMetadata, SqwError>(padding.unwrapErr())
+        let error = sqwTakeError(padding)
+        header.free()
+        return Err<SqwValidatedMetadata, SqwError>(error)
     }
     padding.releaseContainer()
     let directoryLength = (header.tensorCount as UInt64) *
@@ -1303,16 +1326,18 @@ fun sqwValidateFile(borrow file: MappedFile, policy: SqwReaderPolicy)
     let directoryResult = sqwHashRange(file, header.directoryOffset,
         directoryLength)
     if directoryResult.isErr() {
-        return Err<SqwValidatedMetadata, SqwError>(
-            directoryResult.unwrapErr())
+        let error = sqwTakeError(directoryResult)
+        header.free()
+        return Err<SqwValidatedMetadata, SqwError>(error)
     }
     let directorySha256 = directoryResult.unwrap()
     sqwReleaseMovedStringResult(directoryResult)
     let manifestDigestResult = sqwHashRange(file, header.manifestOffset,
         header.manifestLength)
     if manifestDigestResult.isErr() {
-        let error = manifestDigestResult.unwrapErr()
+        let error = sqwTakeError(manifestDigestResult)
         seen_string_release_owned(directorySha256)
+        header.free()
         return Err<SqwValidatedMetadata, SqwError>(error)
     }
     let manifestSha256 = manifestDigestResult.unwrap()
@@ -1322,6 +1347,7 @@ fun sqwValidateFile(borrow file: MappedFile, policy: SqwReaderPolicy)
     if manifestResult.isErr() {
         seen_string_release_owned(manifestSha256)
         seen_string_release_owned(directorySha256)
+        header.free()
         return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
             "sqw.map", "manifest", "failed to map the bounded manifest"))
     }
@@ -1334,6 +1360,10 @@ fun sqwValidateFile(borrow file: MappedFile, policy: SqwReaderPolicy)
         sqwCloseTemporaryWindow(manifestWindow)
         seen_string_release_owned(manifestSha256)
         seen_string_release_owned(directorySha256)
+        let utf8Error = manifestUtf8.unwrapErr()
+        utf8Error.free()
+        manifestUtf8.releaseContainer()
+        header.free()
         return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
             "sqw.manifest_json", "manifest",
             "manifest is not bounded duplicate-free strict UTF-8 JSON"))
@@ -1351,6 +1381,7 @@ fun sqwValidateFile(borrow file: MappedFile, policy: SqwReaderPolicy)
         sqwCloseTemporaryWindow(manifestWindow)
         seen_string_release_owned(manifestSha256)
         seen_string_release_owned(directorySha256)
+        header.free()
         return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
             "sqw.manifest_json", "manifest",
             "manifest is not bounded duplicate-free strict UTF-8 JSON"))
@@ -1362,6 +1393,7 @@ fun sqwValidateFile(borrow file: MappedFile, policy: SqwReaderPolicy)
         sqwCloseTemporaryWindow(manifestWindow)
         seen_string_release_owned(manifestSha256)
         seen_string_release_owned(directorySha256)
+        header.free()
         return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
             "sqw.manifest_canonical", "manifest",
             "manifest cannot be canonically serialized"))
@@ -1376,6 +1408,7 @@ fun sqwValidateFile(borrow file: MappedFile, policy: SqwReaderPolicy)
         destroyJsonParseResult(parsed, true)
         seen_string_release_owned(manifestSha256)
         seen_string_release_owned(directorySha256)
+        header.free()
         return Err<SqwValidatedMetadata, SqwError>(sqwReaderError(
             "sqw.manifest_canonical", "manifest",
             "manifest bytes are not the exact canonical serialization"))
@@ -1383,10 +1416,11 @@ fun sqwValidateFile(borrow file: MappedFile, policy: SqwReaderPolicy)
     let manifestRoot = sqwValidateManifestRoot(root, policy, header,
         directorySha256)
     if manifestRoot.isErr() {
-        let error = manifestRoot.unwrapErr()
+        let error = sqwTakeError(manifestRoot)
         destroyJsonParseResult(parsed, true)
         seen_string_release_owned(manifestSha256)
         seen_string_release_owned(directorySha256)
+        header.free()
         return Err<SqwValidatedMetadata, SqwError>(error)
     }
     let manifestTensors = manifestRoot.unwrap()
@@ -1394,10 +1428,11 @@ fun sqwValidateFile(borrow file: MappedFile, policy: SqwReaderPolicy)
     let recordsResult = sqwValidateDirectoryAndNames(file, header,
         manifestTensors)
     if recordsResult.isErr() {
-        let error = recordsResult.unwrapErr()
+        let error = sqwTakeError(recordsResult)
         destroyJsonParseResult(parsed, true)
         seen_string_release_owned(manifestSha256)
         seen_string_release_owned(directorySha256)
+        header.free()
         return Err<SqwValidatedMetadata, SqwError>(error)
     }
     let records = recordsResult.unwrap()
@@ -1407,9 +1442,10 @@ fun sqwValidateFile(borrow file: MappedFile, policy: SqwReaderPolicy)
     seen_string_release_owned(manifestSha256)
     seen_string_release_owned(directorySha256)
     if footer.isErr() {
-        let error = footer.unwrapErr()
+        let error = sqwTakeError(footer)
         sqwDestroyRecords(records)
         destroyJsonParseResult(parsed, true)
+        header.free()
         return Err<SqwValidatedMetadata, SqwError>(error)
     }
     footer.releaseContainer()
@@ -1453,7 +1489,7 @@ pub class SqwReader {
         opened.releaseContainer()
         let validated = sqwValidateFile(file, policy)
         if validated.isErr() {
-            let error = validated.unwrapErr()
+            let error = sqwTakeError(validated)
             sqwCloseRejectedFile(file)
             return Err<SqwReader, SqwError>(error)
         }

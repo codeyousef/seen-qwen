@@ -1,5 +1,6 @@
 import seen_qwen.formats.sqw.{SQW_CODEC_BF16, SQW_CODEC_Q8_SYM_G64,
-    SQW_CODEC_Q4_SYM_G64}
+    SQW_CODEC_Q4_SYM_G64, releaseSqwError}
+import memory.allocation.{memoryStats}
 import seen_qwen.formats.sqw_reader.{SQW_COMPONENT_DATA,
     SQW_COMPONENT_METADATA, SQW_COMPONENT_SCALE, SQW_COMPONENT_ZERO,
     SqwReader, SqwReaderPolicy, SqwTensorView}
@@ -68,10 +69,42 @@ fun byteAt(view: SqwTensorView, index: Int) r: Int {
 
 fun requireOpenError(path: String, wholeSha256: String,
     expectedCode: String) r: Void {
-    let opened = SqwReader.open(path, fixturePolicy(wholeSha256, 2))
+    let policy = fixturePolicy(wholeSha256, 2)
+    let opened = SqwReader.open(path, policy)
     require(opened.isErr(), "corrupt SQW fixture must fail closed")
     require(opened.unwrapErr().code == expectedCode,
         "corrupt SQW fixture must preserve its first stable sqw.* code")
+    let error = opened.unwrapErr()
+    releaseSqwError(error)
+    opened.releaseContainer()
+    policy.free()
+}
+
+fun testRejectedOpenCleanup() r: Void {
+    let baseline = memoryStats()
+    var iteration = 0
+    while iteration < 64 {
+        requireOpenError(
+            ".seen/verification/output/qwn_030b/wrong_magic.sqw",
+            "7c40742f45c0451af434f65aae95a9e1eb33db2b53516cfd4b42df98448b1705",
+            "sqw.magic")
+        requireOpenError(
+            ".seen/verification/output/qwn_030b/truncated.sqw",
+            VALID_WHOLE_SHA256, "sqw.truncated")
+        requireOpenError(
+            ".seen/verification/output/qwn_030b/invalid_utf8_name.sqw",
+            "73758c903a93dc09a5e5fab3bd3e87e08be12247fc13d94a8631336a4fbbd716",
+            "sqw.name_utf8")
+        requireOpenError(
+            ".seen/verification/output/qwn_030b/wrong_tensor_digest.sqw",
+            "6d05ebaf55a845b3dc01ea0752c3144721be2e8dba38c534d224f344503ebd36",
+            "sqw.tensor_digest")
+        iteration = iteration + 1
+    }
+    let after = memoryStats()
+    require(after.usedBytes == baseline.usedBytes and
+        after.allocationFailures == baseline.allocationFailures,
+        "repeated rejected SQW opens return allocator usage to baseline")
 }
 
 fun testValidLookupAndOptionalComponents() r: Void {
@@ -343,6 +376,7 @@ fun testPolicyAndCorruptionDiagnostics() r: Void {
 }
 
 fun main() r: Int {
+    testRejectedOpenCleanup()
     testValidLookupAndOptionalComponents()
     testBoundedWindowReleaseAndReuse()
     testQ4OddRowTailPadding()

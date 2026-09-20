@@ -67,6 +67,10 @@ pub class SqwError {
     var message: String
 }
 
+pub fun releaseSqwError(error: SqwError) r: Void {
+    error.free()
+}
+
 pub class SqwHeader {
     var flags: UInt32
     var manifestOffset: UInt64
@@ -125,6 +129,18 @@ pub class SqwFooterEntry {
 
 fun sqwError(code: String, field: String, message: String) r: SqwError {
     return SqwError{ code: code, field: field, message: message }
+}
+
+fun sqwMoveError<T>(result: Result<T, SqwError>) r: SqwError {
+    let error = result.unwrapErr()
+    result.releaseContainer()
+    return error
+}
+
+fun sqwDiscardErrorResult<T>(result: Result<T, SqwError>) r: Void {
+    let error = result.unwrapErr()
+    error.free()
+    result.releaseContainer()
 }
 
 fun sqwRangeAvailable(bytes: Array<Int>, offset: Int, length: Int) r: Bool {
@@ -254,6 +270,9 @@ fun sqwRangeEnd(offset: UInt64, length: UInt64, field: String)
     r: Result<UInt64, SqwError> {
     let result = sqwCheckedAdd(offset, length)
     if result.isErr() {
+        let cause = result.unwrapErr()
+        cause.free()
+        result.releaseContainer()
         return Err<UInt64, SqwError>(sqwError("sqw.range_overflow", field,
             "offset and length overflow"))
     }
@@ -269,6 +288,7 @@ fun sqwSectionOrdered(offset: UInt64, length: UInt64, minimum: UInt64,
     let end = sqwRangeEnd(offset, length, field)
     if end.isErr() { return end }
     if end.unwrap() > fileBytes {
+        end.releaseContainer()
         return Err<UInt64, SqwError>(sqwError("sqw.truncated", field,
             "section extends past the file"))
     }
@@ -348,97 +368,138 @@ pub fun parseSqwHeader(bytes: Array<Int>, fileBytes: UInt64)
     if header.manifestOffset != (SQW_HEADER_BYTES as UInt64) or
         header.manifestLength == (0 as UInt64) or
         header.manifestLength > (16777216 as UInt64) {
+        header.free()
         return Err<SqwHeader, SqwError>(sqwError("sqw.manifest_range",
             "manifest", "manifest placement or size is invalid"))
     }
     let manifestEnd = sqwSectionOrdered(header.manifestOffset,
         header.manifestLength, SQW_HEADER_BYTES as UInt64, fileBytes,
         "manifest")
-    if manifestEnd.isErr() { return Err<SqwHeader, SqwError>(manifestEnd.unwrapErr()) }
+    if manifestEnd.isErr() {
+        let error = sqwMoveError(manifestEnd)
+        header.free()
+        return Err<SqwHeader, SqwError>(error)
+    }
     let manifestEndValue = manifestEnd.unwrap()
     manifestEnd.releaseContainer()
     if not sqwAligned(header.directoryOffset, 64 as UInt64) {
+        header.free()
         return Err<SqwHeader, SqwError>(sqwError("sqw.alignment", "directory",
             "directory offset must be 64-byte aligned"))
     }
     let directoryBytes = sqwCheckedMultiply(tensorCount as UInt64,
         SQW_DIRECTORY_ENTRY_BYTES as UInt64)
     if directoryBytes.isErr() {
-        return Err<SqwHeader, SqwError>(directoryBytes.unwrapErr())
+        let error = sqwMoveError(directoryBytes)
+        header.free()
+        return Err<SqwHeader, SqwError>(error)
     }
     let directoryLength = directoryBytes.unwrap()
     directoryBytes.releaseContainer()
     let directoryEnd = sqwSectionOrdered(header.directoryOffset,
         directoryLength, manifestEndValue, fileBytes, "directory")
-    if directoryEnd.isErr() { return Err<SqwHeader, SqwError>(directoryEnd.unwrapErr()) }
+    if directoryEnd.isErr() {
+        let error = sqwMoveError(directoryEnd)
+        header.free()
+        return Err<SqwHeader, SqwError>(error)
+    }
     let directoryEndValue = directoryEnd.unwrap()
     directoryEnd.releaseContainer()
     if not sqwAligned(header.namesOffset, 64 as UInt64) or
         header.namesLength == (0 as UInt64) or
         header.namesLength > (16777216 as UInt64) {
+        header.free()
         return Err<SqwHeader, SqwError>(sqwError("sqw.names_range", "names",
             "name table placement or size is invalid"))
     }
     let namesEnd = sqwSectionOrdered(header.namesOffset, header.namesLength,
         directoryEndValue, fileBytes, "names")
-    if namesEnd.isErr() { return Err<SqwHeader, SqwError>(namesEnd.unwrapErr()) }
+    if namesEnd.isErr() {
+        let error = sqwMoveError(namesEnd)
+        header.free()
+        return Err<SqwHeader, SqwError>(error)
+    }
     let namesEndValue = namesEnd.unwrap()
     namesEnd.releaseContainer()
     if not sqwAligned(header.payloadOffset, 4096 as UInt64) or
         header.payloadLength == (0 as UInt64) {
+        header.free()
         return Err<SqwHeader, SqwError>(sqwError("sqw.payload_range", "payload",
             "payload placement or size is invalid"))
     }
     let payloadEnd = sqwSectionOrdered(header.payloadOffset,
         header.payloadLength, namesEndValue, fileBytes, "payload")
-    if payloadEnd.isErr() { return Err<SqwHeader, SqwError>(payloadEnd.unwrapErr()) }
+    if payloadEnd.isErr() {
+        let error = sqwMoveError(payloadEnd)
+        header.free()
+        return Err<SqwHeader, SqwError>(error)
+    }
     var footerMinimum = payloadEnd.unwrap()
     payloadEnd.releaseContainer()
     var footerEntries: UInt64 = 4 as UInt64
     if header.evidenceLength == (0 as UInt64) {
         if header.evidenceOffset != (0 as UInt64) {
+            header.free()
             return Err<SqwHeader, SqwError>(sqwError("sqw.evidence_range",
                 "evidence", "absent evidence must use zero offset and length"))
         }
     } else {
         if header.evidenceLength > (67108864 as UInt64) {
+            header.free()
             return Err<SqwHeader, SqwError>(sqwError("sqw.evidence_range",
                 "evidence", "evidence section exceeds the v1.0 bound"))
         }
         let evidenceEnd = sqwSectionOrdered(header.evidenceOffset,
             header.evidenceLength, footerMinimum, fileBytes, "evidence")
         if evidenceEnd.isErr() {
-            return Err<SqwHeader, SqwError>(evidenceEnd.unwrapErr())
+            let error = sqwMoveError(evidenceEnd)
+            header.free()
+            return Err<SqwHeader, SqwError>(error)
         }
         footerMinimum = evidenceEnd.unwrap()
         evidenceEnd.releaseContainer()
         footerEntries = 5 as UInt64
     }
     if not sqwAligned(header.footerOffset, 64 as UInt64) {
+        header.free()
         return Err<SqwHeader, SqwError>(sqwError("sqw.alignment", "footer",
             "footer offset must be 64-byte aligned"))
     }
     let footerEntryBytes = sqwCheckedMultiply(footerEntries,
         SQW_FOOTER_ENTRY_BYTES as UInt64)
     if footerEntryBytes.isErr() {
-        return Err<SqwHeader, SqwError>(footerEntryBytes.unwrapErr())
+        let error = sqwMoveError(footerEntryBytes)
+        header.free()
+        return Err<SqwHeader, SqwError>(error)
     }
     let footerEntryLength = footerEntryBytes.unwrap()
     footerEntryBytes.releaseContainer()
     let expectedFooter = sqwCheckedAdd(SQW_FOOTER_HEADER_BYTES as UInt64,
         footerEntryLength)
-    if expectedFooter.isErr() or header.footerLength != expectedFooter.unwrap() {
+    if expectedFooter.isErr() {
+        let error = sqwMoveError(expectedFooter)
+        header.free()
+        return Err<SqwHeader, SqwError>(error)
+    }
+    if header.footerLength != expectedFooter.unwrap() {
+        expectedFooter.releaseContainer()
+        header.free()
         return Err<SqwHeader, SqwError>(sqwError("sqw.footer_length", "footer",
             "footer checksum table length is not canonical"))
     }
     expectedFooter.releaseContainer()
     let footerEnd = sqwSectionOrdered(header.footerOffset,
         header.footerLength, footerMinimum, fileBytes, "footer")
-    if footerEnd.isErr() { return Err<SqwHeader, SqwError>(footerEnd.unwrapErr()) }
+    if footerEnd.isErr() {
+        let error = sqwMoveError(footerEnd)
+        header.free()
+        return Err<SqwHeader, SqwError>(error)
+    }
     let footerEndValue = footerEnd.unwrap()
     footerEnd.releaseContainer()
     if footerEndValue != fileBytes or header.wholeFileDigestOffset !=
         header.footerOffset + (16 as UInt64) {
+        header.free()
         return Err<SqwHeader, SqwError>(sqwError("sqw.file_extent", "footer",
             "footer must end at EOF and identify its whole-file digest slot"))
     }
@@ -476,10 +537,16 @@ fun sqwComponentInsidePayload(offset: UInt64, length: UInt64,
             "tensor component begins before payload section"))
     }
     let componentEnd = sqwRangeEnd(offset, length, field)
+    if componentEnd.isErr() {
+        return Err<Bool, SqwError>(sqwMoveError(componentEnd))
+    }
     let payloadEnd = sqwRangeEnd(header.payloadOffset, header.payloadLength,
         "payload")
-    if componentEnd.isErr() { return Err<Bool, SqwError>(componentEnd.unwrapErr()) }
-    if payloadEnd.isErr() { return Err<Bool, SqwError>(payloadEnd.unwrapErr()) }
+    if payloadEnd.isErr() {
+        let error = sqwMoveError(payloadEnd)
+        componentEnd.releaseContainer()
+        return Err<Bool, SqwError>(error)
+    }
     let outsidePayload = componentEnd.unwrap() > payloadEnd.unwrap()
     componentEnd.releaseContainer()
     payloadEnd.releaseContainer()
@@ -495,7 +562,7 @@ fun sqwComponentsCanonical(dataOffset: UInt64, dataLength: UInt64,
     zeroLength: UInt64, metadataOffset: UInt64, metadataLength: UInt64)
     r: Result<Bool, SqwError> {
     let dataEnd = sqwRangeEnd(dataOffset, dataLength, "data")
-    if dataEnd.isErr() { return Err<Bool, SqwError>(dataEnd.unwrapErr()) }
+    if dataEnd.isErr() { return Err<Bool, SqwError>(sqwMoveError(dataEnd)) }
     var cursor = dataEnd.unwrap()
     dataEnd.releaseContainer()
     if scaleLength > (0 as UInt64) {
@@ -504,7 +571,9 @@ fun sqwComponentsCanonical(dataOffset: UInt64, dataLength: UInt64,
                 "scale component overlaps or precedes tensor data"))
         }
         let scaleEnd = sqwRangeEnd(scaleOffset, scaleLength, "scale")
-        if scaleEnd.isErr() { return Err<Bool, SqwError>(scaleEnd.unwrapErr()) }
+        if scaleEnd.isErr() {
+            return Err<Bool, SqwError>(sqwMoveError(scaleEnd))
+        }
         cursor = scaleEnd.unwrap()
         scaleEnd.releaseContainer()
     }
@@ -514,7 +583,9 @@ fun sqwComponentsCanonical(dataOffset: UInt64, dataLength: UInt64,
                 "zero component overlaps or precedes earlier components"))
         }
         let zeroEnd = sqwRangeEnd(zeroOffset, zeroLength, "zero")
-        if zeroEnd.isErr() { return Err<Bool, SqwError>(zeroEnd.unwrapErr()) }
+        if zeroEnd.isErr() {
+            return Err<Bool, SqwError>(sqwMoveError(zeroEnd))
+        }
         cursor = zeroEnd.unwrap()
         zeroEnd.releaseContainer()
     }
@@ -525,7 +596,7 @@ fun sqwComponentsCanonical(dataOffset: UInt64, dataLength: UInt64,
         }
         let metadataEnd = sqwRangeEnd(metadataOffset, metadataLength, "metadata")
         if metadataEnd.isErr() {
-            return Err<Bool, SqwError>(metadataEnd.unwrapErr())
+            return Err<Bool, SqwError>(sqwMoveError(metadataEnd))
         }
         metadataEnd.releaseContainer()
     }
@@ -577,8 +648,9 @@ pub fun parseSqwDirectoryEntry(bytes: Array<Int>, header: SqwHeader)
             }
             let product = sqwCheckedMultiply(logical, dimension)
             if product.isErr() {
+                let error = sqwMoveError(product)
                 shape.free()
-                return Err<SqwDirectoryEntry, SqwError>(product.unwrapErr())
+                return Err<SqwDirectoryEntry, SqwError>(error)
             }
             logical = product.unwrap(); shape.push(dimension)
             product.releaseContainer()
@@ -611,33 +683,44 @@ pub fun parseSqwDirectoryEntry(bytes: Array<Int>, header: SqwHeader)
     let dataRange = sqwComponentInsidePayload(dataOffset, dataLength, header,
         "data")
     if dataRange.isErr() {
+        let error = sqwMoveError(dataRange)
         shape.free()
-        return Err<SqwDirectoryEntry, SqwError>(dataRange.unwrapErr())
+        return Err<SqwDirectoryEntry, SqwError>(error)
     }
     let scaleRange = sqwComponentInsidePayload(scaleOffset, scaleLength, header,
         "scale")
     if scaleRange.isErr() {
+        let error = sqwMoveError(scaleRange)
+        dataRange.releaseContainer()
         shape.free()
-        return Err<SqwDirectoryEntry, SqwError>(scaleRange.unwrapErr())
+        return Err<SqwDirectoryEntry, SqwError>(error)
     }
     let zeroRange = sqwComponentInsidePayload(zeroOffset, zeroLength, header,
         "zero")
     if zeroRange.isErr() {
+        let error = sqwMoveError(zeroRange)
+        dataRange.releaseContainer(); scaleRange.releaseContainer()
         shape.free()
-        return Err<SqwDirectoryEntry, SqwError>(zeroRange.unwrapErr())
+        return Err<SqwDirectoryEntry, SqwError>(error)
     }
     let metadataRange = sqwComponentInsidePayload(metadataOffset,
         metadataLength, header, "metadata")
     if metadataRange.isErr() {
+        let error = sqwMoveError(metadataRange)
+        dataRange.releaseContainer(); scaleRange.releaseContainer()
+        zeroRange.releaseContainer()
         shape.free()
-        return Err<SqwDirectoryEntry, SqwError>(metadataRange.unwrapErr())
+        return Err<SqwDirectoryEntry, SqwError>(error)
     }
     let componentOrder = sqwComponentsCanonical(dataOffset, dataLength,
         scaleOffset, scaleLength, zeroOffset, zeroLength, metadataOffset,
         metadataLength)
     if componentOrder.isErr() {
+        let error = sqwMoveError(componentOrder)
+        dataRange.releaseContainer(); scaleRange.releaseContainer()
+        zeroRange.releaseContainer(); metadataRange.releaseContainer()
         shape.free()
-        return Err<SqwDirectoryEntry, SqwError>(componentOrder.unwrapErr())
+        return Err<SqwDirectoryEntry, SqwError>(error)
     }
     dataRange.releaseContainer(); scaleRange.releaseContainer()
     zeroRange.releaseContainer(); metadataRange.releaseContainer()
@@ -670,7 +753,14 @@ pub fun parseSqwDirectoryEntry(bytes: Array<Int>, header: SqwHeader)
         var codecBytes: UInt64 = 2 as UInt64
         if codec == SQW_CODEC_F32 { codecBytes = 4 as UInt64 }
         let expected = sqwCheckedMultiply(logical, codecBytes)
-        if expected.isErr() or dataLength != expected.unwrap() {
+        if expected.isErr() {
+            sqwDiscardErrorResult(expected)
+            shape.free()
+            return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.codec_geometry",
+                "data_length", "plain codec payload size is not canonical"))
+        }
+        if dataLength != expected.unwrap() {
+            expected.releaseContainer()
             shape.free()
             return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.codec_geometry",
                 "data_length", "plain codec payload size is not canonical"))
@@ -686,20 +776,29 @@ pub fun parseSqwDirectoryEntry(bytes: Array<Int>, header: SqwHeader)
         let rows = logical / rowElements
         let groupNumerator = sqwCheckedAdd(rowElements, 63 as UInt64)
         if groupNumerator.isErr() {
+            let error = sqwMoveError(groupNumerator)
             shape.free()
-            return Err<SqwDirectoryEntry, SqwError>(groupNumerator.unwrapErr())
+            return Err<SqwDirectoryEntry, SqwError>(error)
         }
         let groupsPerRow = groupNumerator.unwrap() / (64 as UInt64)
         groupNumerator.releaseContainer()
         let scaleCount = sqwCheckedMultiply(rows, groupsPerRow)
         if scaleCount.isErr() {
+            let error = sqwMoveError(scaleCount)
             shape.free()
-            return Err<SqwDirectoryEntry, SqwError>(scaleCount.unwrapErr())
+            return Err<SqwDirectoryEntry, SqwError>(error)
         }
         let scales = scaleCount.unwrap()
         scaleCount.releaseContainer()
         let expectedScales = sqwCheckedMultiply(scales, 2 as UInt64)
-        if expectedScales.isErr() or scaleLength != expectedScales.unwrap() {
+        if expectedScales.isErr() {
+            sqwDiscardErrorResult(expectedScales)
+            shape.free()
+            return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.codec_geometry",
+                "scale_length", "quantized FP16 scale size is not canonical"))
+        }
+        if scaleLength != expectedScales.unwrap() {
+            expectedScales.releaseContainer()
             shape.free()
             return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.codec_geometry",
                 "scale_length", "quantized FP16 scale size is not canonical"))
@@ -709,14 +808,22 @@ pub fun parseSqwDirectoryEntry(bytes: Array<Int>, header: SqwHeader)
         if codec == SQW_CODEC_Q4_SYM_G64 {
             let nibbleNumerator = sqwCheckedAdd(rowElements, 1 as UInt64)
             if nibbleNumerator.isErr() {
+                let error = sqwMoveError(nibbleNumerator)
                 shape.free()
-                return Err<SqwDirectoryEntry, SqwError>(nibbleNumerator.unwrapErr())
+                return Err<SqwDirectoryEntry, SqwError>(error)
             }
             bytesPerRow = nibbleNumerator.unwrap() / (2 as UInt64)
             nibbleNumerator.releaseContainer()
         }
         let expectedData = sqwCheckedMultiply(rows, bytesPerRow)
-        if expectedData.isErr() or dataLength != expectedData.unwrap() {
+        if expectedData.isErr() {
+            sqwDiscardErrorResult(expectedData)
+            shape.free()
+            return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.codec_geometry",
+                "data_length", "quantized payload size is not canonical"))
+        }
+        if dataLength != expectedData.unwrap() {
+            expectedData.releaseContainer()
             shape.free()
             return Err<SqwDirectoryEntry, SqwError>(sqwError("sqw.codec_geometry",
                 "data_length", "quantized payload size is not canonical"))
