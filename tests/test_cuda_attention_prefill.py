@@ -38,8 +38,8 @@ class CudaAttentionPrefillContractTest(unittest.TestCase):
             "cudaStreamCreate", "cudaMalloc", "cudaFree",
         ):
             self.assertNotIn(forbidden, self.source)
-        self.assertEqual(self.source.count("<<<"), 30)
-        self.assertEqual(self.source.count(", 0, stream>>>"), 28)
+        self.assertEqual(self.source.count("<<<"), 33)
+        self.assertEqual(self.source.count(", 0, stream>>>"), 31)
 
     def test_hardware_corpus_covers_chunking_and_failures(self) -> None:
         for required in (

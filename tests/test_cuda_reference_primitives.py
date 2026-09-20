@@ -30,6 +30,9 @@ class CudaReferencePrimitiveContractTest(unittest.TestCase):
             "seen_qwen_row_sum_f32",
             "seen_qwen_transpose_2d_f32",
             "seen_qwen_copy_f32",
+            "seen_qwen_q4_sym_g64_linear_f32",
+            "seen_qwen_q4_sym_g64_decode_f32",
+            "seen_qwen_q4_sym_g64_embedding_gather_f32",
             "seen_qwen_embedding_gather_f32",
         )
         for symbol in symbols:
@@ -37,6 +40,19 @@ class CudaReferencePrimitiveContractTest(unittest.TestCase):
             self.assertIn(symbol, self.source)
             self.assertIn(symbol, self.wrapper)
         self.assertNotIn("seen_cuda_", self.header.replace("seen_cuda.h", ""))
+
+    def test_full_forward_uses_one_borrowed_request_boundary(self) -> None:
+        for required in (
+            "typedef struct SeenQwenFullForwardRequest",
+            "const SeenQwenQ4TensorView *tensors",
+            "uint64_t cache_capacity",
+            "uint32_t reserved",
+            "const SeenQwenFullForwardRequest *request",
+            '"full-model request is null"',
+            '"full-model request reserved field is nonzero"',
+        ):
+            self.assertIn(required, self.header + self.source)
+        self.assertNotIn("cudaStream_t", self.header)
 
     def test_adapter_only_enqueues_on_the_borrowed_stream(self) -> None:
         for forbidden in (
@@ -49,8 +65,8 @@ class CudaReferencePrimitiveContractTest(unittest.TestCase):
             "seen_cuda_stream_borrow_launch_token",
         ):
             self.assertNotIn(forbidden, self.source)
-        self.assertEqual(self.source.count("<<<"), 30)
-        self.assertEqual(self.source.count(", 0, stream>>>"), 28)
+        self.assertEqual(self.source.count("<<<"), 33)
+        self.assertEqual(self.source.count(", 0, stream>>>"), 31)
         self.assertIn("token->generation == 0", self.source)
         self.assertIn("cudaPointerGetAttributes", self.source)
 

@@ -44,4 +44,5 @@ profile = "release"
 [dependencies]
 
 [native.dependencies]
+seen_qwen_cuda = { path = ".seen/native/lib" }
 seen_cuda = { bundled = true }

@@ -18,6 +18,30 @@ typedef struct SeenQwenCudaBufferView {
     uint64_t byte_length;
 } SeenQwenCudaBufferView;
 
+typedef struct SeenQwenQ4TensorView {
+    SeenQwenCudaBufferView packed;
+    SeenQwenCudaBufferView scales;
+    uint64_t logical_elements;
+    uint64_t row_elements;
+} SeenQwenQ4TensorView;
+
+typedef struct SeenQwenFullForwardRequest {
+    const SeenQwenQ4TensorView *tensors;
+    uint64_t tensor_count;
+    SeenQwenCudaBufferView token_ids;
+    SeenQwenCudaBufferView activation;
+    SeenQwenCudaBufferView scratch;
+    SeenQwenCudaBufferView gdn_state;
+    SeenQwenCudaBufferView convolution_state;
+    SeenQwenCudaBufferView kv_state;
+    SeenQwenCudaBufferView logits;
+    uint64_t token_count;
+    uint64_t start_position;
+    uint64_t cache_capacity;
+    int32_t decode;
+    uint32_t reserved;
+} SeenQwenFullForwardRequest;
+
 SeenCudaStatus seen_qwen_fill_f32(
     const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView output,
     uint64_t count, float value);
@@ -38,6 +62,20 @@ SeenCudaStatus seen_qwen_linear_f32(
     const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
     SeenQwenCudaBufferView weight, SeenQwenCudaBufferView output,
     uint64_t rows, uint64_t input_width, uint64_t output_width);
+SeenCudaStatus seen_qwen_q4_sym_g64_linear_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView packed_weight, SeenQwenCudaBufferView scales,
+    SeenQwenCudaBufferView output, uint64_t rows, uint64_t input_width,
+    uint64_t output_width);
+SeenCudaStatus seen_qwen_q4_sym_g64_decode_f32(
+    const SeenCudaStreamLaunchToken *token,
+    SeenQwenCudaBufferView packed_values, SeenQwenCudaBufferView scales,
+    SeenQwenCudaBufferView output, uint64_t rows, uint64_t row_width);
+SeenCudaStatus seen_qwen_q4_sym_g64_embedding_gather_f32(
+    const SeenCudaStreamLaunchToken *token,
+    SeenQwenCudaBufferView packed_table, SeenQwenCudaBufferView scales,
+    SeenQwenCudaBufferView token_ids, SeenQwenCudaBufferView output,
+    uint64_t token_count, uint64_t vocabulary_size, uint64_t width);
 SeenCudaStatus seen_qwen_gdn_prepare_f32(
     const SeenCudaStreamLaunchToken *token,
     SeenQwenCudaBufferView convolution,
@@ -150,6 +188,9 @@ SeenCudaStatus seen_qwen_gdn_gated_rms_norm_f32(
     SeenQwenCudaBufferView gate, SeenQwenCudaBufferView weight,
     SeenQwenCudaBufferView output, uint64_t rows, uint64_t width,
     float epsilon);
+SeenCudaStatus seen_qwen_full_forward_q4_f32(
+    const SeenCudaStreamLaunchToken *token,
+    const SeenQwenFullForwardRequest *request);
 
 #ifdef __cplusplus
 }

@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd -P -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
 GIT_COMMON_DIR="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)"
 SHARED_ROOT="${GIT_COMMON_DIR%/.git}"
-TOOLCHAIN_ROOT="${SEEN_TOOLCHAIN_ROOT:-$SHARED_ROOT/.seen/toolchains/seen-0.20.10-linux-x64}"
+TOOLCHAIN_ROOT="${SEEN_TOOLCHAIN_ROOT:-$SHARED_ROOT/.seen/toolchains/seen-0.22.2/seen-0.22.2-linux-x64}"
 ARTIFACT_ROOT="$ROOT_DIR/.seen/artifacts/qwn_046a"
 ENGINE_ROOT=${QWN_046A_ENGINE_ROOT:-}
 
@@ -35,12 +35,12 @@ export SEEN_JOBS=1 SEEN_OPT_JOBS=1 SEEN_LOW_MEMORY=1
 export SEEN_MEMORY_LIMIT_BYTES=4294967296 SEEN_MAIN_VMEM_KB=4194304
 export SEEN_OPT_VMEM_KB=2097152
 
-printf '%s  %s\n' 7b71bba386641ce6655f1d7e5a124dbd5828709709af498b9f8b03fa1e7bda30 "$SEEN_BIN" | sha256sum -c -
-printf '%s  %s\n' 3a7f5a172f6e4bc2834547634762107327ed9ac865ba457431f1e804fbd3c8c4 "$SEEN_PACKAGE_CLIENT" | sha256sum -c -
-printf '%s  %s\n' af7209cc9407c3933f969cdcf74164956ede888993eba021e15519ff25fcf53e "$COMPATIBILITY_MANIFEST" | sha256sum -c -
-"$SEEN_BIN" --version | grep -Fx 'Seen 0.20.10'
-"$SEEN_PACKAGE_CLIENT" --expect-version 0.20.10 version | grep -Fx 'seen-pkg 0.20.10 (SEENPKG1)'
-readelf -n "$SEEN_BIN" | grep -F 'Build ID: b10cc4127407b12265b8538fe67d000df0fdd2c2'
+printf '%s  %s\n' dd544d342401a9066d9d76d6849e41972a60968d8ee841c678ba23cd6d82c34e "$SEEN_BIN" | sha256sum -c -
+printf '%s  %s\n' 3c7af4b74da3199d652cd545814731d7695123a67f54817b2ab925055b201f59 "$SEEN_PACKAGE_CLIENT" | sha256sum -c -
+printf '%s  %s\n' cc7deff18b3319b36ed85ceb050e867b3fc36491e928f54e1908c8a260146be6 "$COMPATIBILITY_MANIFEST" | sha256sum -c -
+"$SEEN_BIN" --version | grep -Fx 'Seen 0.22.2'
+"$SEEN_PACKAGE_CLIENT" --expect-version 0.22.2 version | grep -Fx 'seen-pkg 0.22.2 (SEENPKG1)'
+readelf -n "$SEEN_BIN" | grep -F 'Build ID: c9865c92973d525338c018a2c6e84684a7abe8bb'
 (cd "$ENGINE_ROOT" && sha256sum -c checksums.sha256)
 python3 - "$ENGINE_ROOT/engine.json" <<'PY'
 import json, sys
@@ -86,9 +86,9 @@ printf 'QWN-046A hardware: %s\n' "$gpu_identity"
 printf '%s\n' "$gpu_identity" | grep -F 'NVIDIA GeForce RTX 4090'
 printf '%s\n' "$gpu_identity" | grep -F '8.9'
 LD_LIBRARY_PATH="$BUILD_ROOT/seen_cuda_build" \
-    "$ARTIFACT_ROOT/qwn_046a_seen_cuda_fast"
+    "$ARTIFACT_ROOT/qwn_046a_seen_cuda_fast" "$WEIGHTS"
 LD_LIBRARY_PATH="$BUILD_ROOT/seen_cuda_build" \
-    "$ARTIFACT_ROOT/qwn_046a_seen_cuda"
+    "$ARTIFACT_ROOT/qwn_046a_seen_cuda" "$WEIGHTS"
 "$BUILD_ROOT/qwn_046a_cuda_test" "$WEIGHTS"
 /opt/cuda/bin/compute-sanitizer --tool memcheck --leak-check full \
     --error-exitcode 86 --target-processes application-only \
@@ -100,4 +100,4 @@ toolchain_hash_after=$(find "$TOOLCHAIN_ROOT" -type f -print0 | sort -z | xargs 
 [ "$toolchain_hash_after" = "$toolchain_hash_before" ] || exit 126
 outside_objects_after=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o -type f \( -name '*.o' -o -name '*.sig' -o -name '*.a' \) -print0 | sort -z | xargs -0 -r sha256sum | sha256sum | awk '{print $1}')
 [ "$outside_objects_after" = "$outside_objects_before" ] || exit 126
-echo "PASS: QWN-046A v0.20.10 complete Q4 model plan, residency, transfer, memcheck, and cleanup gates"
+echo "PASS: QWN-046A v0.22.2 complete Q4 model plan, residency, transfer, memcheck, and cleanup gates"

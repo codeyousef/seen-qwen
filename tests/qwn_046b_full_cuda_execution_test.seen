@@ -1,0 +1,87 @@
+import env.env.{args}
+import memory.allocation.{memoryStats}
+import seen_qwen.formats.sqw_reader.{SqwReader, SqwReaderPolicy}
+import seen_qwen.runtime.full_model_cuda.{createQwenFullCudaResidency}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun main() r: Int {
+    let arguments = args()
+    require(arguments.length() == 2, "require the exact SQW artifact path")
+    let allocatorBaseline = memoryStats()
+    let policy = SqwReaderPolicy.qwen38(
+        "399b6f25f8cd20ae5d233040005f0ebb82b7e5b396e0eb91214dbe94b828c3be",
+        "f43b83cd9174a91a2ccb2669dc1751c83b9c6730593abe6004bc185855cc78bb",
+        "64d442eb87722f5fbc0a38a780d07e011dc51554956f1c6f2cb1e04611a2d6c5",
+        "0d9bd0167c58831a2016374c44e835db5c8f4d22a0f565ac55715ab57c6840f0",
+        4)
+    let opened = SqwReader.open(arguments[1], policy)
+    require(opened.isOkay(), "open the exact validated complete-model SQW")
+    let reader = opened.unwrap()
+    opened.releaseContainer(); policy.free()
+    let made = createQwenFullCudaResidency(0 as Int32, 128 as UInt64)
+    require(made.isOkay(), "create the fixed complete-model residency")
+    let residency = made.unwrap()
+    made.releaseContainer()
+    let loaded = residency.loadValidatedQ4Weights(reader)
+    require(loaded.isOkay() and
+        residency.executionTensors.length() == 1027,
+        "bind the fixed 64-layer execution tensor map")
+    loaded.releaseContainer()
+
+    let prompt = Array<Int32>()
+    prompt.push(248045 as Int32); prompt.push(846 as Int32)
+    prompt.push(198 as Int32); prompt.push(248046 as Int32)
+    prompt.push(198 as Int32); prompt.push(248045 as Int32)
+    prompt.push(74455 as Int32); prompt.push(198 as Int32)
+    prompt.push(248068 as Int32); prompt.push(271 as Int32)
+    prompt.push(248069 as Int32); prompt.push(271 as Int32)
+    let sampled = residency.executeTokens(prompt, false)
+    require(sampled.isOkay(), "execute the complete-model CUDA forward")
+    let sampledToken = sampled.unwrap()
+    sampled.releaseContainer()
+    let sampledTokenText = (sampledToken as Int64).toString()
+    let sampledTokenLine = "QWN-046B sampled token: " + sampledTokenText
+    println(sampledTokenLine)
+    seen_string_release_owned(sampledTokenLine)
+    seen_string_release_owned(sampledTokenText)
+    require(sampledToken == (109430 as Int32) and
+        residency.position == (12 as UInt64),
+        "match the independent sealed-Q4 CPU differential token")
+    prompt.free()
+
+    let readerClosed = reader.close()
+    require(readerClosed.isOkay(), "close the complete SQW reader")
+    readerClosed.releaseContainer(); reader.free()
+    let residencyClosed = residency.close()
+    require(residencyClosed.isOkay(), "close the complete-model executor")
+    residencyClosed.releaseContainer()
+    let closedAgain = residency.close()
+    require(closedAgain.isOkay() and closedAgain.unwrap() == false,
+        "close the executor deterministically and idempotently")
+    closedAgain.releaseContainer(); residency.free()
+    let allocatorAfter = memoryStats()
+    let allocatorBaselineText = allocatorBaseline.usedBytes.toString()
+    let allocatorAfterText = allocatorAfter.usedBytes.toString()
+    let allocatorPrefix = "QWN-046B allocator baseline/after: " +
+        allocatorBaselineText
+    let allocatorLine = allocatorPrefix + "/" + allocatorAfterText
+    println(allocatorLine)
+    seen_string_release_owned(allocatorLine)
+    seen_string_release_owned(allocatorPrefix)
+    seen_string_release_owned(allocatorAfterText)
+    seen_string_release_owned(allocatorBaselineText)
+    require(allocatorAfter.usedBytes == allocatorBaseline.usedBytes and
+        allocatorAfter.allocationFailures ==
+            allocatorBaseline.allocationFailures,
+        "return Seen allocator usage to the pre-execution baseline")
+    arguments.free()
+    println("PASS: QWN-046B complete Q4 CUDA minimal-prompt execution")
+    return 0
+}
+
+main()

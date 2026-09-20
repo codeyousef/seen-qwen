@@ -298,6 +298,23 @@ extern "C" fun seen_qwen_linear_f32(token: *const CudaStreamLaunchToken,
     input: QwenCudaBufferView, weight: QwenCudaBufferView,
     output: QwenCudaBufferView, rows: UInt64, inputWidth: UInt64,
     outputWidth: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_q4_sym_g64_linear_f32(
+    token: *const CudaStreamLaunchToken,
+    input: QwenCudaBufferView, packedWeight: QwenCudaBufferView,
+    scales: QwenCudaBufferView, output: QwenCudaBufferView,
+    rows: UInt64, inputWidth: UInt64,
+    outputWidth: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_q4_sym_g64_decode_f32(
+    token: *const CudaStreamLaunchToken,
+    packedValues: QwenCudaBufferView, scales: QwenCudaBufferView,
+    output: QwenCudaBufferView, rows: UInt64,
+    rowWidth: UInt64) r: CudaNativeStatus
+extern "C" fun seen_qwen_q4_sym_g64_embedding_gather_f32(
+    token: *const CudaStreamLaunchToken,
+    packedTable: QwenCudaBufferView, scales: QwenCudaBufferView,
+    tokenIds: QwenCudaBufferView, output: QwenCudaBufferView,
+    tokenCount: UInt64, vocabularySize: UInt64,
+    width: UInt64) r: CudaNativeStatus
 extern "C" fun seen_qwen_gdn_prepare_f32(
     token: *const CudaStreamLaunchToken,
     convolution: QwenCudaBufferView, query: QwenCudaBufferView,

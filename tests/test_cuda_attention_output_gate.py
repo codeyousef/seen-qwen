@@ -21,8 +21,8 @@ class CudaAttentionOutputGateContractTest(unittest.TestCase):
         self.assertIn("tokenCount > limit / queryHeads", self.seen)
         self.assertIn("rows > limit / headDim", self.seen)
         self.assertIn("seen_qwen_sigmoid_gate_f32(token, attended, gate, output", self.seen)
-        self.assertEqual(self.source.count("<<<"), 30)
-        self.assertEqual(self.source.count(", 0, stream>>>"), 28)
+        self.assertEqual(self.source.count("<<<"), 33)
+        self.assertEqual(self.source.count(", 0, stream>>>"), 31)
 
     def test_contract_preserves_the_projection_boundary(self) -> None:
         for required in (

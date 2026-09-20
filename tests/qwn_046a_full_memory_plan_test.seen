@@ -1,6 +1,7 @@
 import seen_qwen.runtime.full_model_memory.{QWEN_FULL_Q4_WEIGHT_BYTES,
     createQwenFullMemoryPlan}
 import seen_qwen.runtime.engine.{QWEN_FALLBACK_PROHIBITED,
+    QWEN_PLAN_ATTENTION_PREFILL, QWEN_PLAN_GDN_PREFILL,
     createQwenFullExecutionPlan}
 
 fun require(condition: Bool, message: String) r: Void {
@@ -50,12 +51,29 @@ fun main() r: Int {
         0 as Int32, 128 as UInt64, 8 as UInt64, true)
     require(madeExecution.isOkay(), "construct the complete 64-layer plan")
     let execution = madeExecution.unwrap()
+    var attentionLayers = 0
+    var gdnLayers = 0
+    var layer = 0
+    while layer < 64 {
+        let hybrid = execution.prefillSteps[2 + layer * 6]
+        if hybrid.kind == QWEN_PLAN_ATTENTION_PREFILL {
+            attentionLayers = attentionLayers + 1
+        } else if hybrid.kind == QWEN_PLAN_GDN_PREFILL {
+            gdnLayers = gdnLayers + 1
+        }
+        layer = layer + 1
+    }
     require(execution.modelLayers == 64 and
         execution.prefillSteps.length() == 389 and
         execution.decodeSteps.length() == 389 and
         execution.fallbackPolicy == QWEN_FALLBACK_PROHIBITED and
         execution.prefillSteps[2].kind != execution.prefillSteps[20].kind and
         execution.prefillSteps[20].layer == (3 as Int32) and
+        execution.prefillSteps[68].layer == (11 as Int32) and
+        execution.prefillSteps[68].kind == QWEN_PLAN_ATTENTION_PREFILL and
+        execution.prefillSteps[380].layer == (63 as Int32) and
+        execution.prefillSteps[380].kind == QWEN_PLAN_ATTENTION_PREFILL and
+        attentionLayers == 16 and gdnLayers == 48 and
         execution.prefillSteps[388].kind == (12 as Int32),
         "retain the exact 3:1 hybrid schedule and MTP terminal step")
     execution.close(); execution.close()

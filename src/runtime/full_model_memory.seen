@@ -61,11 +61,14 @@ fun qwenMemoryAdd(total: UInt64, value: UInt64, field: String)
     r: Result<UInt64, QwenFullMemoryError> {
     let added = checkedAdd64(total, value)
     if added.isNone() {
+        added.free()
         return Err<UInt64, QwenFullMemoryError>(qwenFullMemoryError(
             "qwen.memory.overflow", field,
             "checked 64-bit memory geometry overflowed"))
     }
-    return Ok<UInt64, QwenFullMemoryError>(added.unwrap())
+    let sum = added.unwrap()
+    added.free()
+    return Ok<UInt64, QwenFullMemoryError>(sum)
 }
 
 pub fun createQwenFullMemoryPlan(deviceOrdinal: Int32, deviceBytes: UInt64,
@@ -90,51 +93,102 @@ pub fun createQwenFullMemoryPlan(deviceOrdinal: Int32, deviceBytes: UInt64,
 
     var next = checkedMultiply64(48 as UInt64, 48 as UInt64)
     if next.isNone() {
+        next.free()
         return Err<QwenFullMemoryPlan, QwenFullMemoryError>(qwenFullMemoryError(
             "qwen.memory.overflow", "gdn_state", "GDN state overflowed"))
     }
-    next = checkedMultiply64(next.unwrap(), 128 as UInt64)
-    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
-        qwenFullMemoryError("qwen.memory.overflow", "gdn_state",
-            "GDN state overflowed")) }
-    next = checkedMultiply64(next.unwrap(), 128 as UInt64)
-    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
-        qwenFullMemoryError("qwen.memory.overflow", "gdn_state",
-            "GDN state overflowed")) }
-    next = checkedMultiply64(next.unwrap(), 4 as UInt64)
-    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
-        qwenFullMemoryError("qwen.memory.overflow", "gdn_state",
-            "GDN state overflowed")) }
+    let gdnHeadElements = next.unwrap(); next.free()
+    next = checkedMultiply64(gdnHeadElements, 128 as UInt64)
+    if next.isNone() {
+        next.free()
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+            qwenFullMemoryError("qwen.memory.overflow", "gdn_state",
+                "GDN state overflowed"))
+    }
+    let gdnLayerElements = next.unwrap(); next.free()
+    next = checkedMultiply64(gdnLayerElements, 128 as UInt64)
+    if next.isNone() {
+        next.free()
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+            qwenFullMemoryError("qwen.memory.overflow", "gdn_state",
+                "GDN state overflowed"))
+    }
+    let gdnElements = next.unwrap(); next.free()
+    next = checkedMultiply64(gdnElements, 4 as UInt64)
+    if next.isNone() {
+        next.free()
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+            qwenFullMemoryError("qwen.memory.overflow", "gdn_state",
+                "GDN state overflowed"))
+    }
     let gdnStateBytes = next.unwrap()
+    next.free()
     let convolutionStateBytes = 5898240 as UInt64
 
     next = checkedMultiply64(16 as UInt64, 4 as UInt64)
-    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
-        qwenFullMemoryError("qwen.memory.overflow", "kv", "KV size overflowed")) }
-    next = checkedMultiply64(next.unwrap(), 256 as UInt64)
-    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
-        qwenFullMemoryError("qwen.memory.overflow", "kv", "KV size overflowed")) }
-    next = checkedMultiply64(next.unwrap(), 2 as UInt64)
-    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
-        qwenFullMemoryError("qwen.memory.overflow", "kv", "KV size overflowed")) }
-    next = checkedMultiply64(next.unwrap(), 2 as UInt64)
-    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
-        qwenFullMemoryError("qwen.memory.overflow", "kv", "KV size overflowed")) }
-    next = checkedMultiply64(next.unwrap(), contextTokens)
-    if next.isNone() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
-        qwenFullMemoryError("qwen.memory.overflow", "kv", "KV size overflowed")) }
+    if next.isNone() {
+        next.free()
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+            qwenFullMemoryError("qwen.memory.overflow", "kv",
+                "KV size overflowed"))
+    }
+    let kvHeadElements = next.unwrap(); next.free()
+    next = checkedMultiply64(kvHeadElements, 256 as UInt64)
+    if next.isNone() {
+        next.free()
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+            qwenFullMemoryError("qwen.memory.overflow", "kv",
+                "KV size overflowed"))
+    }
+    let kvWidthElements = next.unwrap(); next.free()
+    next = checkedMultiply64(kvWidthElements, 2 as UInt64)
+    if next.isNone() {
+        next.free()
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+            qwenFullMemoryError("qwen.memory.overflow", "kv",
+                "KV size overflowed"))
+    }
+    let kvPairElements = next.unwrap(); next.free()
+    next = checkedMultiply64(kvPairElements, 2 as UInt64)
+    if next.isNone() {
+        next.free()
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+            qwenFullMemoryError("qwen.memory.overflow", "kv",
+                "KV size overflowed"))
+    }
+    let kvLayerElements = next.unwrap(); next.free()
+    next = checkedMultiply64(kvLayerElements, contextTokens)
+    if next.isNone() {
+        next.free()
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(
+            qwenFullMemoryError("qwen.memory.overflow", "kv",
+                "KV size overflowed"))
+    }
     let kvBytes = next.unwrap()
+    next.free()
 
     var total = weightBytes
     var added = qwenMemoryAdd(total, gdnStateBytes, "gdn_state")
-    if added.isErr() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(added.unwrapErr()) }
+    if added.isErr() {
+        let error = added.unwrapErr(); added.releaseContainer()
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(error)
+    }
     total = added.unwrap()
+    added.releaseContainer()
     added = qwenMemoryAdd(total, convolutionStateBytes, "convolution_state")
-    if added.isErr() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(added.unwrapErr()) }
+    if added.isErr() {
+        let error = added.unwrapErr(); added.releaseContainer()
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(error)
+    }
     total = added.unwrap()
+    added.releaseContainer()
     added = qwenMemoryAdd(total, kvBytes, "kv")
-    if added.isErr() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(added.unwrapErr()) }
+    if added.isErr() {
+        let error = added.unwrapErr(); added.releaseContainer()
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(error)
+    }
     total = added.unwrap()
+    added.releaseContainer()
     let fixed = Array<UInt64>()
     fixed.push(QWEN_FULL_ACTIVATION_BYTES); fixed.push(QWEN_FULL_LOGITS_BYTES)
     fixed.push(QWEN_FULL_CUBLASLT_WORKSPACE_BYTES)
@@ -145,9 +199,10 @@ pub fun createQwenFullMemoryPlan(deviceOrdinal: Int32, deviceBytes: UInt64,
         added = qwenMemoryAdd(total, fixed[index], "workspace")
         if added.isErr() {
             fixed.free()
-            return Err<QwenFullMemoryPlan, QwenFullMemoryError>(added.unwrapErr())
+            let error = added.unwrapErr(); added.releaseContainer()
+            return Err<QwenFullMemoryPlan, QwenFullMemoryError>(error)
         }
-        total = added.unwrap(); index = index + 1
+        total = added.unwrap(); added.releaseContainer(); index = index + 1
     }
     fixed.free()
     var reserve = (deviceBytes / (100 as UInt64)) * (3 as UInt64)
@@ -155,8 +210,12 @@ pub fun createQwenFullMemoryPlan(deviceOrdinal: Int32, deviceBytes: UInt64,
         reserve = QWEN_FULL_MINIMUM_RESERVE_BYTES
     }
     added = qwenMemoryAdd(total, reserve, "safety_reserve")
-    if added.isErr() { return Err<QwenFullMemoryPlan, QwenFullMemoryError>(added.unwrapErr()) }
+    if added.isErr() {
+        let error = added.unwrapErr(); added.releaseContainer()
+        return Err<QwenFullMemoryPlan, QwenFullMemoryError>(error)
+    }
     let admitted = added.unwrap()
+    added.releaseContainer()
     if admitted > deviceBytes {
         return Err<QwenFullMemoryPlan, QwenFullMemoryError>(qwenFullMemoryError(
             "qwen.memory.capacity", "device_bytes",
