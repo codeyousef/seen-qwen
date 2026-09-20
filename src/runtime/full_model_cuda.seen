@@ -1,8 +1,15 @@
 /// QWN-046A Seen-owned complete-model CUDA residency.
 
-import accelerator.cuda.mod.{CudaAllocation, CudaDevice, CudaStream}
-import accelerator.cuda.error.{CudaError}
+import accelerator.cuda.mod.{CudaAllocation, CudaDevice, CudaStream,
+    CudaStreamLaunchToken}
+import accelerator.cuda.error.{CudaNativeStatus, CudaError, cudaSucceeded,
+    cudaError}
 import core.result.{Result}
+import seen_qwen.formats.sqw.{SQW_CODEC_Q4_SYM_G64}
+import seen_qwen.formats.sqw_reader.{SQW_COMPONENT_DATA,
+    SQW_COMPONENT_SCALE, SQW_QWEN38_TENSOR_COUNT, SqwReader}
+import seen_qwen.backend.cuda.reference_primitives.{
+    QWEN_CUDA_REFERENCE_ABI_VERSION, QwenCudaBufferView}
 import seen_qwen.runtime.full_model_memory.{QwenFullMemoryPlan,
     QWEN_FULL_Q4_WEIGHT_BYTES, createQwenFullMemoryPlan}
 
@@ -15,6 +22,193 @@ fun qwenFullCudaError(deviceOrdinal: Int32, operation: String,
         sourceColumn: 0 }
 }
 
+extern "C" fun seen_string_clone_owned(value: String) r: String
+extern "C" fun seen_string_release_owned(value: String) r: Void
+extern "C" fun seen_result_release_boxed_string_ok(value: *Void) r: Void
+extern "C" fun seen_cuda_memcpy_async(destination: *Void,
+    source: *const Void, bytes: UInt64, kind: Int32,
+    stream: UInt64) r: CudaNativeStatus
+extern "C" fun seen_cuda_memset_async(destination: *Void, value: Int32,
+    bytes: UInt64, stream: UInt64) r: CudaNativeStatus
+
+@repr(C)
+@trivially_copyable
+pub class QwenFullQ4TensorView {
+    var packed: QwenCudaBufferView
+    var scales: QwenCudaBufferView
+    var logicalElements: UInt64
+    var rowElements: UInt64
+}
+
+@repr(C)
+@trivially_copyable
+pub class QwenFullForwardRequest {
+    var tensors: *const QwenFullQ4TensorView
+    var tensorCount: UInt64
+    var tokenIds: QwenCudaBufferView
+    var activation: QwenCudaBufferView
+    var scratch: QwenCudaBufferView
+    var gdnState: QwenCudaBufferView
+    var convolutionState: QwenCudaBufferView
+    var kvState: QwenCudaBufferView
+    var logits: QwenCudaBufferView
+    var tokenCount: UInt64
+    var startPosition: UInt64
+    var cacheCapacity: UInt64
+    var decode: Int32
+    var reserved: UInt32
+}
+
+extern "C" fun seen_qwen_full_forward_q4_f32(
+    token: *const CudaStreamLaunchToken,
+    request: *const QwenFullForwardRequest) r: CudaNativeStatus
+
+pub class QwenFullResidentTensor {
+    var name: String
+    var packed: QwenCudaBufferView
+    var scales: QwenCudaBufferView
+    var logicalElements: UInt64
+    var rowElements: UInt64
+}
+
+fun qwenFullQ4View(tensor: QwenFullResidentTensor)
+    r: QwenFullQ4TensorView {
+    return QwenFullQ4TensorView{ packed: tensor.packed,
+        scales: tensor.scales, logicalElements: tensor.logicalElements,
+        rowElements: tensor.rowElements }
+}
+
+fun qwenFullEmptyQ4View(deviceOrdinal: Int32)
+    r: QwenFullQ4TensorView {
+    let empty = QwenCudaBufferView{
+        abiVersion: QWEN_CUDA_REFERENCE_ABI_VERSION,
+        deviceOrdinal: deviceOrdinal, address: 0 as UInt64,
+        byteLength: 0 as UInt64 }
+    return QwenFullQ4TensorView{ packed: empty, scales: empty,
+        logicalElements: 0 as UInt64, rowElements: 0 as UInt64 }
+}
+
+fun qwenFullAppendNamedTensor(tensors: Array<QwenFullResidentTensor>,
+    output: Array<QwenFullQ4TensorView>, name: String) r: Bool {
+    var index = 0
+    while index < tensors.length() {
+        if tensors[index].name == name {
+            output.push(qwenFullQ4View(tensors[index]))
+            return true
+        }
+        index = index + 1
+    }
+    return false
+}
+
+fun qwenFullLayerTensorName(layer: Int, suffix: String) r: String {
+    let layerText = layer.toString()
+    let prefix = "model.language_model.layers." + layerText
+    seen_string_release_owned(layerText)
+    let name = prefix + suffix
+    seen_string_release_owned(prefix)
+    return name
+}
+
+fun qwenFullAppendLayerTensor(tensors: Array<QwenFullResidentTensor>,
+    output: Array<QwenFullQ4TensorView>, layer: Int, suffix: String) r: Bool {
+    let name = qwenFullLayerTensorName(layer, suffix)
+    let appended = qwenFullAppendNamedTensor(tensors, output, name)
+    seen_string_release_owned(name)
+    return appended
+}
+
+fun qwenFullBuildExecutionTensorMap(
+    tensors: Array<QwenFullResidentTensor>, deviceOrdinal: Int32)
+    r: Result<Array<QwenFullQ4TensorView>, CudaError> {
+    let output = Array<QwenFullQ4TensorView>()
+    if not qwenFullAppendNamedTensor(tensors, output, "lm_head.weight") or
+        not qwenFullAppendNamedTensor(tensors, output,
+            "model.language_model.embed_tokens.weight") {
+        output.free()
+        return Err<Array<QwenFullQ4TensorView>, CudaError>(qwenFullCudaError(
+            deviceOrdinal, "qwen.full.bind", "required terminal tensor absent"))
+    }
+    var layer = 0
+    while layer < 64 {
+        var okay = qwenFullAppendLayerTensor(tensors, output, layer,
+            ".input_layernorm.weight") and
+            qwenFullAppendLayerTensor(tensors, output, layer,
+                ".post_attention_layernorm.weight")
+        if ((layer + 1) % 4) == 0 {
+            okay = okay and qwenFullAppendLayerTensor(tensors, output, layer,
+                ".self_attn.q_proj.weight") and
+                qwenFullAppendLayerTensor(tensors, output, layer,
+                    ".self_attn.k_proj.weight") and
+                qwenFullAppendLayerTensor(tensors, output, layer,
+                    ".self_attn.v_proj.weight") and
+                qwenFullAppendLayerTensor(tensors, output, layer,
+                    ".self_attn.q_norm.weight") and
+                qwenFullAppendLayerTensor(tensors, output, layer,
+                    ".self_attn.k_norm.weight") and
+                qwenFullAppendLayerTensor(tensors, output, layer,
+                    ".self_attn.o_proj.weight")
+            var unused = 0
+            while unused < 5 {
+                output.push(qwenFullEmptyQ4View(deviceOrdinal))
+                unused = unused + 1
+            }
+        } else {
+            okay = okay and qwenFullAppendLayerTensor(tensors, output, layer,
+                ".linear_attn.in_proj_qkv.weight") and
+                qwenFullAppendLayerTensor(tensors, output, layer,
+                    ".linear_attn.in_proj_a.weight") and
+                qwenFullAppendLayerTensor(tensors, output, layer,
+                    ".linear_attn.in_proj_b.weight") and
+                qwenFullAppendLayerTensor(tensors, output, layer,
+                    ".linear_attn.in_proj_z.weight") and
+                qwenFullAppendLayerTensor(tensors, output, layer,
+                    ".linear_attn.conv1d.weight") and
+                qwenFullAppendLayerTensor(tensors, output, layer,
+                    ".linear_attn.A_log") and
+                qwenFullAppendLayerTensor(tensors, output, layer,
+                    ".linear_attn.dt_bias") and
+                qwenFullAppendLayerTensor(tensors, output, layer,
+                    ".linear_attn.norm.weight") and
+                qwenFullAppendLayerTensor(tensors, output, layer,
+                    ".linear_attn.out_proj.weight")
+            output.push(qwenFullEmptyQ4View(deviceOrdinal))
+            output.push(qwenFullEmptyQ4View(deviceOrdinal))
+        }
+        okay = okay and qwenFullAppendLayerTensor(tensors, output, layer,
+            ".mlp.gate_proj.weight") and
+            qwenFullAppendLayerTensor(tensors, output, layer,
+                ".mlp.up_proj.weight") and
+            qwenFullAppendLayerTensor(tensors, output, layer,
+                ".mlp.down_proj.weight")
+        if not okay {
+            output.free()
+            return Err<Array<QwenFullQ4TensorView>, CudaError>(
+                qwenFullCudaError(deviceOrdinal, "qwen.full.bind",
+                    "fixed 64-layer tensor map is incomplete"))
+        }
+        layer = layer + 1
+    }
+    if not qwenFullAppendNamedTensor(tensors, output,
+        "model.language_model.norm.weight") or output.length() != 1027 {
+        output.free()
+        return Err<Array<QwenFullQ4TensorView>, CudaError>(qwenFullCudaError(
+            deviceOrdinal, "qwen.full.bind",
+            "fixed execution tensor count is not canonical"))
+    }
+    return Ok<Array<QwenFullQ4TensorView>, CudaError>(output)
+}
+
+fun closeQwenFullTensorMap(tensors: Array<QwenFullResidentTensor>) r: Void {
+    var index = 0
+    while index < tensors.length() {
+        seen_string_release_owned(tensors[index].name)
+        tensors[index].free()
+        index = index + 1
+    }
+    tensors.free()
+}
+
 fun closeQwenFullAllocations(allocations: Array<CudaAllocation>) r: Bool {
     var okay = true
     var index = allocations.length()
@@ -22,6 +216,10 @@ fun closeQwenFullAllocations(allocations: Array<CudaAllocation>) r: Bool {
         index = index - 1
         let closed = allocations[index].close()
         if closed.isErr() { okay = false }
+        else {
+            closed.releaseContainer()
+            allocations[index].free()
+        }
     }
     allocations.free()
     return okay
@@ -35,14 +233,21 @@ pub class QwenFullCudaResidency {
     var plan: QwenFullMemoryPlan
     var allocations: Array<CudaAllocation>
     var stream: CudaStream
+    var tensors: Array<QwenFullResidentTensor>
+    var executionTensors: Array<QwenFullQ4TensorView>
     var freeBytesBefore: UInt64
+    var position: UInt64
+    var cancelled: Bool
     var closed: Bool
 
     fun close() r: Result<Bool, CudaError> {
         if this.closed { return Ok<Bool, CudaError>(false) }
+        this.executionTensors.free()
+        closeQwenFullTensorMap(this.tensors)
         let allocationsClosed = closeQwenFullAllocations(this.allocations)
         let streamClosed = this.stream.close()
-        this.freeBytesBefore = 0 as UInt64; this.closed = true
+        this.freeBytesBefore = 0 as UInt64; this.position = 0 as UInt64
+        this.cancelled = true; this.closed = true
         if not allocationsClosed {
             return Err<Bool, CudaError>(qwenFullCudaError(
                 this.plan.deviceOrdinal, "qwen.full.close",
@@ -51,7 +256,273 @@ pub class QwenFullCudaResidency {
         if streamClosed.isErr() {
             return Err<Bool, CudaError>(streamClosed.unwrapErr())
         }
+        streamClosed.releaseContainer()
+        this.stream.free()
+        this.plan.free()
         return Ok<Bool, CudaError>(true)
+    }
+
+    fun tensor(name: String) r: Result<QwenFullResidentTensor, CudaError> {
+        if this.closed {
+            return Err<QwenFullResidentTensor, CudaError>(qwenFullCudaError(
+                this.plan.deviceOrdinal, "qwen.full.tensor",
+                "resident tensor map is closed"))
+        }
+        var index = 0
+        while index < this.tensors.length() {
+            if this.tensors[index].name == name {
+                return Ok<QwenFullResidentTensor, CudaError>(
+                    this.tensors[index])
+            }
+            index = index + 1
+        }
+        return Err<QwenFullResidentTensor, CudaError>(qwenFullCudaError(
+            this.plan.deviceOrdinal, "qwen.full.tensor",
+            "required tensor is absent from the resident map"))
+    }
+
+    fun loadValidatedQ4Weights(borrow reader: SqwReader)
+        r: Result<Bool, CudaError> {
+        if this.closed or this.tensors.length() != 0 or
+            this.executionTensors.length() != 0 or
+            reader.length() != SQW_QWEN38_TENSOR_COUNT as Int {
+            return Err<Bool, CudaError>(qwenFullCudaError(
+                this.plan.deviceOrdinal, "qwen.full.load",
+                "weight load requires an empty live residency and exact reader"))
+        }
+        let weights = this.allocations[0]
+        var destination: UInt64 = 0 as UInt64
+        var index = 0
+        while index < reader.length() {
+            let named = reader.nameAt(index)
+            let logical = reader.logicalElementsAt(index)
+            let row = reader.rowElementsAt(index)
+            let data = reader.componentAt(index, SQW_COMPONENT_DATA)
+            let scale = reader.componentAt(index, SQW_COMPONENT_SCALE)
+            if named.isErr() or logical.isErr() or row.isErr() or
+                data.isErr() or scale.isErr() or
+                data.unwrap().codec != SQW_CODEC_Q4_SYM_G64 or
+                scale.unwrap().codec != SQW_CODEC_Q4_SYM_G64 or
+                data.unwrap().byteLength > weights.byteLength or
+                destination > weights.byteLength - data.unwrap().byteLength or
+                scale.unwrap().byteLength > weights.byteLength - destination -
+                    data.unwrap().byteLength or
+                destination + data.unwrap().byteLength > weights.byteLength -
+                    scale.unwrap().byteLength {
+                closeQwenFullTensorMap(this.tensors)
+                this.tensors = Array<QwenFullResidentTensor>()
+                return Err<Bool, CudaError>(qwenFullCudaError(
+                    this.plan.deviceOrdinal, "qwen.full.load",
+                    "validated SQW tensor geometry cannot enter residency"))
+            }
+            let packedAddress = weights.data as UInt64 + destination
+            var status = seen_cuda_memcpy_async(packedAddress as *Void,
+                data.unwrap().data as *const Void, data.unwrap().byteLength,
+                1 as Int32, this.stream.handle)
+            if not cudaSucceeded(status) {
+                closeQwenFullTensorMap(this.tensors)
+                this.tensors = Array<QwenFullResidentTensor>()
+                return Err<Bool, CudaError>(cudaError(status))
+            }
+            destination = destination + data.unwrap().byteLength
+            let scaleAddress = weights.data as UInt64 + destination
+            status = seen_cuda_memcpy_async(scaleAddress as *Void,
+                scale.unwrap().data as *const Void, scale.unwrap().byteLength,
+                1 as Int32, this.stream.handle)
+            if not cudaSucceeded(status) {
+                closeQwenFullTensorMap(this.tensors)
+                this.tensors = Array<QwenFullResidentTensor>()
+                return Err<Bool, CudaError>(cudaError(status))
+            }
+            let synchronized = this.stream.synchronize()
+            if synchronized.isErr() {
+                closeQwenFullTensorMap(this.tensors)
+                this.tensors = Array<QwenFullResidentTensor>()
+                return Err<Bool, CudaError>(synchronized.unwrapErr())
+            }
+            this.tensors.push(QwenFullResidentTensor{
+                name: seen_string_clone_owned(named.unwrap()),
+                packed: QwenCudaBufferView{
+                    abiVersion: QWEN_CUDA_REFERENCE_ABI_VERSION,
+                    deviceOrdinal: this.plan.deviceOrdinal,
+                    address: packedAddress,
+                    byteLength: data.unwrap().byteLength },
+                scales: QwenCudaBufferView{
+                    abiVersion: QWEN_CUDA_REFERENCE_ABI_VERSION,
+                    deviceOrdinal: this.plan.deviceOrdinal,
+                    address: scaleAddress,
+                    byteLength: scale.unwrap().byteLength },
+                logicalElements: logical.unwrap(), rowElements: row.unwrap() })
+            destination = destination + scale.unwrap().byteLength
+            let releasedData = reader.releaseComponent(named.unwrap(),
+                SQW_COMPONENT_DATA)
+            let releasedScale = reader.releaseComponent(named.unwrap(),
+                SQW_COMPONENT_SCALE)
+            if releasedData.isErr() or releasedScale.isErr() {
+                closeQwenFullTensorMap(this.tensors)
+                this.tensors = Array<QwenFullResidentTensor>()
+                return Err<Bool, CudaError>(qwenFullCudaError(
+                    this.plan.deviceOrdinal, "qwen.full.load",
+                    "SQW component cleanup failed after ordered transfer"))
+            }
+            seen_result_release_boxed_string_ok(named as *Void)
+            named.releaseContainer(); logical.releaseContainer()
+            row.releaseContainer(); data.releaseContainer()
+            scale.releaseContainer(); synchronized.releaseContainer()
+            releasedData.releaseContainer(); releasedScale.releaseContainer()
+            index = index + 1
+        }
+        if destination != this.plan.weightBytes {
+            closeQwenFullTensorMap(this.tensors)
+            this.tensors = Array<QwenFullResidentTensor>()
+            return Err<Bool, CudaError>(qwenFullCudaError(
+                this.plan.deviceOrdinal, "qwen.full.load",
+                "resident Q4 byte total differs from the exact memory plan"))
+        }
+        let bound = qwenFullBuildExecutionTensorMap(this.tensors,
+            this.plan.deviceOrdinal)
+        if bound.isErr() {
+            closeQwenFullTensorMap(this.tensors)
+            this.tensors = Array<QwenFullResidentTensor>()
+            return Err<Bool, CudaError>(bound.unwrapErr())
+        }
+        this.executionTensors.free()
+        this.executionTensors = bound.unwrap()
+        bound.releaseContainer()
+        return Ok<Bool, CudaError>(true)
+    }
+
+    fun allocationView(index: Int) r: QwenCudaBufferView {
+        if this.closed or index < 0 or index >= this.allocations.length() {
+            return QwenCudaBufferView{
+                abiVersion: QWEN_CUDA_REFERENCE_ABI_VERSION,
+                deviceOrdinal: this.plan.deviceOrdinal,
+                address: 0 as UInt64, byteLength: 0 as UInt64 }
+        }
+        let allocation = this.allocations[index]
+        return QwenCudaBufferView{
+            abiVersion: QWEN_CUDA_REFERENCE_ABI_VERSION,
+            deviceOrdinal: this.plan.deviceOrdinal,
+            address: allocation.data as UInt64,
+            byteLength: allocation.byteLength }
+    }
+
+    fun resetExecution() r: Result<Bool, CudaError> {
+        if this.closed or this.executionTensors.length() != 1027 {
+            return Err<Bool, CudaError>(qwenFullCudaError(
+                this.plan.deviceOrdinal, "qwen.full.reset",
+                "full executor is closed or its tensor map is incomplete"))
+        }
+        var status = seen_cuda_memset_async(this.allocations[1].data,
+            0 as Int32, this.allocations[1].byteLength, this.stream.handle)
+        if not cudaSucceeded(status) {
+            return Err<Bool, CudaError>(cudaError(status))
+        }
+        status = seen_cuda_memset_async(this.allocations[2].data,
+            0 as Int32, this.allocations[2].byteLength, this.stream.handle)
+        if not cudaSucceeded(status) {
+            return Err<Bool, CudaError>(cudaError(status))
+        }
+        status = seen_cuda_memset_async(this.allocations[8].data,
+            0 as Int32, this.allocations[8].byteLength, this.stream.handle)
+        if not cudaSucceeded(status) {
+            return Err<Bool, CudaError>(cudaError(status))
+        }
+        let synchronized = this.stream.synchronize()
+        if synchronized.isErr() {
+            let error = synchronized.unwrapErr()
+            synchronized.releaseContainer()
+            return Err<Bool, CudaError>(error)
+        }
+        synchronized.releaseContainer()
+        this.position = 0 as UInt64; this.cancelled = false
+        return Ok<Bool, CudaError>(true)
+    }
+
+    fun cancelExecution() r: Result<Bool, CudaError> {
+        if this.closed {
+            return Err<Bool, CudaError>(qwenFullCudaError(
+                this.plan.deviceOrdinal, "qwen.full.cancel",
+                "closed executor cannot be cancelled"))
+        }
+        this.cancelled = true
+        return Ok<Bool, CudaError>(true)
+    }
+
+    fun executeTokens(tokenIds: Array<Int32>, decode: Bool)
+        r: Result<Int32, CudaError> {
+        let count = tokenIds.length() as UInt64
+        if this.closed or this.cancelled or
+            this.executionTensors.length() != 1027 or count == (0 as UInt64) or
+            count > (128 as UInt64) or this.position > (128 as UInt64) or
+            count > (128 as UInt64) - this.position or
+            (decode and (count != (1 as UInt64) or
+                this.position == (0 as UInt64))) or
+            (not decode and this.position != (0 as UInt64)) {
+            return Err<Int32, CudaError>(qwenFullCudaError(
+                this.plan.deviceOrdinal, "qwen.full.execute",
+                "token request violates fixed prefill/decode state"))
+        }
+        if this.position == (0 as UInt64) {
+            let reset = this.resetExecution()
+            if reset.isErr() {
+                let error = reset.unwrapErr(); reset.releaseContainer()
+                return Err<Int32, CudaError>(error)
+            }
+            reset.releaseContainer()
+        }
+        let tokenBytes = count * (4 as UInt64)
+        var status = seen_cuda_memcpy_async(this.allocations[9].data,
+            tokenIds.data() as *const Void, tokenBytes, 1 as Int32,
+            this.stream.handle)
+        if not cudaSucceeded(status) {
+            return Err<Int32, CudaError>(cudaError(status))
+        }
+        let borrowed = this.stream.borrowLaunchToken()
+        if borrowed.isErr() {
+            let error = borrowed.unwrapErr(); borrowed.releaseContainer()
+            return Err<Int32, CudaError>(error)
+        }
+        let token = borrowed.unwrap()
+        borrowed.releaseContainer()
+        let request = QwenFullForwardRequest{
+            tensors: this.executionTensors.data(),
+            tensorCount: this.executionTensors.length() as UInt64,
+            tokenIds: this.allocationView(9),
+            activation: this.allocationView(4),
+            scratch: this.allocationView(7),
+            gdnState: this.allocationView(1),
+            convolutionState: this.allocationView(2),
+            kvState: this.allocationView(8),
+            logits: this.allocationView(5), tokenCount: count,
+            startPosition: this.position, cacheCapacity: 128 as UInt64,
+            decode: if decode { 1 as Int32 } else { 0 as Int32 },
+            reserved: 0 as UInt32 }
+        status = seen_qwen_full_forward_q4_f32(&token, &request)
+        request.free(); token.free()
+        if not cudaSucceeded(status) {
+            return Err<Int32, CudaError>(cudaError(status))
+        }
+        status = seen_cuda_memcpy_async(tokenIds.data() as *Void,
+            this.allocations[9].data as *const Void, 4 as UInt64,
+            2 as Int32, this.stream.handle)
+        if not cudaSucceeded(status) {
+            return Err<Int32, CudaError>(cudaError(status))
+        }
+        let synchronized = this.stream.synchronize()
+        if synchronized.isErr() {
+            let error = synchronized.unwrapErr()
+            synchronized.releaseContainer()
+            return Err<Int32, CudaError>(error)
+        }
+        synchronized.releaseContainer()
+        if this.cancelled {
+            return Err<Int32, CudaError>(qwenFullCudaError(
+                this.plan.deviceOrdinal, "qwen.full.execute",
+                "cancelled work cannot commit visible state"))
+        }
+        this.position = this.position + count
+        return Ok<Int32, CudaError>(tokenIds[0])
     }
 }
 
@@ -63,7 +534,9 @@ pub fun createQwenFullCudaResidency(deviceOrdinal: Int32,
         return Err<QwenFullCudaResidency, CudaError>(opened.unwrapErr())
     }
     let device = opened.unwrap()
+    opened.releaseContainer()
     if device.computeMajor != 8 or device.computeMinor != 9 {
+        device.free()
         return Err<QwenFullCudaResidency, CudaError>(qwenFullCudaError(
             deviceOrdinal, "qwen.full.device",
             "complete-model certification requires an SM89 device"))
@@ -71,21 +544,28 @@ pub fun createQwenFullCudaResidency(deviceOrdinal: Int32,
     let planned = createQwenFullMemoryPlan(deviceOrdinal,
         device.totalMemoryBytes, QWEN_FULL_Q4_WEIGHT_BYTES, contextTokens)
     if planned.isErr() {
+        device.free()
         return Err<QwenFullCudaResidency, CudaError>(qwenFullCudaError(
             deviceOrdinal, "qwen.full.plan",
             "device failed the checked complete-model memory plan"))
     }
     let plan = planned.unwrap()
+    planned.releaseContainer()
     if device.freeMemoryBytes < plan.allocationBytes {
+        plan.free(); device.free()
         return Err<QwenFullCudaResidency, CudaError>(qwenFullCudaError(
             deviceOrdinal, "qwen.full.free-memory",
             "current free memory cannot admit every planned allocation"))
     }
     let madeStream = CudaStream.create(deviceOrdinal)
     if madeStream.isErr() {
+        plan.free(); device.free()
         return Err<QwenFullCudaResidency, CudaError>(madeStream.unwrapErr())
     }
     let stream = madeStream.unwrap()
+    madeStream.releaseContainer()
+    let freeBytesBefore = device.freeMemoryBytes
+    device.free()
     let sizes = Array<UInt64>()
     sizes.push(plan.weightBytes); sizes.push(plan.gdnStateBytes)
     sizes.push(plan.convolutionStateBytes); sizes.push(plan.kvBytes)
@@ -102,6 +582,7 @@ pub fun createQwenFullCudaResidency(deviceOrdinal: Int32,
             return Err<QwenFullCudaResidency, CudaError>(made.unwrapErr())
         }
         let allocation = made.unwrap()
+        made.releaseContainer()
         if allocation.handle == (0 as UInt64) or
             allocation.data == (null as *Void) or
             allocation.byteLength != sizes[index] or
@@ -117,5 +598,8 @@ pub fun createQwenFullCudaResidency(deviceOrdinal: Int32,
     sizes.free()
     return Ok<QwenFullCudaResidency, CudaError>(QwenFullCudaResidency{
         plan: plan, allocations: allocations, stream: stream,
-        freeBytesBefore: device.freeMemoryBytes, closed: false })
+        tensors: Array<QwenFullResidentTensor>(),
+        executionTensors: Array<QwenFullQ4TensorView>(),
+        freeBytesBefore: freeBytesBefore, position: 0 as UInt64,
+        cancelled: false, closed: false })
 }

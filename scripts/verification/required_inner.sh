@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR=/workspace
-TOOLCHAIN_ROOT="$ROOT_DIR/.seen/toolchains/seen-0.20.10-linux-x64"
+TOOLCHAIN_ROOT="$ROOT_DIR/.seen/toolchains/seen-0.22.2-linux-x64"
 SEEN_COMPILER="$TOOLCHAIN_ROOT/bin/seen"
 SEEN_PACKAGE_CLIENT="$TOOLCHAIN_ROOT/bin/seen-pkg"
 COMPATIBILITY_MANIFEST="$TOOLCHAIN_ROOT/bin/compatibility-manifest.json"
@@ -66,13 +66,13 @@ for tool in opt llc llvm-as ld.lld; do
 done
 
 printf '%s  %s\n' \
-    7b71bba386641ce6655f1d7e5a124dbd5828709709af498b9f8b03fa1e7bda30 \
+    dd544d342401a9066d9d76d6849e41972a60968d8ee841c678ba23cd6d82c34e \
     "$SEEN_COMPILER" | sha256sum -c -
 printf '%s  %s\n' \
-    3a7f5a172f6e4bc2834547634762107327ed9ac865ba457431f1e804fbd3c8c4 \
+    3c7af4b74da3199d652cd545814731d7695123a67f54817b2ab925055b201f59 \
     "$SEEN_PACKAGE_CLIENT" | sha256sum -c -
 printf '%s  %s\n' \
-    af7209cc9407c3933f969cdcf74164956ede888993eba021e15519ff25fcf53e \
+    cc7deff18b3319b36ed85ceb050e867b3fc36491e928f54e1908c8a260146be6 \
     "$COMPATIBILITY_MANIFEST" | sha256sum -c -
 printf '%s  %s\n' \
     ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003 \
@@ -91,7 +91,7 @@ printf '%s  %s\n' \
 [ "$(stat -c '%s' "$ASSET_ROOT/merges.txt")" = "3353259" ] ||
     fail "merge-table byte length changed"
 
-python3 -c 'import json; p="/workspace/.seen/toolchains/seen-0.20.10-linux-x64/bin/compatibility-manifest.json"; d=json.load(open(p, encoding="utf-8")); assert d["schema"] == "seen-compatibility-manifest-v1"; assert d["release_version"] == "0.20.10"; assert d["components"]["compiler"]["version"] == "0.20.10"; assert d["components"]["package_client"] == {"protocol": "SEENPKG1", "version": "0.20.10"}; assert d["components"]["runtime"]["abi"] == "runtime-v4"; assert d["components"]["standard_library"] == {"module_manifest_version": 1, "version": "0.5.0"}; assert d["components"]["llvm"]["minimum_major"] == 19; assert d["platforms"]["linux-x86_64"] == "required"; assert d["determinism"]["certification"]["installed_archive_required"] is True; assert d["determinism"]["certification"]["signed_evidence_required"] is True'
+python3 -c 'import json; p="/workspace/.seen/toolchains/seen-0.22.2-linux-x64/bin/compatibility-manifest.json"; d=json.load(open(p, encoding="utf-8")); assert d["schema"] == "seen-compatibility-manifest-v1"; assert d["release_version"] == "0.22.2"; assert d["components"]["compiler"]["version"] == "0.22.2"; assert d["components"]["package_client"] == {"protocol": "SEENPKG1", "version": "0.22.2"}; assert d["components"]["runtime"]["abi"] == "runtime-v4"; assert d["components"]["standard_library"] == {"module_manifest_version": 1, "version": "0.5.0"}; assert d["components"]["llvm"]["minimum_major"] == 19; assert d["platforms"]["linux-x86_64"] == "required"; assert d["determinism"]["certification"]["installed_archive_required"] is True; assert d["determinism"]["certification"]["signed_evidence_required"] is True'
 
 toolchain_hash_before=$(find "$TOOLCHAIN_ROOT" -type f -print0 | sort -z |
     xargs -0 sha256sum | sha256sum | awk '{print $1}')
@@ -99,9 +99,9 @@ outside_objects_before=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o \
     -type f \( -name '*.o' -o -name '*.sig' -o -name '*.a' \) -print0 |
     sort -z | xargs -0 -r sha256sum | sha256sum | awk '{print $1}')
 
-"$SEEN_COMPILER" --version | grep -Fx 'Seen 0.20.10'
-"$SEEN_PACKAGE_CLIENT" --expect-version 0.20.10 version |
-    grep -Fx 'seen-pkg 0.20.10 (SEENPKG1)'
+"$SEEN_COMPILER" --version | grep -Fx 'Seen 0.22.2'
+"$SEEN_PACKAGE_CLIENT" --expect-version 0.22.2 version |
+    grep -Fx 'seen-pkg 0.22.2 (SEENPKG1)'
 python3 -m unittest tests/test_local_verification_contract.py tests/test_cuda_reference_primitives.py \
     tests/test_cuda_reference_utilities.py tests/test_cuda_gdn_state.py \
     tests/test_cuda_gdn_recurrent_decode.py tests/test_cuda_gdn_recurrent_prefill.py \

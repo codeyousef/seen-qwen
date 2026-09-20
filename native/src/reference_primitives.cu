@@ -165,6 +165,87 @@ __global__ void linear_f32(const float *input, const float *weight,
     output[index] = sum;
 }
 
+__global__ void q4_sym_g64_linear_f32(
+    const float *input, const uint8_t *packed_weight, const __half *scales,
+    float *output, uint64_t count, uint64_t input_width,
+    uint64_t output_width, uint64_t bytes_per_weight_row,
+    uint64_t groups_per_weight_row) {
+    const uint64_t index = static_cast<uint64_t>(blockIdx.x) *
+        (blockDim.x / 32) + threadIdx.x / 32;
+    if (index >= count) return;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint64_t row = index / output_width;
+    const uint64_t output_column = index - row * output_width;
+    const uint64_t packed_base = output_column * bytes_per_weight_row;
+    const uint64_t scale_base = output_column * groups_per_weight_row;
+    float sum = 0.0f;
+    for (uint64_t packed_column = lane;
+         packed_column < bytes_per_weight_row; packed_column += 32) {
+        const uint8_t packed = packed_weight[packed_base + packed_column];
+        const float scale = __half2float(
+            scales[scale_base + packed_column / 32]);
+        const uint64_t first = packed_column * 2;
+        const int32_t low = (packed & 0x0fu) > 7
+            ? static_cast<int32_t>(packed & 0x0fu) - 16
+            : static_cast<int32_t>(packed & 0x0fu);
+        sum = __fadd_rn(sum, __fmul_rn(input[row * input_width + first],
+            static_cast<float>(low) * scale));
+        if (first + 1 < input_width) {
+            const uint8_t high_nibble = (packed >> 4) & 0x0fu;
+            const int32_t high = high_nibble > 7
+                ? static_cast<int32_t>(high_nibble) - 16
+                : static_cast<int32_t>(high_nibble);
+            sum = __fadd_rn(sum, __fmul_rn(
+                input[row * input_width + first + 1],
+                static_cast<float>(high) * scale));
+        }
+    }
+    for (uint32_t offset = 16; offset != 0; offset >>= 1)
+        sum = __fadd_rn(sum, __shfl_down_sync(0xffffffffu, sum, offset));
+    if (lane == 0) output[index] = sum;
+}
+
+__device__ float q4_sym_g64_value(const uint8_t *packed_values,
+                                  const __half *scales,
+                                  uint64_t row, uint64_t column,
+                                  uint64_t bytes_per_row,
+                                  uint64_t groups_per_row) {
+    const uint8_t packed = packed_values[row * bytes_per_row + column / 2];
+    const uint8_t nibble = (column & 1) == 0
+        ? packed & 0x0fu : (packed >> 4) & 0x0fu;
+    const int32_t quantized = nibble > 7
+        ? static_cast<int32_t>(nibble) - 16
+        : static_cast<int32_t>(nibble);
+    return static_cast<float>(quantized) * __half2float(
+        scales[row * groups_per_row + column / 64]);
+}
+
+__global__ void q4_sym_g64_decode_f32(
+    const uint8_t *packed_values, const __half *scales, float *output,
+    uint64_t count, uint64_t row_width, uint64_t bytes_per_row,
+    uint64_t groups_per_row) {
+    const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+        threadIdx.x;
+    if (index >= count) return;
+    output[index] = q4_sym_g64_value(packed_values, scales,
+        index / row_width, index % row_width, bytes_per_row, groups_per_row);
+}
+
+__global__ void q4_sym_g64_embedding_gather_f32(
+    const uint8_t *packed_table, const __half *scales,
+    const int32_t *token_ids, float *output, uint64_t count,
+    uint64_t vocabulary_size, uint64_t width, uint64_t bytes_per_row,
+    uint64_t groups_per_row) {
+    const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+        threadIdx.x;
+    if (index >= count) return;
+    const int32_t token = token_ids[index / width];
+    output[index] = token < 0 || static_cast<uint64_t>(token) >= vocabulary_size
+        ? NAN : q4_sym_g64_value(packed_table, scales,
+            static_cast<uint64_t>(token), index % width, bytes_per_row,
+            groups_per_row);
+}
+
 __global__ void gdn_prepare_f32(const float *convolution, float *query,
                                 float *key, float *value,
                                 uint64_t token_count, uint64_t value_heads,
@@ -890,6 +971,148 @@ extern "C" SeenCudaStatus seen_qwen_linear_f32(
     linear_f32<<<blocks, kThreads, 0, stream>>>(pointer<const float>(input),
         pointer<const float>(weight), pointer<float>(output), output_count,
         input_width, output_width);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_q4_sym_g64_linear_f32(
+    const SeenCudaStreamLaunchToken *token, SeenQwenCudaBufferView input,
+    SeenQwenCudaBufferView packed_weight, SeenQwenCudaBufferView scales,
+    SeenQwenCudaBufferView output, uint64_t rows, uint64_t input_width,
+    uint64_t output_width) {
+    constexpr const char *op = "seen_qwen_q4_sym_g64_linear_f32";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    if (input_width > UINT64_MAX - 63 || input_width > UINT64_MAX - 1)
+        return invalid(token->device_ordinal, op,
+                       "Q4 row geometry overflows UInt64");
+    const uint64_t bytes_per_weight_row = (input_width + 1) / 2;
+    const uint64_t groups_per_weight_row = (input_width + 63) / 64;
+    uint64_t input_count = 0, packed_count = 0, scale_count = 0;
+    uint64_t output_count = 0, input_bytes = 0, scale_bytes = 0;
+    uint64_t output_bytes = 0;
+    uint32_t blocks = 0;
+    if (!checked_multiply(rows, input_width, &input_count) ||
+        !checked_multiply(output_width, bytes_per_weight_row, &packed_count) ||
+        !checked_multiply(output_width, groups_per_weight_row, &scale_count) ||
+        !checked_multiply(rows, output_width, &output_count) ||
+        !checked_multiply(input_count, sizeof(float), &input_bytes) ||
+        !checked_multiply(scale_count, sizeof(uint16_t), &scale_bytes) ||
+        !checked_multiply(output_count, sizeof(float), &output_bytes) ||
+        output_count > UINT64_MAX - 7 ||
+        (output_count + 7) / 8 > std::numeric_limits<uint32_t>::max() ||
+        (blocks = static_cast<uint32_t>((output_count + 7) / 8)) == 0)
+        return invalid(token->device_ordinal, op,
+                       "invalid bounded Q4_SYM_G64 linear geometry");
+    for (const auto &pair : {
+             std::pair<SeenQwenCudaBufferView, uint64_t>{input, input_bytes},
+             {packed_weight, packed_count}, {scales, scale_bytes},
+             {output, output_bytes}}) {
+        checked = validate_view(pair.first, pair.second,
+                                token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    if (overlaps(input, input_bytes, output, output_bytes) ||
+        overlaps(packed_weight, packed_count, output, output_bytes) ||
+        overlaps(scales, scale_bytes, output, output_bytes))
+        return invalid(token->device_ordinal, op,
+                       "Q4_SYM_G64 linear output must not overlap inputs");
+    q4_sym_g64_linear_f32<<<blocks, kThreads, 0, stream>>>(
+        pointer<const float>(input), pointer<const uint8_t>(packed_weight),
+        pointer<const __half>(scales), pointer<float>(output), output_count,
+        input_width, output_width, bytes_per_weight_row,
+        groups_per_weight_row);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_q4_sym_g64_decode_f32(
+    const SeenCudaStreamLaunchToken *token,
+    SeenQwenCudaBufferView packed_values, SeenQwenCudaBufferView scales,
+    SeenQwenCudaBufferView output, uint64_t rows, uint64_t row_width) {
+    constexpr const char *op = "seen_qwen_q4_sym_g64_decode_f32";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    if (row_width > UINT64_MAX - 63 || row_width > UINT64_MAX - 1)
+        return invalid(token->device_ordinal, op,
+                       "Q4 row geometry overflows UInt64");
+    const uint64_t bytes_per_row = (row_width + 1) / 2;
+    const uint64_t groups_per_row = (row_width + 63) / 64;
+    uint64_t count = 0, packed_bytes = 0, scale_count = 0;
+    uint64_t scale_bytes = 0, output_bytes = 0;
+    uint32_t blocks = 0;
+    if (!checked_multiply(rows, row_width, &count) ||
+        !checked_multiply(rows, bytes_per_row, &packed_bytes) ||
+        !checked_multiply(rows, groups_per_row, &scale_count) ||
+        !checked_multiply(scale_count, sizeof(uint16_t), &scale_bytes) ||
+        !checked_multiply(count, sizeof(float), &output_bytes) ||
+        !launch_shape(count, &blocks))
+        return invalid(token->device_ordinal, op,
+                       "invalid bounded Q4_SYM_G64 decode geometry");
+    for (const auto &pair : {
+             std::pair<SeenQwenCudaBufferView, uint64_t>{packed_values,
+                                                         packed_bytes},
+             {scales, scale_bytes}, {output, output_bytes}}) {
+        checked = validate_view(pair.first, pair.second,
+                                token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    if (overlaps(packed_values, packed_bytes, output, output_bytes) ||
+        overlaps(scales, scale_bytes, output, output_bytes))
+        return invalid(token->device_ordinal, op,
+                       "Q4_SYM_G64 decode output must not overlap inputs");
+    q4_sym_g64_decode_f32<<<blocks, kThreads, 0, stream>>>(
+        pointer<const uint8_t>(packed_values), pointer<const __half>(scales),
+        pointer<float>(output), count, row_width, bytes_per_row,
+        groups_per_row);
+    return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+extern "C" SeenCudaStatus seen_qwen_q4_sym_g64_embedding_gather_f32(
+    const SeenCudaStreamLaunchToken *token,
+    SeenQwenCudaBufferView packed_table, SeenQwenCudaBufferView scales,
+    SeenQwenCudaBufferView token_ids, SeenQwenCudaBufferView output,
+    uint64_t token_count, uint64_t vocabulary_size, uint64_t width) {
+    constexpr const char *op =
+        "seen_qwen_q4_sym_g64_embedding_gather_f32";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    if (width > UINT64_MAX - 63 || width > UINT64_MAX - 1)
+        return invalid(token->device_ordinal, op,
+                       "Q4 embedding row geometry overflows UInt64");
+    const uint64_t bytes_per_row = (width + 1) / 2;
+    const uint64_t groups_per_row = (width + 63) / 64;
+    uint64_t packed_bytes = 0, scale_count = 0, scale_bytes = 0;
+    uint64_t id_bytes = 0, output_count = 0, output_bytes = 0;
+    uint32_t blocks = 0;
+    if (!checked_multiply(vocabulary_size, bytes_per_row, &packed_bytes) ||
+        !checked_multiply(vocabulary_size, groups_per_row, &scale_count) ||
+        !checked_multiply(scale_count, sizeof(uint16_t), &scale_bytes) ||
+        !checked_multiply(token_count, sizeof(int32_t), &id_bytes) ||
+        !checked_multiply(token_count, width, &output_count) ||
+        !checked_multiply(output_count, sizeof(float), &output_bytes) ||
+        !launch_shape(output_count, &blocks))
+        return invalid(token->device_ordinal, op,
+                       "invalid bounded Q4_SYM_G64 embedding geometry");
+    for (const auto &pair : {
+             std::pair<SeenQwenCudaBufferView, uint64_t>{packed_table,
+                                                         packed_bytes},
+             {scales, scale_bytes}, {token_ids, id_bytes},
+             {output, output_bytes}}) {
+        checked = validate_view(pair.first, pair.second,
+                                token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    if (overlaps(packed_table, packed_bytes, output, output_bytes) ||
+        overlaps(scales, scale_bytes, output, output_bytes) ||
+        overlaps(token_ids, id_bytes, output, output_bytes))
+        return invalid(token->device_ordinal, op,
+                       "Q4_SYM_G64 embedding output must not overlap inputs");
+    q4_sym_g64_embedding_gather_f32<<<blocks, kThreads, 0, stream>>>(
+        pointer<const uint8_t>(packed_table), pointer<const __half>(scales),
+        pointer<const int32_t>(token_ids), pointer<float>(output),
+        output_count, vocabulary_size, width, bytes_per_row, groups_per_row);
     return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
 }
 
@@ -1694,4 +1917,382 @@ extern "C" SeenCudaStatus seen_qwen_gdn_recurrent_prefill_f32(
         pointer<const float>(log_decay), pointer<float>(state),
         pointer<float>(output), token_count, value_heads, key_dim, value_dim);
     return launch_status(cudaPeekAtLastError(), token->device_ordinal, op);
+}
+
+namespace {
+
+constexpr uint64_t kFullTensorCount = 2 + 64 * 16 + 1;
+constexpr uint64_t kFullContext = 128;
+constexpr uint64_t kFullHidden = 5120;
+constexpr uint64_t kFullIntermediate = 17408;
+constexpr uint64_t kFullVocabulary = 248320;
+constexpr uint64_t kFullAttentionHeads = 24;
+constexpr uint64_t kFullKvHeads = 4;
+constexpr uint64_t kFullAttentionHeadDim = 256;
+constexpr uint64_t kFullRotaryDim = 64;
+constexpr uint64_t kFullAttentionWidth = 6144;
+constexpr uint64_t kFullGdnHeads = 48;
+constexpr uint64_t kFullGdnKeyHeads = 16;
+constexpr uint64_t kFullGdnHeadDim = 128;
+constexpr uint64_t kFullGdnWidth = 10240;
+constexpr uint64_t kFullConvKernel = 4;
+constexpr uint64_t kFullSlotFloats = kFullContext * kFullIntermediate;
+constexpr uint64_t kFullSlotBytes = kFullSlotFloats * sizeof(float);
+
+SeenQwenCudaBufferView full_subview(SeenQwenCudaBufferView owner,
+                                    uint64_t byte_offset,
+                                    uint64_t byte_length) {
+    return SeenQwenCudaBufferView{owner.abi_version, owner.device_ordinal,
+        owner.address + byte_offset, byte_length};
+}
+
+struct FullQ4Forward {
+    const SeenCudaStreamLaunchToken *token;
+    const SeenQwenQ4TensorView *tensors;
+    SeenQwenCudaBufferView token_ids;
+    SeenQwenCudaBufferView activation;
+    SeenQwenCudaBufferView scratch;
+    SeenQwenCudaBufferView gdn_state;
+    SeenQwenCudaBufferView convolution_state;
+    SeenQwenCudaBufferView kv_state;
+    SeenQwenCudaBufferView logits;
+    uint64_t rows;
+    uint64_t start;
+    uint64_t capacity;
+    bool decode;
+
+    SeenQwenCudaBufferView slot(uint64_t index) const {
+        return full_subview(scratch, index * kFullSlotBytes, kFullSlotBytes);
+    }
+
+    SeenQwenCudaBufferView activation_slot(uint64_t index) const {
+        const uint64_t bytes = rows * kFullHidden * sizeof(float);
+        return full_subview(activation, index * kFullContext * kFullHidden *
+            sizeof(float), bytes);
+    }
+
+    SeenQwenCudaBufferView state_slice(SeenQwenCudaBufferView owner,
+                                       uint64_t float_offset,
+                                       uint64_t float_count) const {
+        return full_subview(owner, float_offset * sizeof(float),
+                            float_count * sizeof(float));
+    }
+
+    SeenCudaStatus linear(uint64_t tensor_index,
+                          SeenQwenCudaBufferView input,
+                          SeenQwenCudaBufferView output,
+                          uint64_t input_width,
+                          uint64_t output_width) const {
+        const SeenQwenQ4TensorView &weight = tensors[tensor_index];
+        if (weight.row_elements != input_width ||
+            weight.logical_elements != input_width * output_width)
+            return invalid(token->device_ordinal,
+                "seen_qwen_full_forward_q4_f32",
+                "Q4 projection geometry disagrees with the fixed schedule");
+        return seen_qwen_q4_sym_g64_linear_f32(token, input, weight.packed,
+            weight.scales, output, rows, input_width, output_width);
+    }
+
+    SeenCudaStatus decode_weight(uint64_t tensor_index,
+                                 SeenQwenCudaBufferView output,
+                                 uint64_t row_width) const {
+        const SeenQwenQ4TensorView &weight = tensors[tensor_index];
+        if (weight.row_elements != row_width ||
+            weight.logical_elements % row_width != 0)
+            return invalid(token->device_ordinal,
+                "seen_qwen_full_forward_q4_f32",
+                "Q4 vector geometry disagrees with the fixed schedule");
+        return seen_qwen_q4_sym_g64_decode_f32(token, weight.packed,
+            weight.scales, output, weight.logical_elements / row_width,
+            row_width);
+    }
+
+    SeenCudaStatus norm(uint64_t tensor_index,
+                        SeenQwenCudaBufferView input,
+                        SeenQwenCudaBufferView output) const {
+        SeenCudaStatus result = decode_weight(tensor_index, slot(19),
+                                               kFullHidden);
+        if (result.code != SEEN_CUDA_OK) return result;
+        return seen_qwen_rms_norm_f32(token, input, slot(19), output, rows,
+                                      kFullHidden, 0.000001f);
+    }
+
+    SeenCudaStatus gdn(uint64_t base, SeenQwenCudaBufferView input,
+                       SeenQwenCudaBufferView output,
+                       uint64_t state_index) const {
+        SeenCudaStatus result = linear(base + 2, input, slot(8), kFullHidden,
+                                       kFullGdnWidth);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = decode_weight(base + 6, slot(6), kFullConvKernel);
+        if (result.code != SEEN_CUDA_OK) return result;
+        const uint64_t conv_layer_floats = 3 * kFullGdnWidth;
+        result = seen_qwen_causal_conv_silu_f32(token, slot(8), slot(6),
+            state_slice(convolution_state, state_index * conv_layer_floats,
+                        conv_layer_floats),
+            slot(9), rows, kFullGdnWidth, kFullConvKernel, start, start);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = seen_qwen_gdn_prepare_f32(token, slot(9), slot(10), slot(11),
+            slot(12), rows, kFullGdnHeads, kFullGdnKeyHeads,
+            kFullGdnHeadDim, 0.000001f);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = linear(base + 4, input, slot(13), kFullHidden,
+                        kFullGdnHeads);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = linear(base + 3, input, slot(14), kFullHidden,
+                        kFullGdnHeads);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = decode_weight(base + 7, slot(4), kFullGdnHeads);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = decode_weight(base + 8, slot(5), kFullGdnHeads);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = seen_qwen_gdn_parameters_f32(token, slot(13), slot(14),
+            slot(4), slot(5), slot(15), slot(16), rows, kFullGdnHeads);
+        if (result.code != SEEN_CUDA_OK) return result;
+        const uint64_t recurrent_layer_floats = kFullGdnHeads *
+            kFullGdnHeadDim * kFullGdnHeadDim;
+        const SeenQwenCudaBufferView recurrent = state_slice(gdn_state,
+            state_index * recurrent_layer_floats, recurrent_layer_floats);
+        if (decode) {
+            result = seen_qwen_gdn_recurrent_decode_f32(token, slot(10),
+                slot(11), slot(12), slot(15), slot(16), recurrent, slot(17),
+                kFullGdnHeads, kFullGdnHeadDim, kFullGdnHeadDim, start, start);
+        } else {
+            result = seen_qwen_gdn_recurrent_prefill_f32(token, slot(10),
+                slot(11), slot(12), slot(15), slot(16), recurrent, slot(17),
+                rows, kFullGdnHeads, kFullGdnHeadDim, kFullGdnHeadDim,
+                start, start);
+        }
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = linear(base + 5, input, slot(18), kFullHidden,
+                        kFullAttentionWidth);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = decode_weight(base + 9, slot(6), kFullGdnHeadDim);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = seen_qwen_gdn_gated_rms_norm_f32(token, slot(17), slot(18),
+            slot(6), slot(19), rows * kFullGdnHeads, kFullGdnHeadDim,
+            0.000001f);
+        if (result.code != SEEN_CUDA_OK) return result;
+        return linear(base + 10, slot(19), output, kFullAttentionWidth,
+                      kFullHidden);
+    }
+
+    SeenCudaStatus attention(uint64_t base, SeenQwenCudaBufferView input,
+                             SeenQwenCudaBufferView output,
+                             uint64_t state_index) const {
+        SeenCudaStatus result = linear(base + 2, input, slot(8), kFullHidden,
+                                       2 * kFullAttentionWidth);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = linear(base + 3, input, slot(9), kFullHidden,
+                        kFullKvHeads * kFullAttentionHeadDim);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = linear(base + 4, input, slot(10), kFullHidden,
+                        kFullKvHeads * kFullAttentionHeadDim);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = decode_weight(base + 5, slot(16), kFullAttentionHeadDim);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = decode_weight(base + 6, slot(17), kFullAttentionHeadDim);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = seen_qwen_attention_qk_rope_f32(token, slot(8), slot(9),
+            slot(16), slot(17), slot(11), slot(12), slot(13), rows,
+            kFullAttentionHeads, kFullKvHeads, kFullAttentionHeadDim,
+            kFullRotaryDim, start, 262144, 10000000.0f, 0.000001f);
+        if (result.code != SEEN_CUDA_OK) return result;
+        const uint64_t cache_layer_floats = 2 * capacity * kFullKvHeads *
+            kFullAttentionHeadDim;
+        const uint64_t cache_half_floats = capacity * kFullKvHeads *
+            kFullAttentionHeadDim;
+        const SeenQwenCudaBufferView key_cache = state_slice(kv_state,
+            state_index * cache_layer_floats, cache_half_floats);
+        const SeenQwenCudaBufferView value_cache = state_slice(kv_state,
+            state_index * cache_layer_floats + cache_half_floats,
+            cache_half_floats);
+        if (decode) {
+            result = seen_qwen_kv_append_f32(token, slot(12), slot(10),
+                key_cache, value_cache, 1, kFullKvHeads,
+                kFullAttentionHeadDim, start, capacity);
+            if (result.code != SEEN_CUDA_OK) return result;
+            result = seen_qwen_attention_decode_f32(token, slot(11), key_cache,
+                value_cache, slot(14), kFullAttentionHeads, kFullKvHeads,
+                kFullAttentionHeadDim, start + 1, capacity);
+        } else {
+            result = seen_qwen_attention_prefill_f32(token, slot(11), slot(12),
+                slot(10), key_cache, value_cache, slot(14), rows,
+                kFullAttentionHeads, kFullKvHeads, kFullAttentionHeadDim,
+                start, capacity);
+        }
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = seen_qwen_sigmoid_gate_f32(token, slot(14), slot(13),
+            slot(15), rows * kFullAttentionWidth);
+        if (result.code != SEEN_CUDA_OK) return result;
+        return linear(base + 7, slot(15), output, kFullAttentionWidth,
+                      kFullHidden);
+    }
+
+    SeenCudaStatus layer(uint64_t layer_index, SeenQwenCudaBufferView hidden,
+                         SeenQwenCudaBufferView output,
+                         uint64_t *gdn_index,
+                         uint64_t *attention_index) const {
+        const uint64_t base = 2 + layer_index * 16;
+        SeenCudaStatus result = norm(base, hidden, slot(0));
+        if (result.code != SEEN_CUDA_OK) return result;
+        if ((layer_index + 1) % 4 == 0) {
+            result = attention(base, slot(0), slot(1), *attention_index);
+            ++*attention_index;
+        } else {
+            result = gdn(base, slot(0), slot(1), *gdn_index);
+            ++*gdn_index;
+        }
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = seen_qwen_add_f32(token, hidden, slot(1), slot(2),
+                                   rows * kFullHidden);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = norm(base + 1, slot(2), slot(3));
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = linear(base + 13, slot(3), slot(4), kFullHidden,
+                        kFullIntermediate);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = linear(base + 14, slot(3), slot(5), kFullHidden,
+                        kFullIntermediate);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = seen_qwen_swiglu_f32(token, slot(4), slot(5), slot(6),
+                                      rows * kFullIntermediate);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = linear(base + 15, slot(6), slot(7), kFullIntermediate,
+                        kFullHidden);
+        if (result.code != SEEN_CUDA_OK) return result;
+        return seen_qwen_add_f32(token, slot(2), slot(7), output,
+                                 rows * kFullHidden);
+    }
+
+    SeenCudaStatus run() const {
+        const SeenQwenQ4TensorView &embedding = tensors[1];
+        if (embedding.row_elements != kFullHidden ||
+            embedding.logical_elements != kFullVocabulary * kFullHidden)
+            return invalid(token->device_ordinal,
+                "seen_qwen_full_forward_q4_f32",
+                "embedding geometry disagrees with the fixed schedule");
+        SeenQwenCudaBufferView hidden = activation_slot(0);
+        SeenQwenCudaBufferView next = activation_slot(1);
+        SeenCudaStatus result = seen_qwen_q4_sym_g64_embedding_gather_f32(
+            token, embedding.packed, embedding.scales, token_ids, hidden,
+            rows, kFullVocabulary, kFullHidden);
+        if (result.code != SEEN_CUDA_OK) return result;
+        uint64_t gdn_index = 0;
+        uint64_t attention_index = 0;
+        for (uint64_t layer_index = 0; layer_index < 64; ++layer_index) {
+            result = layer(layer_index, hidden, next, &gdn_index,
+                           &attention_index);
+            if (result.code != SEEN_CUDA_OK) return result;
+            std::swap(hidden, next);
+        }
+        if (gdn_index != 48 || attention_index != 16)
+            return invalid(token->device_ordinal,
+                "seen_qwen_full_forward_q4_f32",
+                "hybrid layer counters disagree with the fixed schedule");
+        result = decode_weight(kFullTensorCount - 1, slot(19), kFullHidden);
+        if (result.code != SEEN_CUDA_OK) return result;
+        result = seen_qwen_rms_norm_f32(token, hidden, slot(19), next, rows,
+                                        kFullHidden, 0.000001f);
+        if (result.code != SEEN_CUDA_OK) return result;
+        const SeenQwenCudaBufferView last_hidden = full_subview(next,
+            (rows - 1) * kFullHidden * sizeof(float),
+            kFullHidden * sizeof(float));
+        const SeenQwenQ4TensorView &head = tensors[0];
+        if (head.row_elements != kFullHidden ||
+            head.logical_elements != kFullVocabulary * kFullHidden)
+            return invalid(token->device_ordinal,
+                "seen_qwen_full_forward_q4_f32",
+                "LM-head geometry disagrees with the fixed schedule");
+        result = seen_qwen_q4_sym_g64_linear_f32(token, last_hidden,
+            head.packed, head.scales, logits, 1, kFullHidden,
+            kFullVocabulary);
+        if (result.code != SEEN_CUDA_OK) return result;
+        return seen_qwen_greedy_argmax_f32(token, logits, token_ids, 1,
+                                           kFullVocabulary, kFullVocabulary);
+    }
+};
+
+}  // namespace
+
+extern "C" SeenCudaStatus seen_qwen_full_forward_q4_f32(
+    const SeenCudaStreamLaunchToken *token,
+    const SeenQwenFullForwardRequest *request) {
+    constexpr const char *op = "seen_qwen_full_forward_q4_f32";
+    cudaStream_t stream{};
+    SeenCudaStatus checked = validate_token(token, op, &stream);
+    if (checked.code != SEEN_CUDA_OK) return checked;
+    if (request == nullptr)
+        return invalid(token->device_ordinal, op,
+                       "full-model request is null");
+    const SeenQwenQ4TensorView *tensors = request->tensors;
+    const uint64_t tensor_count = request->tensor_count;
+    const SeenQwenCudaBufferView token_ids = request->token_ids;
+    const SeenQwenCudaBufferView activation = request->activation;
+    const SeenQwenCudaBufferView scratch = request->scratch;
+    const SeenQwenCudaBufferView gdn_state = request->gdn_state;
+    const SeenQwenCudaBufferView convolution_state =
+        request->convolution_state;
+    const SeenQwenCudaBufferView kv_state = request->kv_state;
+    const SeenQwenCudaBufferView logits = request->logits;
+    const uint64_t token_count = request->token_count;
+    const uint64_t start_position = request->start_position;
+    const uint64_t cache_capacity = request->cache_capacity;
+    const int32_t decode = request->decode;
+    if (request->reserved != 0)
+        return invalid(token->device_ordinal, op,
+                       "full-model request reserved field is nonzero");
+    if (tensors == nullptr)
+        return invalid(token->device_ordinal, op,
+                       "full-model tensor table is null");
+    if (tensor_count != kFullTensorCount)
+        return invalid(token->device_ordinal, op,
+                       "full-model tensor count is not 1027");
+    if (token_count == 0 || token_count > kFullContext)
+        return invalid(token->device_ordinal, op,
+                       "full-model token count is outside 1..128");
+    if (cache_capacity != kFullContext)
+        return invalid(token->device_ordinal, op,
+                       "full-model cache capacity is not 128");
+    if (start_position >= cache_capacity ||
+        token_count > cache_capacity - start_position)
+        return invalid(token->device_ordinal, op,
+                       "full-model token range exceeds cache capacity");
+    if (decode != 0 && decode != 1)
+        return invalid(token->device_ordinal, op,
+                       "full-model decode selector is not boolean");
+    if (decode == 1 && (token_count != 1 || start_position == 0))
+        return invalid(token->device_ordinal, op,
+                       "full-model decode state is invalid");
+    if (decode == 0 && start_position != 0)
+        return invalid(token->device_ordinal, op,
+                       "full-model prefill must start at position zero");
+    const uint64_t activation_bytes = 2 * kFullContext * kFullHidden *
+        sizeof(float);
+    const uint64_t scratch_bytes = 20 * kFullSlotBytes;
+    const uint64_t gdn_bytes = 48 * kFullGdnHeads * kFullGdnHeadDim *
+        kFullGdnHeadDim * sizeof(float);
+    const uint64_t convolution_bytes = 48 * 3 * kFullGdnWidth * sizeof(float);
+    const uint64_t kv_bytes = 16 * 2 * cache_capacity * kFullKvHeads *
+        kFullAttentionHeadDim * sizeof(float);
+    const uint64_t logits_bytes = kFullVocabulary * sizeof(float);
+    const std::pair<SeenQwenCudaBufferView, uint64_t> views[] = {
+        {token_ids, token_count * sizeof(int32_t)},
+        {activation, activation_bytes}, {scratch, scratch_bytes},
+        {gdn_state, gdn_bytes}, {convolution_state, convolution_bytes},
+        {kv_state, kv_bytes}, {logits, logits_bytes}};
+    for (const auto &item : views) {
+        checked = validate_view(item.first, item.second,
+                                token->device_ordinal, op);
+        if (checked.code != SEEN_CUDA_OK) return checked;
+    }
+    for (size_t left = 0; left < sizeof(views) / sizeof(views[0]); ++left)
+        for (size_t right = left + 1;
+             right < sizeof(views) / sizeof(views[0]); ++right)
+            if (overlaps(views[left].first, views[left].second,
+                         views[right].first, views[right].second))
+                return invalid(token->device_ordinal, op,
+                               "full-model execution buffers must be disjoint");
+    return FullQ4Forward{token, tensors, token_ids, activation, scratch,
+        gdn_state, convolution_state, kv_state, logits, token_count,
+        start_position, cache_capacity, decode == 1}.run();
 }

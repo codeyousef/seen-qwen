@@ -1,3 +1,6 @@
+import env.env.{args}
+import memory.allocation.{memoryStats}
+import seen_qwen.formats.sqw_reader.{SqwReader, SqwReaderPolicy}
 import seen_qwen.runtime.full_model_cuda.{createQwenFullCudaResidency}
 
 fun require(condition: Bool, message: String) r: Void {
@@ -5,6 +8,19 @@ fun require(condition: Bool, message: String) r: Void {
 }
 
 fun main() r: Int {
+    let arguments = args()
+    require(arguments.length() == 2, "require the exact SQW artifact path")
+    let allocatorBaseline = memoryStats()
+    let policy = SqwReaderPolicy.qwen38(
+        "399b6f25f8cd20ae5d233040005f0ebb82b7e5b396e0eb91214dbe94b828c3be",
+        "f43b83cd9174a91a2ccb2669dc1751c83b9c6730593abe6004bc185855cc78bb",
+        "64d442eb87722f5fbc0a38a780d07e011dc51554956f1c6f2cb1e04611a2d6c5",
+        "0d9bd0167c58831a2016374c44e835db5c8f4d22a0f565ac55715ab57c6840f0",
+        4)
+    let opened = SqwReader.open(arguments[1], policy)
+    require(opened.isOkay(), "open and validate the exact Q4 SQW artifact")
+    let reader = opened.unwrap()
+    let usedAfterOpen = memoryStats().usedBytes
     let made = createQwenFullCudaResidency(0 as Int32, 128 as UInt64)
     require(made.isOkay(), "create the complete Seen-owned CUDA residency")
     let residency = made.unwrap()
@@ -12,9 +28,43 @@ fun main() r: Int {
         residency.plan.allocationBytes == (16627529808 as UInt64) and
         residency.stream.handle != (0 as UInt64) and not residency.closed,
         "own every coarse allocation and the exact Seen stream")
+    require(residency.loadValidatedQ4Weights(reader).isOkay() and
+        residency.tensors.length() == 866,
+        "load all validated Q4 tensor components into exact residency")
+    let usedAfterLoad = memoryStats().usedBytes
+    let first = residency.tensor("lm_head.weight")
+    let middle = residency.tensor(
+        "model.language_model.layers.32.linear_attn.in_proj_qkv.weight")
+    let last = residency.tensor("mtp.pre_fc_norm_hidden.weight")
+    require(first.isOkay() and middle.isOkay() and last.isOkay(),
+        "retain first, middle, and last tensor identities")
+    let firstTensor = first.unwrap()
+    let middleTensor = middle.unwrap()
+    let lastTensor = last.unwrap()
+    require(firstTensor.logicalElements == (1271398400 as UInt64) and
+        firstTensor.rowElements == (5120 as UInt64) and
+        middleTensor.logicalElements == (52428800 as UInt64) and
+        middleTensor.rowElements == (5120 as UInt64) and
+        lastTensor.logicalElements == (5120 as UInt64) and
+        lastTensor.rowElements == (5120 as UInt64),
+        "retain first, middle, and last tensor identity and geometry")
+    require(reader.close().isOkay(),
+        "close SQW reader after all borrowed mappings are released")
+    let usedAfterReaderClose = memoryStats().usedBytes
     require(residency.close().isOkay() and
         residency.close().unwrap() == false,
         "close complete residency deterministically and idempotently")
+    let allocatorAfter = memoryStats()
+    println("QWN-046A allocator checkpoints=" +
+        allocatorBaseline.usedBytes.toString() + "/" +
+        usedAfterOpen.toString() + "/" + usedAfterLoad.toString() + "/" +
+        usedAfterReaderClose.toString() + "/" +
+        allocatorAfter.usedBytes.toString())
+    require(allocatorAfter.usedBytes == allocatorBaseline.usedBytes and
+        allocatorAfter.allocationFailures ==
+            allocatorBaseline.allocationFailures,
+        "return Seen allocator live usage to its exact pre-SQW baseline")
+    arguments.free()
     println("PASS: QWN-046A Seen-owned complete CUDA residency")
     return 0
 }

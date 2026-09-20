@@ -1,5 +1,7 @@
 #include "seen_qwen_cuda.h"
 
+#include <cuda_fp16.h>
+
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
@@ -133,6 +135,137 @@ int main() {
     CHECK_STATUS(seen_cuda_event_synchronize(event));
     CHECK(equal(values[0], -2.5f));
 
+    constexpr uint64_t q4_rows = 3;
+    constexpr uint64_t q4_input_width = 65;
+    constexpr uint64_t q4_output_width = 3;
+    constexpr uint64_t q4_input_count = q4_rows * q4_input_width;
+    constexpr uint64_t q4_packed_count = q4_output_width * 33;
+    constexpr uint64_t q4_scale_count = q4_output_width * 2;
+    constexpr uint64_t q4_output_count = q4_rows * q4_output_width;
+    float q4_host_input[q4_input_count]{};
+    uint8_t q4_host_packed[q4_packed_count]{};
+    uint16_t q4_host_scales[q4_scale_count]{};
+    float q4_expected[q4_output_count]{};
+    float q4_actual[q4_output_count]{};
+    float q4_decoded_expected[q4_output_width * q4_input_width]{};
+    float q4_decoded_actual[q4_output_width * q4_input_width]{};
+    for (uint64_t i = 0; i < q4_input_count; ++i)
+        q4_host_input[i] = static_cast<float>(static_cast<int64_t>(i % 11) - 5) / 8.0f;
+    for (uint64_t output_column = 0; output_column < q4_output_width;
+         ++output_column) {
+        const float group_scales[2] = {
+            0.25f * static_cast<float>(output_column + 1),
+            0.5f * static_cast<float>(output_column + 1)};
+        for (uint64_t group = 0; group < 2; ++group) {
+            const __half encoded = __float2half_rn(group_scales[group]);
+            std::memcpy(&q4_host_scales[output_column * 2 + group],
+                        &encoded, sizeof(uint16_t));
+        }
+        for (uint64_t input_column = 0; input_column < q4_input_width;
+             ++input_column) {
+            const int32_t quantized =
+                static_cast<int32_t>((input_column + output_column * 3) % 16) - 8;
+            const uint8_t nibble = static_cast<uint8_t>(quantized & 0x0f);
+            uint8_t &packed = q4_host_packed[output_column * 33 + input_column / 2];
+            if ((input_column & 1) == 0) packed = nibble;
+            else packed = static_cast<uint8_t>(packed | (nibble << 4));
+            const float decoded = static_cast<float>(quantized) *
+                group_scales[input_column / 64];
+            q4_decoded_expected[output_column * q4_input_width +
+                input_column] = decoded;
+            for (uint64_t row = 0; row < q4_rows; ++row)
+                q4_expected[row * q4_output_width + output_column] +=
+                    q4_host_input[row * q4_input_width + input_column] * decoded;
+        }
+    }
+    SeenCudaHandle q4_input_handle = 0, q4_packed_handle = 0;
+    SeenCudaHandle q4_scale_handle = 0, q4_output_handle = 0;
+    CHECK_STATUS(seen_cuda_malloc(0, sizeof(q4_decoded_actual),
+                                  &q4_input_handle));
+    CHECK_STATUS(seen_cuda_malloc(0, sizeof(q4_host_packed), &q4_packed_handle));
+    CHECK_STATUS(seen_cuda_malloc(0, sizeof(q4_host_scales), &q4_scale_handle));
+    CHECK_STATUS(seen_cuda_malloc(0, sizeof(q4_actual), &q4_output_handle));
+    void *q4_input = nullptr, *q4_packed = nullptr, *q4_scales = nullptr;
+    void *q4_output = nullptr;
+    CHECK_STATUS(seen_cuda_allocation_address(
+        q4_input_handle, &q4_input, &actual, &device));
+    CHECK_STATUS(seen_cuda_allocation_address(
+        q4_packed_handle, &q4_packed, &actual, &device));
+    CHECK_STATUS(seen_cuda_allocation_address(
+        q4_scale_handle, &q4_scales, &actual, &device));
+    CHECK_STATUS(seen_cuda_allocation_address(
+        q4_output_handle, &q4_output, &actual, &device));
+    CHECK_STATUS(seen_cuda_memcpy_async(q4_input, q4_host_input,
+        sizeof(q4_host_input), SEEN_CUDA_COPY_HOST_TO_DEVICE, stream));
+    CHECK_STATUS(seen_cuda_memcpy_async(q4_packed, q4_host_packed,
+        sizeof(q4_host_packed), SEEN_CUDA_COPY_HOST_TO_DEVICE, stream));
+    CHECK_STATUS(seen_cuda_memcpy_async(q4_scales, q4_host_scales,
+        sizeof(q4_host_scales), SEEN_CUDA_COPY_HOST_TO_DEVICE, stream));
+    token = borrow(stream);
+    CHECK_STATUS(seen_qwen_q4_sym_g64_linear_f32(&token,
+        view(q4_input, sizeof(q4_host_input)),
+        view(q4_packed, sizeof(q4_host_packed)),
+        view(q4_scales, sizeof(q4_host_scales)),
+        view(q4_output, sizeof(q4_actual)), q4_rows, q4_input_width,
+        q4_output_width));
+    CHECK_STATUS(seen_cuda_memcpy_async(q4_actual, q4_output,
+        sizeof(q4_actual), SEEN_CUDA_COPY_DEVICE_TO_HOST, stream));
+    CHECK_STATUS(seen_cuda_event_record(event, stream));
+    CHECK_STATUS(seen_cuda_event_synchronize(event));
+    for (uint64_t i = 0; i < q4_output_count; ++i)
+        CHECK(std::fabs(q4_actual[i] - q4_expected[i]) <= 1.0e-5f);
+    token = borrow(stream);
+    CHECK_STATUS(seen_qwen_q4_sym_g64_decode_f32(&token,
+        view(q4_packed, sizeof(q4_host_packed)),
+        view(q4_scales, sizeof(q4_host_scales)),
+        view(q4_input, sizeof(q4_decoded_actual)), q4_output_width,
+        q4_input_width));
+    CHECK_STATUS(seen_cuda_memcpy_async(q4_decoded_actual, q4_input,
+        sizeof(q4_decoded_actual), SEEN_CUDA_COPY_DEVICE_TO_HOST, stream));
+    CHECK_STATUS(seen_cuda_event_record(event, stream));
+    CHECK_STATUS(seen_cuda_event_synchronize(event));
+    for (uint64_t i = 0; i < q4_output_width * q4_input_width; ++i)
+        CHECK(equal(q4_decoded_actual[i], q4_decoded_expected[i]));
+    const int32_t q4_gather_ids[2] = {2, 0};
+    CHECK_STATUS(seen_cuda_memcpy_async(ids, q4_gather_ids,
+        sizeof(q4_gather_ids), SEEN_CUDA_COPY_HOST_TO_DEVICE, stream));
+    token = borrow(stream);
+    CHECK_STATUS(seen_qwen_q4_sym_g64_embedding_gather_f32(&token,
+        view(q4_packed, sizeof(q4_host_packed)),
+        view(q4_scales, sizeof(q4_host_scales)), view(ids, id_bytes),
+        view(q4_input, 2 * q4_input_width * sizeof(float)), 2,
+        q4_output_width, q4_input_width));
+    CHECK_STATUS(seen_cuda_memcpy_async(q4_decoded_actual, q4_input,
+        2 * q4_input_width * sizeof(float),
+        SEEN_CUDA_COPY_DEVICE_TO_HOST, stream));
+    CHECK_STATUS(seen_cuda_event_record(event, stream));
+    CHECK_STATUS(seen_cuda_event_synchronize(event));
+    for (uint64_t column = 0; column < q4_input_width; ++column) {
+        CHECK(equal(q4_decoded_actual[column],
+            q4_decoded_expected[2 * q4_input_width + column]));
+        CHECK(equal(q4_decoded_actual[q4_input_width + column],
+            q4_decoded_expected[column]));
+    }
+    token = borrow(stream);
+    CHECK(seen_qwen_q4_sym_g64_linear_f32(&token,
+        view(q4_input, sizeof(q4_host_input) - 1),
+        view(q4_packed, sizeof(q4_host_packed)),
+        view(q4_scales, sizeof(q4_host_scales)),
+        view(q4_output, sizeof(q4_actual)), q4_rows, q4_input_width,
+        q4_output_width).code == SEEN_CUDA_INVALID_ARGUMENT);
+    CHECK(seen_qwen_q4_sym_g64_linear_f32(&token,
+        view(q4_input, sizeof(q4_host_input)),
+        view(q4_packed, sizeof(q4_host_packed)),
+        view(q4_scales, sizeof(q4_host_scales)),
+        view(q4_input, sizeof(q4_host_input)), q4_rows, q4_input_width,
+        q4_output_width).code == SEEN_CUDA_INVALID_ARGUMENT);
+    CHECK_STATUS(seen_cuda_free(&q4_output_handle));
+    CHECK_STATUS(seen_cuda_free(&q4_scale_handle));
+    CHECK_STATUS(seen_cuda_free(&q4_packed_handle));
+    CHECK_STATUS(seen_cuda_free(&q4_input_handle));
+    CHECK(q4_output_handle == 0 && q4_scale_handle == 0 &&
+          q4_packed_handle == 0 && q4_input_handle == 0);
+
     SeenCudaStreamLaunchToken bad = token;
     bad.abi_version += 1;
     CHECK(seen_qwen_fill_f32(&bad, view(c, bytes), count, 0.0f).code == SEEN_CUDA_INCOMPATIBLE);
@@ -160,6 +293,48 @@ int main() {
     CHECK(seen_qwen_embedding_gather_f32(&token, view(a, bytes), view(ids, id_bytes), view(c, bytes), 0, 4, 6).code == SEEN_CUDA_INVALID_ARGUMENT);
     CHECK(seen_qwen_copy_f32(&token, view(a, bytes), view(static_cast<char *>(a) + sizeof(float), bytes - sizeof(float)), count - 1).code == SEEN_CUDA_INVALID_ARGUMENT);
     CHECK(seen_qwen_transpose_2d_f32(&token, view(a, bytes), view(a, bytes), 4, 6).code == SEEN_CUDA_INVALID_ARGUMENT);
+
+    token = borrow(stream);
+    SeenCudaStatus full_status =
+        seen_qwen_full_forward_q4_f32(&token, nullptr);
+    CHECK(full_status.code == SEEN_CUDA_INVALID_ARGUMENT);
+    CHECK(std::strcmp(full_status.message, "full-model request is null") == 0);
+    auto *full_tensors = static_cast<SeenQwenQ4TensorView *>(
+        std::calloc(1027, sizeof(SeenQwenQ4TensorView)));
+    CHECK(full_tensors != nullptr);
+    SeenQwenFullForwardRequest full_request{};
+    full_request.tensors = full_tensors;
+    full_request.tensor_count = 1027;
+    full_request.token_count = 1;
+    full_request.cache_capacity = 128;
+    full_status = seen_qwen_full_forward_q4_f32(&token, &full_request);
+    CHECK(full_status.code == SEEN_CUDA_INVALID_ARGUMENT);
+    CHECK(std::strcmp(full_status.message,
+                      "invalid bounded device buffer view") == 0);
+    full_request.reserved = 1;
+    full_status = seen_qwen_full_forward_q4_f32(&token, &full_request);
+    CHECK(full_status.code == SEEN_CUDA_INVALID_ARGUMENT);
+    CHECK(std::strcmp(full_status.message,
+                      "full-model request reserved field is nonzero") == 0);
+    full_request.reserved = 0;
+    full_request.tensor_count = 1026;
+    full_status = seen_qwen_full_forward_q4_f32(&token, &full_request);
+    CHECK(full_status.code == SEEN_CUDA_INVALID_ARGUMENT);
+    CHECK(std::strcmp(full_status.message,
+                      "full-model tensor count is not 1027") == 0);
+    full_request.tensor_count = 1027;
+    full_request.cache_capacity = 127;
+    full_status = seen_qwen_full_forward_q4_f32(&token, &full_request);
+    CHECK(full_status.code == SEEN_CUDA_INVALID_ARGUMENT);
+    CHECK(std::strcmp(full_status.message,
+                      "full-model cache capacity is not 128") == 0);
+    full_request.cache_capacity = 128;
+    full_request.decode = 2;
+    full_status = seen_qwen_full_forward_q4_f32(&token, &full_request);
+    CHECK(full_status.code == SEEN_CUDA_INVALID_ARGUMENT);
+    CHECK(std::strcmp(full_status.message,
+                      "full-model decode selector is not boolean") == 0);
+    std::free(full_tensors);
 
     CHECK_STATUS(seen_cuda_graph_begin_capture(stream));
     token = borrow(stream);

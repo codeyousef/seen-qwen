@@ -32,8 +32,8 @@ class CudaGdnStateContractTest(unittest.TestCase):
             "seen_cuda_stream_borrow_launch_token",
         ):
             self.assertNotIn(forbidden, self.source)
-        self.assertEqual(self.source.count("<<<"), 30)
-        self.assertEqual(self.source.count(", 0, stream>>>"), 28)
+        self.assertEqual(self.source.count("<<<"), 33)
+        self.assertEqual(self.source.count(", 0, stream>>>"), 31)
         self.assertIn("start_position != processed_position", self.source)
         self.assertIn("kernel_length != 4", self.source)
 

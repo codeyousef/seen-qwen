@@ -80,7 +80,7 @@ fun appendLayerPlan(steps: Array<QwenExecutionStep>, layer: Int,
     var ordinal = steps.length()
     steps.push(qwenPlanStep(QWEN_PLAN_RMSNORM, layer as Int32,
         ordinal, true)); ordinal = ordinal + 1
-    let hybridKind = if layer == 3 or layer == 7 {
+    let hybridKind = if ((layer + 1) % 4) == 0 {
         if prefill { QWEN_PLAN_ATTENTION_PREFILL }
         else { QWEN_PLAN_ATTENTION_DECODE }
     } else {

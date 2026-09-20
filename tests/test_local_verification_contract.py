@@ -61,13 +61,13 @@ class LocalVerificationContractTests(unittest.TestCase):
 
     def test_inputs_match_dependency_and_oracle_locks(self) -> None:
         identities = (
-            "f714d85d0e53ca907ada16b0c58149fd93250211",
-            "827fbbb6784fa9a2123b21d8b9d84035f01a9657",
-            "af055801804a458183e7b2d3048ed62809e2c272",
-            "4a43cab0ff2ef932222c33e006a685e78969242305fa5f640071e366a5f7f9d9",
-            "7b71bba386641ce6655f1d7e5a124dbd5828709709af498b9f8b03fa1e7bda30",
-            "3a7f5a172f6e4bc2834547634762107327ed9ac865ba457431f1e804fbd3c8c4",
-            "af7209cc9407c3933f969cdcf74164956ede888993eba021e15519ff25fcf53e",
+            "6b0b354c1433cd5850c7350424b5630d4204bd26",
+            "00f61783fa2871e9c9d75675bf81ad2febb5dac7",
+            "5e4cfce183f1d1679d647b9800a86abffd3a33db",
+            "8cd66ce69e6f506959a172b5ecb169e198b74189e6dbc261704f0efec6554cd7",
+            "dd544d342401a9066d9d76d6849e41972a60968d8ee841c678ba23cd6d82c34e",
+            "3c7af4b74da3199d652cd545814731d7695123a67f54817b2ab925055b201f59",
+            "cc7deff18b3319b36ed85ceb050e867b3fc36491e928f54e1908c8a260146be6",
             "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
             "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
             "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
@@ -186,28 +186,28 @@ class LocalVerificationContractTests(unittest.TestCase):
 
     def test_seen_release_provenance_is_exact_and_current(self) -> None:
         compiler_sha256 = (
-            "7b71bba386641ce6655f1d7e5a124dbd5828709709af498b9f8b03fa1e7bda30"
+            "dd544d342401a9066d9d76d6849e41972a60968d8ee841c678ba23cd6d82c34e"
         )
         archive_sha256 = (
-            "4a43cab0ff2ef932222c33e006a685e78969242305fa5f640071e366a5f7f9d9"
+            "8cd66ce69e6f506959a172b5ecb169e198b74189e6dbc261704f0efec6554cd7"
         )
-        source_commit = "f714d85d0e53ca907ada16b0c58149fd93250211"
-        build_id = "b10cc4127407b12265b8538fe67d000df0fdd2c2"
+        source_commit = "6b0b354c1433cd5850c7350424b5630d4204bd26"
+        build_id = "c9865c92973d525338c018a2c6e84684a7abe8bb"
 
         for lock_entry in (
-            '# release_tag = "v0.20.10"',
+            '# release_tag = "v0.22.2"',
             f'# certified_commit = "{source_commit}"',
             f'# linux_x64_archive_sha256 = "{archive_sha256}"',
             f'# packaged_compiler_sha256 = "{compiler_sha256}"',
             f'# compiler_build_id = "{build_id}"',
-            "compiler=0.20.10",
+            "compiler=0.22.2",
             "target=linux-x86_64",
             "cpu=x86-64",
         ):
             self.assertIn(lock_entry, self.lock)
 
         for prepare_entry in (
-            "releases/download/v0.20.10/seen-0.20.10-linux-x64.tar.gz",
+            "releases/download/v0.22.2/seen-0.22.2-linux-x64.tar.gz",
             archive_sha256,
             compiler_sha256,
             source_commit,
@@ -226,9 +226,9 @@ class LocalVerificationContractTests(unittest.TestCase):
             self.assertIn(prepare_entry, self.prepare)
 
         for inner_entry in (
-            "seen-0.20.10-linux-x64",
+            "seen-0.22.2-linux-x64",
             compiler_sha256,
-            "Seen 0.20.10",
+            "Seen 0.22.2",
             "--target-cpu=x86-64",
         ):
             self.assertIn(inner_entry, self.inner)
