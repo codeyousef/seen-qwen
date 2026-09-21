@@ -1,0 +1,55 @@
+import env.env.{args}
+import seen_qwen.cli.command.{QWEN_CLI_HELP, QWEN_CLI_VERSION,
+    QWEN_EXIT_UNSUPPORTED, parseQwenCli, qwenCliHelp,
+    renderQwenCliDiagnostic}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+fun qwenCliRequestsJson(arguments: Array<String>) r: Bool {
+    var index = 0
+    while index + 1 < arguments.length() {
+        if arguments[index] == "--diagnostic-format" and
+            arguments[index + 1] == "json" { return true }
+        index = index + 1
+    }
+    return false
+}
+
+fun main() r: Int {
+    let arguments = args()
+    let parsed = parseQwenCli(arguments)
+    if parsed.isErr() {
+        let error = parsed.unwrapErr()
+        let rendered = renderQwenCliDiagnostic(error,
+            if qwenCliRequestsJson(arguments) { "json" } else { "human" })
+        println(rendered)
+        let code = error.exitCode
+        seen_string_release_owned(rendered)
+        error.free(); parsed.releaseContainer()
+        arguments.free()
+        return code
+    }
+    let invocation = parsed.unwrap()
+    parsed.releaseContainer()
+    if invocation.kind == QWEN_CLI_HELP {
+        let help = qwenCliHelp()
+        println(help)
+        seen_string_release_owned(help)
+        invocation.close(); invocation.free(); arguments.free()
+        return 0
+    }
+    if invocation.kind == QWEN_CLI_VERSION {
+        println("seen-qwen 0.15.0-dev")
+        invocation.close(); invocation.free(); arguments.free()
+        return 0
+    }
+    let command = invocation.command
+    let error = "seen-qwen: qwen.cli.command-not-installed: command: " +
+        command + " is parsed but its implementation leaf is not installed"
+    println(error)
+    seen_string_release_owned(error)
+    invocation.close(); invocation.free(); arguments.free()
+    return QWEN_EXIT_UNSUPPORTED
+}
+
+main()

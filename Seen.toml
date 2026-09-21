@@ -7,6 +7,7 @@ language = "en"
 visibility = "private"
 edition = "2025"
 modules = [
+    "src/cli/command.seen",
     "src/formats/sqw.seen",
     "src/formats/sqw_reader.seen",
     "src/formats/sqw_writer.seen",

@@ -1,17 +1,17 @@
 version = 2
-manifest_sha256 = "9e3dd715e512efde300901fbd4cabc48186e4e412cc9f4e7530378a833957a77"
+manifest_sha256 = "87691e02f21a8771d3fae876ad271eefeadcdf0c6627ac29c5e77f975a381dbc"
 
 # Audited Seen release toolchain identity (paths are intentionally excluded).
-# release_tag = "v0.22.3"
-# certified_commit = "a77afc88a5f417ab434278ed0b5601e5b8ef2ff4"
-# source_tree = "221f8267bff77756f6273a8f0ff1f109ed7100b4"
-# tag_object = "6dc62f07cdeadcd525a253786b135e65b24d161b"
-# linux_x64_archive_sha256 = "a184046c57c1a8c2e443123507068d7f730ba2ab90979370142efee7be6f9bb6"
-# packaged_compiler_sha256 = "70dd5ac0371dad54861b49e4015c41ba70372b68f9dd5554cc8971c37254fc6e"
-# compiler_build_id = "79eb8b9838bf27e098b2eae3d8aeef0964106049"
-# packaged_package_client_sha256 = "51355eefeb719960466f92daa525224fba1651263a9c3f9ff6cf6cf732f28b52"
-# compatibility_manifest_sha256 = "0aac82e228da8b30cc5815f98839dc048f958e36906aedc6a7ceeb27d0a7f641"
-# compatibility = "seen-compatibility-manifest-v1; compiler=0.22.3; layout=seen-layout-abi-v2; object-cache=seen-object-cache-abi-v3; package-interface=seen-package-interface-v2; package-object-manifest=seen-package-object-manifest-v2; prebuilt-package=seen-prebuilt-package-v2; package-client=0.22.3/SEENPKG1; runtime=runtime-v4; stdlib=0.5.0/manifest-v1; llvm-min=19; target=linux-x86_64; cpu=x86-64"
+# release_tag = "v0.22.4"
+# certified_commit = "a19d2e9345fdf0a46737fee8b1529355d494b6a8"
+# source_tree = "0f3d38f8b0d308c72057bb45c25e5c13490f2df8"
+# tag_object = "198ef8f03783ffb6f510d85d83e6fb4e65062180"
+# linux_x64_archive_sha256 = "7df93bef4058bf8f891043e374d10d977aee5d63f12ffa7eab68626e82fe71a1"
+# packaged_compiler_sha256 = "b3fecba2fb9d35434fa02f1cbc15d4208eda79b5c1903a3b19be55c47578b620"
+# compiler_build_id = "92251d4b331b286c08947ba2f2875227dda855fe"
+# packaged_package_client_sha256 = "7af85e6aa94d61f660a22f2900eaca6b2d57b0f5276a34da165ba3cf5c8b416a"
+# compatibility_manifest_sha256 = "97eb0a982a06f3f54c37a21bde08b6e03f2c9ae7e19f8a4fda6519d3e5f54ad4"
+# compatibility = "seen-compatibility-manifest-v1; compiler=0.22.4; layout=seen-layout-abi-v2; object-cache=seen-object-cache-abi-v3; package-interface=seen-package-interface-v2; package-object-manifest=seen-package-object-manifest-v2; prebuilt-package=seen-prebuilt-package-v2; package-client=0.22.4/SEENPKG1; runtime=runtime-v4; stdlib=0.5.0/manifest-v1; llvm-min=19; target=linux-x86_64; cpu=x86-64"
 
 [root]
 name = "seen_qwen"

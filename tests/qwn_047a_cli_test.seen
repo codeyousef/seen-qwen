@@ -1,0 +1,263 @@
+import seen_qwen.cli.command.{QWEN_CLI_INSPECT, QWEN_CLI_CONVERT,
+    QWEN_CLI_VERIFY, QWEN_CLI_RUN, QWEN_CLI_BENCH,
+    QwenCliInvocation, QwenCliError,
+    QWEN_EXIT_CLI_CONFIG, QWEN_EXIT_ARTIFACT_VALIDATION,
+    QWEN_EXIT_UNSUPPORTED, QWEN_EXIT_HOST_ALLOCATION,
+    QWEN_EXIT_DEVICE_ALLOCATION, QWEN_EXIT_CUDA_RUNTIME,
+    QWEN_EXIT_CORRECTNESS, QWEN_EXIT_BENCHMARK, QWEN_EXIT_CANCELLED,
+    QWEN_EXIT_INTERNAL, parseQwenCli, qwenCliExitCodeForDiagnostic,
+    renderQwenCliDiagnostic}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun arguments(values: Array<String>) r: Array<String> {
+    let result = Array<String>()
+    result.push("seen-qwen")
+    var index = 0
+    while index < values.length() {
+        result.push(values[index]); index = index + 1
+    }
+    values.free()
+    return result
+}
+
+fun releaseSuccess(parsed: Result<QwenCliInvocation, QwenCliError>) r: Void {
+    let invocation = parsed.unwrap()
+    invocation.close(); invocation.free(); parsed.releaseContainer()
+}
+
+fun requireError(values: Array<String>, code: String, exitCode: Int) r: Void {
+    let argv = arguments(values)
+    let parsed = parseQwenCli(argv)
+    require(parsed.isErr(), "invalid CLI vector must fail")
+    let error = parsed.unwrapErr()
+    require(error.code == code and error.exitCode == exitCode,
+        "CLI vector must return its stable diagnostic and exit code")
+    error.free(); parsed.releaseContainer(); argv.free()
+}
+
+fun testCommands() r: Void {
+    let inspectArgs = Array<String>()
+    inspectArgs.push("inspect"); inspectArgs.push("--model-lock")
+    inspectArgs.push("model-lock.json"); inspectArgs.push("--output")
+    inspectArgs.push("inspect.json"); inspectArgs.push("--device")
+    inspectArgs.push("0")
+    let inspectArgv = arguments(inspectArgs)
+    let inspect = parseQwenCli(inspectArgv)
+    require(inspect.isOkay() and inspect.unwrap().kind == QWEN_CLI_INSPECT and
+        inspect.unwrap().device == (0 as Int32), "parse strict inspect command")
+    releaseSuccess(inspect); inspectArgv.free()
+
+    let convertArgs = Array<String>()
+    convertArgs.push("convert"); convertArgs.push("--model-lock")
+    convertArgs.push("model-lock.json"); convertArgs.push("--quant-profile")
+    convertArgs.push("q4-balanced"); convertArgs.push("--output-root")
+    convertArgs.push("converted"); convertArgs.push("--calibration-lock")
+    convertArgs.push("calibration.json"); convertArgs.push("--resume")
+    convertArgs.push("--verify-only"); convertArgs.push("--max-host-memory")
+    convertArgs.push("68719476736"); convertArgs.push("--jobs")
+    convertArgs.push("1")
+    let convertArgv = arguments(convertArgs)
+    let convert = parseQwenCli(convertArgv)
+    require(convert.isOkay() and convert.unwrap().kind == QWEN_CLI_CONVERT and
+        convert.unwrap().resume and convert.unwrap().verifyOnly and
+        convert.unwrap().maxHostMemory == (68719476736 as UInt64),
+        "parse strict convert command")
+    releaseSuccess(convert); convertArgv.free()
+
+    let verifyArgs = Array<String>()
+    verifyArgs.push("verify"); verifyArgs.push("--engine")
+    verifyArgs.push("engine.json"); verifyArgs.push("--suite")
+    verifyArgs.push("all")
+    let verifyArgv = arguments(verifyArgs)
+    let verify = parseQwenCli(verifyArgv)
+    require(verify.isOkay() and verify.unwrap().kind == QWEN_CLI_VERIFY,
+        "parse strict verify command")
+    releaseSuccess(verify); verifyArgv.free()
+
+    let runArgs = Array<String>()
+    runArgs.push("run"); runArgs.push("--engine")
+    runArgs.push("engine.json"); runArgs.push("--profile")
+    runArgs.push("speed"); runArgs.push("--prompt")
+    runArgs.push("hello"); runArgs.push("--max-new-tokens")
+    runArgs.push("512"); runArgs.push("--sampling")
+    runArgs.push("thinking"); runArgs.push("--output-mode")
+    runArgs.push("jsonl"); runArgs.push("--diagnostic-format")
+    runArgs.push("json")
+    let runArgv = arguments(runArgs)
+    let run = parseQwenCli(runArgv)
+    require(run.isOkay() and run.unwrap().kind == QWEN_CLI_RUN and
+        run.unwrap().maxNewTokens == (512 as UInt64) and
+        run.unwrap().outputMode == "jsonl", "parse strict run command")
+    releaseSuccess(run); runArgv.free()
+
+    let benchArgs = Array<String>()
+    benchArgs.push("bench"); benchArgs.push("--engine")
+    benchArgs.push("engine.json"); benchArgs.push("--plan")
+    benchArgs.push("plan.toml"); benchArgs.push("--environment-lock")
+    benchArgs.push("environment.json")
+    let benchArgv = arguments(benchArgs)
+    let bench = parseQwenCli(benchArgv)
+    require(bench.isOkay() and bench.unwrap().kind == QWEN_CLI_BENCH,
+        "parse strict bench command")
+    releaseSuccess(bench); benchArgv.free()
+}
+
+fun testFailures() r: Void {
+    let empty = Array<String>()
+    let emptyParsed = parseQwenCli(empty)
+    require(emptyParsed.isErr() and
+        emptyParsed.unwrapErr().code == "qwen.cli.argument-count",
+        "reject an empty argument vector")
+    let emptyError = emptyParsed.unwrapErr()
+    emptyError.free(); emptyParsed.releaseContainer(); empty.free()
+
+    let unknown = Array<String>(); unknown.push("wat")
+    requireError(unknown, "qwen.cli.unknown-command", QWEN_EXIT_CLI_CONFIG)
+
+    let serve = Array<String>(); serve.push("serve")
+    requireError(serve, "qwen.cli.unsupported-command", QWEN_EXIT_UNSUPPORTED)
+
+    let missing = Array<String>(); missing.push("inspect")
+    requireError(missing, "qwen.cli.required-option", QWEN_EXIT_CLI_CONFIG)
+
+    let helpTrailing = Array<String>()
+    helpTrailing.push("--help"); helpTrailing.push("unexpected")
+    requireError(helpTrailing, "qwen.cli.trailing-argument",
+        QWEN_EXIT_CLI_CONFIG)
+
+    let versionTrailing = Array<String>()
+    versionTrailing.push("--version"); versionTrailing.push("unexpected")
+    requireError(versionTrailing, "qwen.cli.trailing-argument",
+        QWEN_EXIT_CLI_CONFIG)
+
+    let missingValue = Array<String>()
+    missingValue.push("inspect"); missingValue.push("--model-lock")
+    requireError(missingValue, "qwen.cli.missing-value",
+        QWEN_EXIT_CLI_CONFIG)
+
+    let duplicate = Array<String>()
+    duplicate.push("verify"); duplicate.push("--engine")
+    duplicate.push("one"); duplicate.push("--engine"); duplicate.push("two")
+    duplicate.push("--suite"); duplicate.push("all")
+    requireError(duplicate, "qwen.cli.duplicate-option", QWEN_EXIT_CLI_CONFIG)
+
+    let incompatible = Array<String>()
+    incompatible.push("inspect"); incompatible.push("--model-lock")
+    incompatible.push("lock"); incompatible.push("--output")
+    incompatible.push("out"); incompatible.push("--resume")
+    requireError(incompatible, "qwen.cli.unknown-option", QWEN_EXIT_CLI_CONFIG)
+
+    let prompts = Array<String>()
+    prompts.push("run"); prompts.push("--engine"); prompts.push("engine")
+    prompts.push("--profile"); prompts.push("speed")
+    prompts.push("--prompt"); prompts.push("hello")
+    prompts.push("--prompt-file"); prompts.push("prompt.txt")
+    prompts.push("--max-new-tokens"); prompts.push("1")
+    prompts.push("--sampling"); prompts.push("greedy")
+    requireError(prompts, "qwen.cli.prompt-source", QWEN_EXIT_CLI_CONFIG)
+
+    let junkInteger = Array<String>()
+    junkInteger.push("convert"); junkInteger.push("--model-lock")
+    junkInteger.push("lock"); junkInteger.push("--quant-profile")
+    junkInteger.push("q4"); junkInteger.push("--output-root")
+    junkInteger.push("out"); junkInteger.push("--jobs")
+    junkInteger.push("1x")
+    requireError(junkInteger, "qwen.cli.integer", QWEN_EXIT_CLI_CONFIG)
+
+    let overflow = Array<String>()
+    overflow.push("convert"); overflow.push("--model-lock")
+    overflow.push("lock"); overflow.push("--quant-profile")
+    overflow.push("q4"); overflow.push("--output-root")
+    overflow.push("out"); overflow.push("--max-host-memory")
+    overflow.push("18446744073709551616")
+    requireError(overflow, "qwen.cli.integer-overflow", QWEN_EXIT_CLI_CONFIG)
+
+    let deviceOverflow = Array<String>()
+    deviceOverflow.push("inspect"); deviceOverflow.push("--model-lock")
+    deviceOverflow.push("lock"); deviceOverflow.push("--output")
+    deviceOverflow.push("out"); deviceOverflow.push("--device")
+    deviceOverflow.push("2147483648")
+    requireError(deviceOverflow, "qwen.cli.device", QWEN_EXIT_CLI_CONFIG)
+
+    let jobs = Array<String>()
+    jobs.push("convert"); jobs.push("--model-lock"); jobs.push("lock")
+    jobs.push("--quant-profile"); jobs.push("q4")
+    jobs.push("--output-root"); jobs.push("out")
+    jobs.push("--jobs"); jobs.push("65")
+    requireError(jobs, "qwen.cli.jobs", QWEN_EXIT_CLI_CONFIG)
+
+    let tokenBound = Array<String>()
+    tokenBound.push("run"); tokenBound.push("--engine")
+    tokenBound.push("engine"); tokenBound.push("--profile")
+    tokenBound.push("speed"); tokenBound.push("--prompt")
+    tokenBound.push("hello"); tokenBound.push("--max-new-tokens")
+    tokenBound.push("262145"); tokenBound.push("--sampling")
+    tokenBound.push("greedy")
+    requireError(tokenBound, "qwen.cli.max-new-tokens",
+        QWEN_EXIT_CLI_CONFIG)
+
+    let badSuite = Array<String>()
+    badSuite.push("verify"); badSuite.push("--engine")
+    badSuite.push("engine"); badSuite.push("--suite")
+    badSuite.push("unknown")
+    requireError(badSuite, "qwen.cli.verify-suite", QWEN_EXIT_CLI_CONFIG)
+
+    let badFormat = Array<String>()
+    badFormat.push("inspect"); badFormat.push("--model-lock")
+    badFormat.push("lock"); badFormat.push("--output")
+    badFormat.push("out"); badFormat.push("--diagnostic-format")
+    badFormat.push("xml")
+    requireError(badFormat, "qwen.cli.diagnostic-format",
+        QWEN_EXIT_CLI_CONFIG)
+}
+
+fun testExitCodesAndDiagnostics() r: Void {
+    require(qwenCliExitCodeForDiagnostic("qwen.cli.syntax") ==
+            QWEN_EXIT_CLI_CONFIG and
+        qwenCliExitCodeForDiagnostic("sqw.magic") ==
+            QWEN_EXIT_ARTIFACT_VALIDATION and
+        qwenCliExitCodeForDiagnostic("qwen.unsupported.profile") ==
+            QWEN_EXIT_UNSUPPORTED and
+        qwenCliExitCodeForDiagnostic("qwen.host-allocation.limit") ==
+            QWEN_EXIT_HOST_ALLOCATION and
+        qwenCliExitCodeForDiagnostic("qwen.device-allocation.oom") ==
+            QWEN_EXIT_DEVICE_ALLOCATION and
+        qwenCliExitCodeForDiagnostic("qwen.cuda.launch") ==
+            QWEN_EXIT_CUDA_RUNTIME and
+        qwenCliExitCodeForDiagnostic("qwen.correctness.token") ==
+            QWEN_EXIT_CORRECTNESS and
+        qwenCliExitCodeForDiagnostic("qwen.benchmark.invalid") ==
+            QWEN_EXIT_BENCHMARK and
+        qwenCliExitCodeForDiagnostic("qwen.cancelled") ==
+            QWEN_EXIT_CANCELLED and
+        qwenCliExitCodeForDiagnostic("unknown") == QWEN_EXIT_INTERNAL,
+        "map every frozen public exit-code class")
+    let error = QwenCliError{ code: "qwen.cli.syntax", field: "arguments",
+        message: "invalid arguments", exitCode: 2 }
+    let rendered = renderQwenCliDiagnostic(error, "json")
+    require(rendered ==
+        "{\"schema\":\"seen-qwen-diagnostic-v1\",\"code\":\"qwen.cli.syntax\",\"field\":\"arguments\",\"message\":\"invalid arguments\",\"exit_code\":2}",
+        "render canonical machine diagnostic")
+    seen_string_release_owned(rendered); error.free()
+
+    let escapedError = QwenCliError{ code: "qwen.cli.\\\"syntax",
+        field: "arg\\numents", message: "invalid\\targuments", exitCode: 2 }
+    let escaped = renderQwenCliDiagnostic(escapedError, "json")
+    require(escaped ==
+        "{\"schema\":\"seen-qwen-diagnostic-v1\",\"code\":\"qwen.cli.\\\\\\\"syntax\",\"field\":\"arg\\\\numents\",\"message\":\"invalid\\\\targuments\",\"exit_code\":2}",
+        "escape machine diagnostic strings")
+    seen_string_release_owned(escaped); escapedError.free()
+}
+
+fun main() r: Int {
+    testCommands(); testFailures(); testExitCodesAndDiagnostics()
+    println("PASS: QWN-047A strict CLI, configuration, exits, and diagnostics")
+    return 0
+}
+
+main()
