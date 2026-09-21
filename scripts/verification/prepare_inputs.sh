@@ -7,13 +7,13 @@ ROOT_DIR="$(cd -P -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
 VERIFICATION_ROOT="$ROOT_DIR/.seen/verification"
 ASSET_ROOT="$ROOT_DIR/.seen/oracle-assets-qwen38"
 
-SEEN_ARCHIVE_URL="https://github.com/codeyousef/SeenLang/releases/download/v0.22.2/seen-0.22.2-linux-x64.tar.gz"
-SEEN_ARCHIVE_SHA256="8cd66ce69e6f506959a172b5ecb169e198b74189e6dbc261704f0efec6554cd7"
-SEEN_COMPILER_SHA256="dd544d342401a9066d9d76d6849e41972a60968d8ee841c678ba23cd6d82c34e"
-SEEN_PACKAGE_CLIENT_SHA256="3c7af4b74da3199d652cd545814731d7695123a67f54817b2ab925055b201f59"
-SEEN_COMPATIBILITY_SHA256="cc7deff18b3319b36ed85ceb050e867b3fc36491e928f54e1908c8a260146be6"
-SEEN_SOURCE_COMMIT="6b0b354c1433cd5850c7350424b5630d4204bd26"
-SEEN_BUILD_ID="c9865c92973d525338c018a2c6e84684a7abe8bb"
+SEEN_ARCHIVE_URL="https://github.com/codeyousef/SeenLang/releases/download/v0.22.4/seen-0.22.4-linux-x64.tar.gz"
+SEEN_ARCHIVE_SHA256="7df93bef4058bf8f891043e374d10d977aee5d63f12ffa7eab68626e82fe71a1"
+SEEN_COMPILER_SHA256="b3fecba2fb9d35434fa02f1cbc15d4208eda79b5c1903a3b19be55c47578b620"
+SEEN_PACKAGE_CLIENT_SHA256="7af85e6aa94d61f660a22f2900eaca6b2d57b0f5276a34da165ba3cf5c8b416a"
+SEEN_COMPATIBILITY_SHA256="97eb0a982a06f3f54c37a21bde08b6e03f2c9ae7e19f8a4fda6519d3e5f54ad4"
+SEEN_SOURCE_COMMIT="a19d2e9345fdf0a46737fee8b1529355d494b6a8"
+SEEN_BUILD_ID="92251d4b331b286c08947ba2f2875227dda855fe"
 SEEN_CPU_BASELINE="x86-64"
 NUMPY_WHEEL_URL="https://files.pythonhosted.org/packages/f5/10/ca162f45a102738958dcec8023062dad0cbc17d1ab99d68c4e4a6c45fb2b/numpy-2.3.5-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
 NUMPY_WHEEL_SHA256="11e06aa0af8c0f05104d56450d6093ee639e15f24ecf62d417329d06e522e017"
@@ -99,7 +99,7 @@ verify_provenance() {
     [ -f "$verifier" ] && [ -x "$verifier" ] && [ ! -L "$verifier" ] ||
         return 1
     [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
-    "$verifier" "$manifest" "$root/bin/seen" 0.22.2 || return 1
+    "$verifier" "$manifest" "$root/bin/seen" 0.22.4 || return 1
     grep -Fqx -- "source_commit=$SEEN_SOURCE_COMMIT" "$manifest" || return 1
     grep -Fqx -- "compiler_build_id=$SEEN_BUILD_ID" "$manifest" || return 1
     grep -Fqx -- "cpu_baseline=$SEEN_CPU_BASELINE" "$manifest" || return 1
@@ -189,9 +189,9 @@ GIT_COMMON_DIR="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-comm
 SHARED_ROOT="${GIT_COMMON_DIR%/.git}"
 TOOLCHAINS_ROOT="$SHARED_ROOT/.seen/toolchains"
 TOOLCHAIN_DOWNLOADS_ROOT="$TOOLCHAINS_ROOT/downloads"
-DOWNLOAD_ROOT="$TOOLCHAIN_DOWNLOADS_ROOT/v0.22.2"
-TOOLCHAIN_VERSION_ROOT="$TOOLCHAINS_ROOT/seen-0.22.2"
-TOOLCHAIN_ROOT="$TOOLCHAIN_VERSION_ROOT/seen-0.22.2-linux-x64"
+DOWNLOAD_ROOT="$TOOLCHAIN_DOWNLOADS_ROOT/v0.22.4"
+TOOLCHAIN_VERSION_ROOT="$TOOLCHAINS_ROOT/seen-0.22.4"
+TOOLCHAIN_ROOT="$TOOLCHAIN_VERSION_ROOT/seen-0.22.4-linux-x64"
 
 ensure_local_directory "$ROOT_DIR/.seen"
 ensure_local_directory "$VERIFICATION_ROOT"
@@ -203,7 +203,7 @@ ensure_local_directory "$TOOLCHAIN_VERSION_ROOT"
 ensure_local_directory "$ASSET_ROOT"
 ensure_local_directory "$VERIFICATION_ROOT/python-wheels"
 
-archive="$DOWNLOAD_ROOT/seen-0.22.2-linux-x64.tar.gz"
+archive="$DOWNLOAD_ROOT/seen-0.22.4-linux-x64.tar.gz"
 download_verified "$SEEN_ARCHIVE_URL" "$archive" "$SEEN_ARCHIVE_SHA256"
 
 extract_root=$(mktemp -d "$VERIFICATION_ROOT/toolchain.extract.XXXXXX")
@@ -221,7 +221,7 @@ cleanup_extract() {
 trap cleanup_extract EXIT
 while IFS= read -r member; do
     case "$member" in
-        seen-0.22.2-linux-x64|seen-0.22.2-linux-x64/*) ;;
+        seen-0.22.4-linux-x64|seen-0.22.4-linux-x64/*) ;;
         *) fail "release archive contains an unsafe member: $member" ;;
     esac
     case "/$member/" in
@@ -229,7 +229,7 @@ while IFS= read -r member; do
     esac
 done < <(tar -tzf "$archive")
 tar -xzf "$archive" -C "$extract_root" --no-same-owner --no-same-permissions
-extracted="$extract_root/seen-0.22.2-linux-x64"
+extracted="$extract_root/seen-0.22.4-linux-x64"
 [ -d "$extracted" ] && [ ! -L "$extracted" ] ||
     fail "release archive did not contain the expected root"
 unexpected_type=$(find "$extracted" -mindepth 1 ! -type f ! -type d -print -quit)
@@ -299,4 +299,4 @@ PY
     mv -- "$numpy_stage" "$numpy_site"
 fi
 
-echo "PASS: exact Seen v0.22.2 toolchain, pinned NumPy wheel, and Qwen tokenizer/sampling inputs verified"
+echo "PASS: exact Seen v0.22.4 toolchain, pinned NumPy wheel, and Qwen tokenizer/sampling inputs verified"

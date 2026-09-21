@@ -1,0 +1,624 @@
+///
+/// QWN-047A strict command-line and configuration surface.
+///
+/// Parsing is deliberately independent from command execution. QWN-047B
+/// through QWN-047E consume the typed invocation after this module has
+/// rejected ambiguity, unknown options, duplicate options, unsafe bounds, and
+/// implicit fallback. Every stored string is owned by QwenCliInvocation.
+///
+
+import core.result.{Result}
+import json.builder.{jsonAppendBorrowedPart, jsonAppendEscapedString,
+    jsonAppendInt, jsonFinishOwned}
+import str.string.{StringBuilder, startsWith}
+
+extern "C" fun seen_string_clone_owned(value: String) r: String
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+pub let QWEN_EXIT_SUCCESS: Int = 0
+pub let QWEN_EXIT_CLI_CONFIG: Int = 2
+pub let QWEN_EXIT_ARTIFACT_VALIDATION: Int = 3
+pub let QWEN_EXIT_UNSUPPORTED: Int = 4
+pub let QWEN_EXIT_HOST_ALLOCATION: Int = 5
+pub let QWEN_EXIT_DEVICE_ALLOCATION: Int = 6
+pub let QWEN_EXIT_CUDA_RUNTIME: Int = 7
+pub let QWEN_EXIT_CORRECTNESS: Int = 8
+pub let QWEN_EXIT_BENCHMARK: Int = 9
+pub let QWEN_EXIT_CANCELLED: Int = 10
+pub let QWEN_EXIT_INTERNAL: Int = 11
+
+pub let QWEN_CLI_HELP: Int32 = 0 as Int32
+pub let QWEN_CLI_INSPECT: Int32 = 1 as Int32
+pub let QWEN_CLI_CONVERT: Int32 = 2 as Int32
+pub let QWEN_CLI_VERIFY: Int32 = 3 as Int32
+pub let QWEN_CLI_RUN: Int32 = 4 as Int32
+pub let QWEN_CLI_BENCH: Int32 = 5 as Int32
+pub let QWEN_CLI_VERSION: Int32 = 6 as Int32
+
+const QWEN_CLI_MAX_ARGUMENTS: Int = 64
+const QWEN_CLI_MAX_ARGUMENT_BYTES: Int = 4096
+const QWEN_CLI_MAX_TOTAL_BYTES: Int = 16384
+const QWEN_CLI_MAX_JOBS: Int = 64
+const QWEN_CLI_MAX_NEW_TOKENS: UInt64 = 262144 as UInt64
+
+pub class QwenCliError {
+    var code: String
+    var field: String
+    var message: String
+    var exitCode: Int
+}
+
+fun qwenCliError(code: String, field: String, message: String,
+    exitCode: Int = QWEN_EXIT_CLI_CONFIG) r: QwenCliError {
+    return QwenCliError{ code: code, field: field, message: message,
+        exitCode: exitCode }
+}
+
+@move
+pub class QwenCliInvocation {
+    var kind: Int32
+    var command: String
+    var modelLock: String
+    var output: String
+    var outputRoot: String
+    var quantProfile: String
+    var calibrationLock: String
+    var engine: String
+    var suite: String
+    var profile: String
+    var prompt: String
+    var promptFile: String
+    var messagesJson: String
+    var sampling: String
+    var plan: String
+    var environmentLock: String
+    var profilesConfig: String
+    var samplingConfig: String
+    var quantizationConfig: String
+    var diagnosticFormat: String
+    var logLevel: String
+    var outputMode: String
+    var device: Int32
+    var maxNewTokens: UInt64
+    var maxHostMemory: UInt64
+    var jobs: Int
+    var resume: Bool
+    var verifyOnly: Bool
+    var closed: Bool
+
+    fun close() r: Void {
+        if this.closed { return }
+        seen_string_release_owned(this.command)
+        seen_string_release_owned(this.modelLock)
+        seen_string_release_owned(this.output)
+        seen_string_release_owned(this.outputRoot)
+        seen_string_release_owned(this.quantProfile)
+        seen_string_release_owned(this.calibrationLock)
+        seen_string_release_owned(this.engine)
+        seen_string_release_owned(this.suite)
+        seen_string_release_owned(this.profile)
+        seen_string_release_owned(this.prompt)
+        seen_string_release_owned(this.promptFile)
+        seen_string_release_owned(this.messagesJson)
+        seen_string_release_owned(this.sampling)
+        seen_string_release_owned(this.plan)
+        seen_string_release_owned(this.environmentLock)
+        seen_string_release_owned(this.profilesConfig)
+        seen_string_release_owned(this.samplingConfig)
+        seen_string_release_owned(this.quantizationConfig)
+        seen_string_release_owned(this.diagnosticFormat)
+        seen_string_release_owned(this.logLevel)
+        seen_string_release_owned(this.outputMode)
+        this.closed = true
+    }
+}
+
+fun qwenCliOwned(value: String) r: String {
+    return seen_string_clone_owned(value)
+}
+
+fun qwenCliEmptyInvocation(kind: Int32, command: String)
+    r: QwenCliInvocation {
+    return QwenCliInvocation{
+        kind: kind, command: qwenCliOwned(command),
+        modelLock: qwenCliOwned(""), output: qwenCliOwned(""),
+        outputRoot: qwenCliOwned(""), quantProfile: qwenCliOwned(""),
+        calibrationLock: qwenCliOwned(""), engine: qwenCliOwned(""),
+        suite: qwenCliOwned(""), profile: qwenCliOwned(""),
+        prompt: qwenCliOwned(""), promptFile: qwenCliOwned(""),
+        messagesJson: qwenCliOwned(""), sampling: qwenCliOwned(""),
+        plan: qwenCliOwned(""), environmentLock: qwenCliOwned(""),
+        profilesConfig: qwenCliOwned("profiles/runtime.toml"),
+        samplingConfig: qwenCliOwned("profiles/sampling.toml"),
+        quantizationConfig: qwenCliOwned("configs/quantization.toml"),
+        diagnosticFormat: qwenCliOwned("human"),
+        logLevel: qwenCliOwned("info"), outputMode: qwenCliOwned("human"),
+        device: -1 as Int32, maxNewTokens: 0 as UInt64,
+        maxHostMemory: 0 as UInt64, jobs: 1, resume: false,
+        verifyOnly: false, closed: false }
+}
+
+fun qwenCliReplace(current: String, value: String) r: String {
+    seen_string_release_owned(current)
+    return qwenCliOwned(value)
+}
+
+fun qwenCliStrictUnsigned(text: String, field: String)
+    r: Result<UInt64, QwenCliError> {
+    if text.length() == 0 {
+        return Err<UInt64, QwenCliError>(qwenCliError(
+            "qwen.cli.integer", field, "expected a non-empty decimal integer"))
+    }
+    var value: UInt64 = 0 as UInt64
+    var index = 0
+    while index < text.length() {
+        let byte = text.byteAt(index)
+        if byte < 48 or byte > 57 {
+            return Err<UInt64, QwenCliError>(qwenCliError(
+                "qwen.cli.integer", field,
+                "expected an unsigned decimal integer without suffixes"))
+        }
+        let digit = (byte - 48) as UInt64
+        if value > ((18446744073709551615 as UInt64) - digit) /
+            (10 as UInt64) {
+            return Err<UInt64, QwenCliError>(qwenCliError(
+                "qwen.cli.integer-overflow", field,
+                "decimal integer exceeds UInt64"))
+        }
+        value = value * (10 as UInt64) + digit
+        index = index + 1
+    }
+    return Ok<UInt64, QwenCliError>(value)
+}
+
+fun qwenCliKind(command: String) r: Int32 {
+    if command == "inspect" { return QWEN_CLI_INSPECT }
+    if command == "convert" { return QWEN_CLI_CONVERT }
+    if command == "verify" { return QWEN_CLI_VERIFY }
+    if command == "run" { return QWEN_CLI_RUN }
+    if command == "bench" { return QWEN_CLI_BENCH }
+    return -1 as Int32
+}
+
+fun qwenCliOptionAllowed(kind: Int32, option: String) r: Bool {
+    if option == "--profiles" or option == "--sampling-config" or
+        option == "--quantization-config" or
+        option == "--diagnostic-format" or option == "--log-level" or
+        option == "--device" { return true }
+    if kind == QWEN_CLI_INSPECT {
+        return option == "--model-lock" or option == "--output"
+    }
+    if kind == QWEN_CLI_CONVERT {
+        return option == "--model-lock" or option == "--quant-profile" or
+            option == "--output-root" or option == "--calibration-lock" or
+            option == "--resume" or option == "--max-host-memory" or
+            option == "--verify-only" or option == "--jobs"
+    }
+    if kind == QWEN_CLI_VERIFY {
+        return option == "--engine" or option == "--suite" or
+            option == "--output"
+    }
+    if kind == QWEN_CLI_RUN {
+        return option == "--engine" or option == "--profile" or
+            option == "--prompt" or option == "--prompt-file" or
+            option == "--messages-json" or option == "--max-new-tokens" or
+            option == "--sampling" or option == "--output-mode" or
+            option == "--output"
+    }
+    if kind == QWEN_CLI_BENCH {
+        return option == "--engine" or option == "--plan" or
+            option == "--environment-lock" or option == "--output"
+    }
+    return false
+}
+
+fun qwenCliOptionIsFlag(option: String) r: Bool {
+    return option == "--resume" or option == "--verify-only"
+}
+
+fun qwenCliSeen(seen: Array<String>, option: String) r: Bool {
+    var index = 0
+    while index < seen.length() {
+        if seen[index] == option { return true }
+        index = index + 1
+    }
+    return false
+}
+
+fun qwenCliSetString(borrow invocation: QwenCliInvocation, option: String,
+    value: String) r: Void {
+    if option == "--model-lock" {
+        invocation.modelLock = qwenCliReplace(invocation.modelLock, value)
+    } else if option == "--output" {
+        invocation.output = qwenCliReplace(invocation.output, value)
+    } else if option == "--output-root" {
+        invocation.outputRoot = qwenCliReplace(invocation.outputRoot, value)
+    } else if option == "--quant-profile" {
+        invocation.quantProfile = qwenCliReplace(invocation.quantProfile, value)
+    } else if option == "--calibration-lock" {
+        invocation.calibrationLock = qwenCliReplace(invocation.calibrationLock, value)
+    } else if option == "--engine" {
+        invocation.engine = qwenCliReplace(invocation.engine, value)
+    } else if option == "--suite" {
+        invocation.suite = qwenCliReplace(invocation.suite, value)
+    } else if option == "--profile" {
+        invocation.profile = qwenCliReplace(invocation.profile, value)
+    } else if option == "--prompt" {
+        invocation.prompt = qwenCliReplace(invocation.prompt, value)
+    } else if option == "--prompt-file" {
+        invocation.promptFile = qwenCliReplace(invocation.promptFile, value)
+    } else if option == "--messages-json" {
+        invocation.messagesJson = qwenCliReplace(invocation.messagesJson, value)
+    } else if option == "--sampling" {
+        invocation.sampling = qwenCliReplace(invocation.sampling, value)
+    } else if option == "--plan" {
+        invocation.plan = qwenCliReplace(invocation.plan, value)
+    } else if option == "--environment-lock" {
+        invocation.environmentLock = qwenCliReplace(invocation.environmentLock,
+            value)
+    } else if option == "--profiles" {
+        invocation.profilesConfig = qwenCliReplace(invocation.profilesConfig,
+            value)
+    } else if option == "--sampling-config" {
+        invocation.samplingConfig = qwenCliReplace(invocation.samplingConfig,
+            value)
+    } else if option == "--quantization-config" {
+        invocation.quantizationConfig = qwenCliReplace(
+            invocation.quantizationConfig, value)
+    } else if option == "--diagnostic-format" {
+        invocation.diagnosticFormat = qwenCliReplace(
+            invocation.diagnosticFormat, value)
+    } else if option == "--log-level" {
+        invocation.logLevel = qwenCliReplace(invocation.logLevel, value)
+    } else if option == "--output-mode" {
+        invocation.outputMode = qwenCliReplace(invocation.outputMode, value)
+    }
+}
+
+fun qwenCliRequired(value: String, field: String)
+    r: Result<Bool, QwenCliError> {
+    if value.length() == 0 {
+        return Err<Bool, QwenCliError>(qwenCliError(
+            "qwen.cli.required-option", field, "required option is missing"))
+    }
+    return Ok<Bool, QwenCliError>(true)
+}
+
+fun qwenCliValidateInvocation(borrow invocation: QwenCliInvocation)
+    r: Result<Bool, QwenCliError> {
+    if invocation.diagnosticFormat != "human" and
+        invocation.diagnosticFormat != "json" {
+        return Err<Bool, QwenCliError>(qwenCliError(
+            "qwen.cli.diagnostic-format", "--diagnostic-format",
+            "diagnostic format must be human or json"))
+    }
+    if invocation.logLevel != "error" and invocation.logLevel != "warning" and
+        invocation.logLevel != "info" and invocation.logLevel != "debug" and
+        invocation.logLevel != "trace" {
+        return Err<Bool, QwenCliError>(qwenCliError(
+            "qwen.cli.log-level", "--log-level",
+            "log level must be error, warning, info, debug, or trace"))
+    }
+    if invocation.kind == QWEN_CLI_INSPECT {
+        let model = qwenCliRequired(invocation.modelLock, "--model-lock")
+        if model.isErr() {
+            let error = model.unwrapErr(); model.releaseContainer()
+            return Err<Bool, QwenCliError>(error)
+        }
+        model.releaseContainer()
+        let output = qwenCliRequired(invocation.output, "--output")
+        if output.isErr() {
+            let error = output.unwrapErr(); output.releaseContainer()
+            return Err<Bool, QwenCliError>(error)
+        }
+        output.releaseContainer()
+    } else if invocation.kind == QWEN_CLI_CONVERT {
+        let model = qwenCliRequired(invocation.modelLock, "--model-lock")
+        if model.isErr() {
+            let error = model.unwrapErr(); model.releaseContainer()
+            return Err<Bool, QwenCliError>(error)
+        }
+        model.releaseContainer()
+        let profile = qwenCliRequired(invocation.quantProfile, "--quant-profile")
+        if profile.isErr() {
+            let error = profile.unwrapErr(); profile.releaseContainer()
+            return Err<Bool, QwenCliError>(error)
+        }
+        profile.releaseContainer()
+        let root = qwenCliRequired(invocation.outputRoot, "--output-root")
+        if root.isErr() {
+            let error = root.unwrapErr(); root.releaseContainer()
+            return Err<Bool, QwenCliError>(error)
+        }
+        root.releaseContainer()
+        if invocation.jobs < 1 or invocation.jobs > QWEN_CLI_MAX_JOBS {
+            return Err<Bool, QwenCliError>(qwenCliError(
+                "qwen.cli.jobs", "--jobs", "jobs must be between 1 and 64"))
+        }
+    } else if invocation.kind == QWEN_CLI_VERIFY {
+        let engine = qwenCliRequired(invocation.engine, "--engine")
+        if engine.isErr() {
+            let error = engine.unwrapErr(); engine.releaseContainer()
+            return Err<Bool, QwenCliError>(error)
+        }
+        engine.releaseContainer()
+        if invocation.suite != "smoke" and invocation.suite != "operators" and
+            invocation.suite != "logits" and invocation.suite != "quality" and
+            invocation.suite != "long-context" and invocation.suite != "all" {
+            return Err<Bool, QwenCliError>(qwenCliError(
+                "qwen.cli.verify-suite", "--suite",
+                "suite must be smoke, operators, logits, quality, long-context, or all"))
+        }
+    } else if invocation.kind == QWEN_CLI_RUN {
+        let engine = qwenCliRequired(invocation.engine, "--engine")
+        if engine.isErr() {
+            let error = engine.unwrapErr(); engine.releaseContainer()
+            return Err<Bool, QwenCliError>(error)
+        }
+        engine.releaseContainer()
+        let profile = qwenCliRequired(invocation.profile, "--profile")
+        if profile.isErr() {
+            let error = profile.unwrapErr(); profile.releaseContainer()
+            return Err<Bool, QwenCliError>(error)
+        }
+        profile.releaseContainer()
+        let sampling = qwenCliRequired(invocation.sampling, "--sampling")
+        if sampling.isErr() {
+            let error = sampling.unwrapErr(); sampling.releaseContainer()
+            return Err<Bool, QwenCliError>(error)
+        }
+        sampling.releaseContainer()
+        var inputs = 0
+        if invocation.prompt.length() > 0 { inputs = inputs + 1 }
+        if invocation.promptFile.length() > 0 { inputs = inputs + 1 }
+        if invocation.messagesJson.length() > 0 { inputs = inputs + 1 }
+        if inputs != 1 {
+            return Err<Bool, QwenCliError>(qwenCliError(
+                "qwen.cli.prompt-source", "prompt",
+                "exactly one of --prompt, --prompt-file, or --messages-json is required"))
+        }
+        if invocation.maxNewTokens == (0 as UInt64) or
+            invocation.maxNewTokens > QWEN_CLI_MAX_NEW_TOKENS {
+            return Err<Bool, QwenCliError>(qwenCliError(
+                "qwen.cli.max-new-tokens", "--max-new-tokens",
+                "max-new-tokens must be between 1 and 262144"))
+        }
+        if invocation.outputMode != "human" and
+            invocation.outputMode != "jsonl" and
+            invocation.outputMode != "summary" {
+            return Err<Bool, QwenCliError>(qwenCliError(
+                "qwen.cli.output-mode", "--output-mode",
+                "output mode must be human, jsonl, or summary"))
+        }
+    } else if invocation.kind == QWEN_CLI_BENCH {
+        let engine = qwenCliRequired(invocation.engine, "--engine")
+        if engine.isErr() {
+            let error = engine.unwrapErr(); engine.releaseContainer()
+            return Err<Bool, QwenCliError>(error)
+        }
+        engine.releaseContainer()
+        let plan = qwenCliRequired(invocation.plan, "--plan")
+        if plan.isErr() {
+            let error = plan.unwrapErr(); plan.releaseContainer()
+            return Err<Bool, QwenCliError>(error)
+        }
+        plan.releaseContainer()
+        let environment = qwenCliRequired(invocation.environmentLock,
+            "--environment-lock")
+        if environment.isErr() {
+            let error = environment.unwrapErr(); environment.releaseContainer()
+            return Err<Bool, QwenCliError>(error)
+        }
+        environment.releaseContainer()
+    }
+    return Ok<Bool, QwenCliError>(true)
+}
+
+pub fun parseQwenCli(arguments: Array<String>)
+    r: Result<QwenCliInvocation, QwenCliError> {
+    if arguments.length() == 0 or arguments.length() > QWEN_CLI_MAX_ARGUMENTS {
+        return Err<QwenCliInvocation, QwenCliError>(qwenCliError(
+            "qwen.cli.argument-count", "arguments",
+            "argument count must be between 1 and 64"))
+    }
+    var totalBytes = 0
+    var boundIndex = 0
+    while boundIndex < arguments.length() {
+        if arguments[boundIndex].length() > QWEN_CLI_MAX_ARGUMENT_BYTES {
+            return Err<QwenCliInvocation, QwenCliError>(qwenCliError(
+                "qwen.cli.argument-size", "arguments",
+                "each argument is limited to 4096 bytes"))
+        }
+        totalBytes = totalBytes + arguments[boundIndex].length()
+        if totalBytes > QWEN_CLI_MAX_TOTAL_BYTES {
+            return Err<QwenCliInvocation, QwenCliError>(qwenCliError(
+                "qwen.cli.argument-size", "arguments",
+                "combined arguments are limited to 16384 bytes"))
+        }
+        boundIndex = boundIndex + 1
+    }
+    if arguments.length() == 1 {
+        return Ok<QwenCliInvocation, QwenCliError>(
+            qwenCliEmptyInvocation(QWEN_CLI_HELP, "help"))
+    }
+    if arguments[1] == "help" or arguments[1] == "--help" or
+        arguments[1] == "-h" {
+        if arguments.length() != 2 {
+            return Err<QwenCliInvocation, QwenCliError>(qwenCliError(
+                "qwen.cli.trailing-argument", "arguments",
+                "help accepts no additional arguments"))
+        }
+        return Ok<QwenCliInvocation, QwenCliError>(
+            qwenCliEmptyInvocation(QWEN_CLI_HELP, "help"))
+    }
+    if arguments[1] == "--version" or arguments[1] == "version" {
+        if arguments.length() != 2 {
+            return Err<QwenCliInvocation, QwenCliError>(qwenCliError(
+                "qwen.cli.trailing-argument", "arguments",
+                "version accepts no additional arguments"))
+        }
+        return Ok<QwenCliInvocation, QwenCliError>(
+            qwenCliEmptyInvocation(QWEN_CLI_VERSION, "version"))
+    }
+    if arguments[1] == "serve" {
+        return Err<QwenCliInvocation, QwenCliError>(qwenCliError(
+            "qwen.cli.unsupported-command", "command",
+            "serve is deferred until the CLI correctness gates are complete",
+            QWEN_EXIT_UNSUPPORTED))
+    }
+    let kind = qwenCliKind(arguments[1])
+    if kind < (0 as Int32) {
+        return Err<QwenCliInvocation, QwenCliError>(qwenCliError(
+            "qwen.cli.unknown-command", "command",
+            "expected inspect, convert, verify, run, or bench"))
+    }
+    let invocation = qwenCliEmptyInvocation(kind, arguments[1])
+    let seen = Array<String>()
+    var index = 2
+    while index < arguments.length() {
+        let option = arguments[index]
+        if not startsWith(option, "--") or not qwenCliOptionAllowed(kind, option) {
+            invocation.close(); invocation.free(); seen.free()
+            return Err<QwenCliInvocation, QwenCliError>(qwenCliError(
+                "qwen.cli.unknown-option", "arguments",
+                "unknown, positional, or command-incompatible option"))
+        }
+        if qwenCliSeen(seen, option) {
+            invocation.close(); invocation.free(); seen.free()
+            return Err<QwenCliInvocation, QwenCliError>(qwenCliError(
+                "qwen.cli.duplicate-option", "arguments",
+                "an option may be supplied at most once"))
+        }
+        seen.push(option)
+        if qwenCliOptionIsFlag(option) {
+            if option == "--resume" { invocation.resume = true }
+            else { invocation.verifyOnly = true }
+            index = index + 1
+        } else {
+            if index + 1 >= arguments.length() or
+                startsWith(arguments[index + 1], "--") {
+                invocation.close(); invocation.free(); seen.free()
+                return Err<QwenCliInvocation, QwenCliError>(qwenCliError(
+                    "qwen.cli.missing-value", "arguments",
+                    "option requires one non-empty value"))
+            }
+            let value = arguments[index + 1]
+            if value.length() == 0 {
+                invocation.close(); invocation.free(); seen.free()
+                return Err<QwenCliInvocation, QwenCliError>(qwenCliError(
+                    "qwen.cli.missing-value", "arguments",
+                    "option value may not be empty"))
+            }
+            if option == "--device" or option == "--jobs" or
+                option == "--max-new-tokens" or
+                option == "--max-host-memory" {
+                let parsed = qwenCliStrictUnsigned(value, option)
+                if parsed.isErr() {
+                    let error = parsed.unwrapErr()
+                    parsed.releaseContainer(); invocation.close()
+                    invocation.free(); seen.free()
+                    return Err<QwenCliInvocation, QwenCliError>(error)
+                }
+                let number = parsed.unwrap(); parsed.releaseContainer()
+                if option == "--device" {
+                    if number > (2147483647 as UInt64) {
+                        invocation.close(); invocation.free(); seen.free()
+                        return Err<QwenCliInvocation, QwenCliError>(qwenCliError(
+                            "qwen.cli.device", option,
+                            "device ordinal exceeds Int32"))
+                    }
+                    invocation.device = number as Int32
+                } else if option == "--jobs" {
+                    invocation.jobs = number as Int
+                } else if option == "--max-new-tokens" {
+                    invocation.maxNewTokens = number
+                } else {
+                    invocation.maxHostMemory = number
+                }
+            } else {
+                qwenCliSetString(invocation, option, value)
+            }
+            index = index + 2
+        }
+    }
+    seen.free()
+    let valid = qwenCliValidateInvocation(invocation)
+    if valid.isErr() {
+        let error = valid.unwrapErr()
+        valid.releaseContainer(); invocation.close(); invocation.free()
+        return Err<QwenCliInvocation, QwenCliError>(error)
+    }
+    valid.releaseContainer()
+    return Ok<QwenCliInvocation, QwenCliError>(invocation)
+}
+
+pub fun qwenCliExitCodeForDiagnostic(code: String) r: Int {
+    if startsWith(code, "qwen.cli.") or startsWith(code, "qwen.config.") {
+        return QWEN_EXIT_CLI_CONFIG
+    }
+    if startsWith(code, "qwen.source.") or startsWith(code, "qwen.model.") or
+        startsWith(code, "qwen.sqw.") or startsWith(code, "sqw.") {
+        return QWEN_EXIT_ARTIFACT_VALIDATION
+    }
+    if startsWith(code, "qwen.unsupported.") {
+        return QWEN_EXIT_UNSUPPORTED
+    }
+    if startsWith(code, "qwen.host-allocation.") {
+        return QWEN_EXIT_HOST_ALLOCATION
+    }
+    if startsWith(code, "qwen.device-allocation.") {
+        return QWEN_EXIT_DEVICE_ALLOCATION
+    }
+    if startsWith(code, "qwen.cuda.") or startsWith(code, "qwen.kernel.") {
+        return QWEN_EXIT_CUDA_RUNTIME
+    }
+    if startsWith(code, "qwen.correctness.") { return QWEN_EXIT_CORRECTNESS }
+    if startsWith(code, "qwen.benchmark.") { return QWEN_EXIT_BENCHMARK }
+    if startsWith(code, "qwen.cancelled") { return QWEN_EXIT_CANCELLED }
+    return QWEN_EXIT_INTERNAL
+}
+
+pub fun renderQwenCliDiagnostic(error: QwenCliError, format: String)
+    r: String {
+    let builder = StringBuilder.new()
+    let ownership = Array<Bool>()
+    if format == "json" {
+        jsonAppendBorrowedPart(builder, ownership, "{")
+        jsonAppendEscapedString(builder, ownership, "schema")
+        jsonAppendBorrowedPart(builder, ownership, ":")
+        jsonAppendEscapedString(builder, ownership,
+            "seen-qwen-diagnostic-v1")
+        jsonAppendBorrowedPart(builder, ownership, ",")
+        jsonAppendEscapedString(builder, ownership, "code")
+        jsonAppendBorrowedPart(builder, ownership, ":")
+        jsonAppendEscapedString(builder, ownership, error.code)
+        jsonAppendBorrowedPart(builder, ownership, ",")
+        jsonAppendEscapedString(builder, ownership, "field")
+        jsonAppendBorrowedPart(builder, ownership, ":")
+        jsonAppendEscapedString(builder, ownership, error.field)
+        jsonAppendBorrowedPart(builder, ownership, ",")
+        jsonAppendEscapedString(builder, ownership, "message")
+        jsonAppendBorrowedPart(builder, ownership, ":")
+        jsonAppendEscapedString(builder, ownership, error.message)
+        jsonAppendBorrowedPart(builder, ownership, ",")
+        jsonAppendEscapedString(builder, ownership, "exit_code")
+        jsonAppendBorrowedPart(builder, ownership, ":")
+        jsonAppendInt(builder, ownership, error.exitCode)
+        jsonAppendBorrowedPart(builder, ownership, "}")
+        return jsonFinishOwned(builder, ownership)
+    }
+    jsonAppendBorrowedPart(builder, ownership, "seen-qwen: ")
+    jsonAppendBorrowedPart(builder, ownership, error.code)
+    jsonAppendBorrowedPart(builder, ownership, ": ")
+    jsonAppendBorrowedPart(builder, ownership, error.field)
+    jsonAppendBorrowedPart(builder, ownership, ": ")
+    jsonAppendBorrowedPart(builder, ownership, error.message)
+    return jsonFinishOwned(builder, ownership)
+}
+
+pub fun qwenCliHelp() r: String {
+    return "Usage: seen-qwen <inspect|convert|verify|run|bench> [options]\n" +
+        "       seen-qwen --help\n" +
+        "       seen-qwen --version\n" +
+        "Run 'seen-qwen <command> --help' only after that command's leaf is installed."
+}
