@@ -49,6 +49,8 @@ class LocalVerificationContractTests(unittest.TestCase):
             'src=/opt/cuda,dst=/opt/cuda,readonly',
             'dst=/tmp',
             'PYTHONPATH=/workspace/.seen/verification/python',
+            'CUDA_VISIBLE_DEVICES=',
+            'NVIDIA_VISIBLE_DEVICES=void',
             'LD_LIBRARY_PATH=/opt/cuda/targets/x86_64-linux/lib',
             'CUDAToolkit_ROOT=/opt/cuda',
             'NVCC_CCBIN=/usr/bin/clang++',

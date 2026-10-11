@@ -85,6 +85,8 @@ docker run --rm --platform linux/amd64 \
     --env HOME=/workspace/.seen/verification/home \
     --env PYTHONPATH=/workspace/.seen/verification/python \
     --env PATH=/opt/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    --env CUDA_VISIBLE_DEVICES= \
+    --env NVIDIA_VISIBLE_DEVICES=void \
     --env LD_LIBRARY_PATH=/opt/cuda/targets/x86_64-linux/lib \
     --env CUDAToolkit_ROOT=/opt/cuda \
     --env NVCC_CCBIN=/usr/bin/clang++ \
