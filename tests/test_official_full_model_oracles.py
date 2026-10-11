@@ -153,7 +153,9 @@ class OfficialFullModelOracleTests(unittest.TestCase):
         self.assertNotIn("urllib", capture_source)
         with self.assertRaisesRegex(ValueError, "ignored project .seen root"):
             validate_output_root(ROOT)
-        with tempfile.TemporaryDirectory(dir=ROOT / ".seen") as temporary:
+        ignored_root = ROOT / ".seen"
+        ignored_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ignored_root) as temporary:
             validate_output_root(Path(temporary))
 
 
