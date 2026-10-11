@@ -30,7 +30,7 @@
     "torch": "2.11.0+cpu"
   },
   "fixture_id": "qwen3_8_hybrid_mini_v1",
-  "generator_sha256": "fea88c9dd92e1e5ffa12699be84b52293557e91234917191083f4bcc41c858ab",
+  "generator_sha256": "a2dbf7f9c0f4b83b926bf8745982402fa1b042ef0247da323d8ac7314024e462",
   "input": {
     "text": "Seen Qwen",
     "token_ids": [
@@ -59,6 +59,7 @@
   "schema": "seen-qwen-hybrid-mini-oracle-v1",
   "sources": {
     "modeling_source_sha256": "25c4912dc14dda47b14a1c24efe36ec055be4a2f150c64c9a29860aebe42aff8",
+    "promotion_helper_sha256": "4f6b65299bafe809eda72c77f9053cf5328ceffa4beba98a86154acda8871164",
     "qwen_mtp_commit": "22283d7a1b4eff75fb0d63fb2e862ade39df7b73",
     "qwen_mtp_repository": "QwenLM/Confident-Decoding",
     "qwen_mtp_source_sha256": "cf97664e82371425df14e412c9d351405d05ae8db3622fc817813ddda6858622",

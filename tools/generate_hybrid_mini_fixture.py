@@ -6,17 +6,17 @@ from __future__ import annotations
 import argparse
 from hashlib import sha256
 import json
-import os
 from pathlib import Path
-import shutil
 import struct
-import tempfile
+
+from hybrid_mini_oracle_output import promote_oracle_output
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = ROOT / "tests/fixtures/qwen3_8_hybrid_mini_contract.json"
 CONTRACT_SHA256 = "f29839615771e344bf89329f2195e5921fc8ea371849249be55722ab1999dddf"
 DEFAULT_OUTPUT = ROOT / "tests/fixtures/qwen3_8_hybrid_mini"
+PROMOTION_HELPER = ROOT / "tools/hybrid_mini_oracle_output.py"
 MASK64 = (1 << 64) - 1
 MODEL_REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 TRANSFORMERS_COMMIT = "562cfd944ee1f20702cfb0f4404014ee27c24813"
@@ -169,13 +169,6 @@ def bytes_to_unicode() -> dict[int, str]:
     return dict(zip(visible, map(chr, codepoints), strict=True))
 
 
-def write_atomic(path: Path, data: bytes) -> None:
-    with path.open("wb") as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
-
-
 def generate(output: Path) -> None:
     contract_bytes = CONTRACT_PATH.read_bytes()
     if sha256(contract_bytes).hexdigest() != CONTRACT_SHA256:
@@ -211,6 +204,7 @@ def generate(output: Path) -> None:
             "modeling_source_sha256": MODELING_SOURCE_SHA256,
             "official_shard_01_header_sha256": SHARD_01_HEADER_SHA256,
             "official_shard_18_header_sha256": SHARD_18_HEADER_SHA256,
+            "promotion_helper_sha256": sha256(PROMOTION_HELPER.read_bytes()).hexdigest(),
         },
         "safetensors": {
             "dtype": "F32",
@@ -227,45 +221,9 @@ def generate(output: Path) -> None:
         manifest, ensure_ascii=False, indent=2, sort_keys=True
     ) + "\n").encode()
 
-    if output in (Path("/"), ROOT, ROOT.parent) or output.is_symlink():
+    if output in (Path("/"), ROOT, ROOT.parent):
         raise ValueError("unsafe output directory")
-    if output.exists() and not output.is_dir():
-        raise ValueError("output path must be a directory")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
-    backup: Path | None = None
-    try:
-        for name, data in assets.items():
-            write_atomic(temporary / name, data)
-        temporary_fd = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(temporary_fd)
-        finally:
-            os.close(temporary_fd)
-        if output.exists():
-            backup = Path(tempfile.mkdtemp(
-                prefix=f".{output.name}.previous.", dir=output.parent
-            ))
-            backup.rmdir()
-            os.replace(output, backup)
-        os.replace(temporary, output)
-        parent_fd = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
-        if backup is not None:
-            shutil.rmtree(backup)
-            backup = None
-    except BaseException:
-        if backup is not None and not output.exists():
-            os.replace(backup, output)
-            backup = None
-        raise
-    finally:
-        shutil.rmtree(temporary, ignore_errors=True)
-        if backup is not None:
-            shutil.rmtree(backup, ignore_errors=True)
+    promote_oracle_output(output, assets)
 
 
 def main() -> None:

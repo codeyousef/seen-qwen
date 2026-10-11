@@ -1053,6 +1053,6 @@
   "schema": "seen-qwen-cpu-engine-oracle-v1",
   "source": {
     "expected_safetensors_sha256": "dfa4e8eb7550e7e694c9044d63f602e406fea09153a849274250b046db350096",
-    "manifest_sha256": "da4ead2d07206e9f091ac180802da58c770d58c993d72a8cb70c15098fe51baa"
+    "manifest_sha256": "448f7caee2fa0fb2b2c1e95693bb3d87dc406a32c1cb294ac1299dd2075b3b16"
   }
 }

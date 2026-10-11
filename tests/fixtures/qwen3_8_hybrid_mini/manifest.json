@@ -19,7 +19,7 @@
   },
   "contract_sha256": "f29839615771e344bf89329f2195e5921fc8ea371849249be55722ab1999dddf",
   "fixture_id": "qwen3_8_hybrid_mini_v1",
-  "generator_sha256": "38211bda28d68cb42a2d45aac9024fc16473522d11ad7b4c34e2bdd785694dd9",
+  "generator_sha256": "f1aa98ac11ae19cb8b599b8a87d544f9516bedbe2e21fff7b164a4511cf62849",
   "safetensors": {
     "dtype": "F32",
     "payload_bytes": 1452192,
@@ -31,6 +31,7 @@
     "modeling_source_sha256": "25c4912dc14dda47b14a1c24efe36ec055be4a2f150c64c9a29860aebe42aff8",
     "official_shard_01_header_sha256": "7bdeb03df566aa804dca2cb48e420908cb1864e5222858ad04918299883287e0",
     "official_shard_18_header_sha256": "2e6b71178b57a98de637fa669dedfaf35cbed1388914ffc93238bddd169eab54",
+    "promotion_helper_sha256": "4f6b65299bafe809eda72c77f9053cf5328ceffa4beba98a86154acda8871164",
     "transformers_commit": "562cfd944ee1f20702cfb0f4404014ee27c24813"
   },
   "tokenizer": {

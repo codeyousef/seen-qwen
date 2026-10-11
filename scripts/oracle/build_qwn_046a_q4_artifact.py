@@ -647,9 +647,13 @@ def build(args: argparse.Namespace) -> Path:
         base.write_file(stage / "checksums.sha256", checksums.encode("ascii"))
         artifact_id = json.loads(engine)["engine_id"]
         destination = output_root / artifact_id
-        if destination.exists():
-            if (destination / "checksums.sha256").read_bytes() != (stage / "checksums.sha256").read_bytes():
-                raise FileExistsError("content-addressed destination differs")
+        if destination.exists() or destination.is_symlink():
+            base.validate_existing_artifact(
+                destination,
+                (stage / "checksums.sha256").read_bytes(),
+                base.MAX_CHUNK_BYTES,
+                MAX_ARTIFACT_BYTES,
+            )
             shutil.rmtree(stage); return destination
         os.rename(stage, destination)
         directory = os.open(output_root, os.O_RDONLY | os.O_DIRECTORY)

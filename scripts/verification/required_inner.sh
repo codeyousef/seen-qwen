@@ -10,6 +10,9 @@ COMPATIBILITY_MANIFEST="$TOOLCHAIN_ROOT/bin/compatibility-manifest.json"
 ASSET_ROOT="$ROOT_DIR/.seen/oracle-assets-qwen38"
 OUTPUT_ROOT="$ROOT_DIR/.seen/verification/output"
 ARTIFACT_ROOT="$ROOT_DIR/.seen/verification/artifacts"
+EVENT_GATE="$ROOT_DIR/scripts/oracle/check_scope_events.sh"
+NATIVE_BUILD_ROOT="$ROOT_DIR/.seen/verification/native-build-serial"
+NATIVE_LIB_ROOT="$ROOT_DIR/.seen/native/lib"
 
 fail() {
     echo "verification-inner: $*" >&2
@@ -18,14 +21,16 @@ fail() {
 
 read_cgroup() {
     local name=$1
-    local value=""
     [ -r "/sys/fs/cgroup/$name" ] || fail "missing cgroup readback: $name"
-    IFS= read -r value < "/sys/fs/cgroup/$name"
-    printf '%s' "$value"
+    cat "/sys/fs/cgroup/$name"
 }
 
 report_metrics() {
     local status=$?
+    local gated_status=$status
+    local memory_events_after=""
+    local pids_events_after=""
+    trap - EXIT
     echo "verification-inner: exit_status=$status"
     for metric in memory.current memory.peak memory.events pids.current pids.peak pids.events; do
         if [ -r "/sys/fs/cgroup/$metric" ]; then
@@ -33,7 +38,17 @@ report_metrics() {
             cat "/sys/fs/cgroup/$metric"
         fi
     done
-    return "$status"
+    if [ -n "${memory_events_before:-}" ] &&
+        [ -n "${pids_events_before:-}" ]; then
+        memory_events_after=$(read_cgroup memory.events)
+        pids_events_after=$(read_cgroup pids.events)
+        set +e
+        "$EVENT_GATE" "$status" "$memory_events_before" \
+            "$memory_events_after" "$pids_events_before" "$pids_events_after"
+        gated_status=$?
+        set -e
+    fi
+    exit "$gated_status"
 }
 trap report_metrics EXIT
 
@@ -47,6 +62,10 @@ oom_group=$(read_cgroup memory.oom.group)
 [ "$swap_max" = "0" ] || fail "memory.swap.max is not zero"
 [ "$pids_max" = "24" ] || fail "pids.max is not 24"
 case "$oom_group" in 0|1) ;; *) fail "memory.oom.group is not numeric" ;; esac
+[ -x "$EVENT_GATE" ] && [ ! -L "$EVENT_GATE" ] ||
+    fail "scope event gate is missing or unsafe"
+memory_events_before=$(read_cgroup memory.events)
+pids_events_before=$(read_cgroup pids.events)
 echo "verification-inner: verified cgroup=/sys/fs/cgroup memory.max=$memory_max memory.swap.max=$swap_max memory.oom.group=$oom_group pids.max=$pids_max"
 
 ulimit -v "${SEEN_MAIN_VMEM_KB:?missing Seen virtual-memory cap}"
@@ -114,9 +133,10 @@ python3 -m unittest tests/test_local_verification_contract.py tests/test_cuda_re
     tests/test_cuda_lm_head_greedy.py \
     tests/test_cuda_mini_execution.py \
     tests/test_qwen_sampler.py tests/test_qwen_engine_ownership.py \
-    tests/test_qwen_tokenizer_oracles.py \
+    tests/test_qwen_tokenizer_oracles.py tests/test_atomic_output_file.py \
     tests/test_sampling_profiles.py tests/test_hybrid_mini_contract.py \
     tests/test_hybrid_mini_assets.py tests/test_hybrid_mini_oracle.py \
+    tests/test_hybrid_mini_oracle_output.py \
     tests/test_cpu_attention_oracle.py tests/test_cpu_gdn_oracle.py \
     tests/test_cpu_head_oracle.py tests/test_cpu_engine_oracle.py \
     tests/test_official_operator_layer_oracles.py \
@@ -179,6 +199,14 @@ python3 -m unittest tests/test_local_verification_contract.py tests/test_cuda_re
 "$SEEN_COMPILER" check tests/qwn_022d_sampling_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022b_tokenizer_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022c_chat_template_test.seen --frozen
+
+mkdir -p "$NATIVE_BUILD_ROOT" "$NATIVE_LIB_ROOT"
+cmake -S "$ROOT_DIR/native" -B "$NATIVE_BUILD_ROOT" \
+    -DSEEN_CUDA_SOURCE_ROOT="$TOOLCHAIN_ROOT/lib/seen/runtime/cuda" \
+    -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_BUILD_TYPE=Release
+cmake --build "$NATIVE_BUILD_ROOT" --target seen_qwen_cuda --parallel 1
+cp "$NATIVE_BUILD_ROOT/libseen_qwen_cuda.so" \
+    "$NATIVE_LIB_ROOT/libseen_qwen_cuda.so"
 
 "$SEEN_COMPILER" compile tests/qwn_030b_sqw_reader_test.seen \
     "$OUTPUT_ROOT/qwn_030b_sqw_reader_test_fast" \

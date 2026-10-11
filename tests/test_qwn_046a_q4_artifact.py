@@ -65,6 +65,7 @@ class Q4ArtifactTests(unittest.TestCase):
             self.assertNotIn(forbidden, source.lower())
         for required in ("MAX_BATCH_BYTES", "MAX_ARTIFACT_BYTES",
                          "tempfile.mkdtemp", "validate_sqw(weights",
+                         "base.validate_existing_artifact(",
                          "quality_approved\": False", "fallback\": \"prohibited",
                          "allocation_bytes_at_max_context\": \"16631461968",
                          "minimum_admitted_device_bytes\": \"17168332880",
