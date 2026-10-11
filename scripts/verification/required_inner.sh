@@ -128,7 +128,8 @@ python3 -m unittest tests/test_local_verification_contract.py tests/test_cuda_re
     tests/test_calibration_lock.py tests/test_sensitivity_statistics.py \
     tests/test_quantization_policy_resolver.py tests/test_engine_artifact.py \
     tests/test_qwn_046a_q4_artifact.py tests/test_qwn_046a_full_cuda_contract.py \
-    tests/test_cli_contract.py tests/test_inspect_contract.py
+    tests/test_cli_contract.py tests/test_inspect_contract.py \
+    tests/test_convert_verify_contract.py
 "$SEEN_PACKAGE_CLIENT" audit --lock Seen.lock
 "$SEEN_COMPILER" check tests/qwn_023b_hybrid_mini_assets_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_023a_hybrid_mini_contract_test.seen --frozen
@@ -173,6 +174,8 @@ python3 -m unittest tests/test_local_verification_contract.py tests/test_cuda_re
 "$SEEN_COMPILER" check tests/qwn_047a_cli_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_047b_inspect_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_047b_inspect_integration_test.seen --frozen
+"$SEEN_COMPILER" check tests/qwn_047c_convert_verify_test.seen --frozen
+"$SEEN_COMPILER" check tests/qwn_047c_verify_integration_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022d_sampling_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022b_tokenizer_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022c_chat_template_test.seen --frozen
@@ -302,6 +305,22 @@ clang -shared -fPIC -O2 -Wl,--no-undefined \
     --release --lto=thin --target-cpu=x86-64 --no-cache \
     --jobs 1 --opt-jobs 1 --no-fork --frozen
 "$OUTPUT_ROOT/qwn_047b_inspect_test"
+"$SEEN_COMPILER" compile tests/qwn_047c_convert_verify_test.seen \
+    "$OUTPUT_ROOT/qwn_047c_convert_verify_test_fast" \
+    --target-cpu=x86-64 --no-cache \
+    --jobs 1 --opt-jobs 1 --no-fork --frozen
+"$OUTPUT_ROOT/qwn_047c_convert_verify_test_fast"
+"$SEEN_COMPILER" compile tests/qwn_047c_convert_verify_test.seen \
+    "$OUTPUT_ROOT/qwn_047c_convert_verify_test" \
+    --release --lto=thin --target-cpu=x86-64 --no-cache \
+    --jobs 1 --opt-jobs 1 --no-fork --frozen
+"$OUTPUT_ROOT/qwn_047c_convert_verify_test"
+python3 scripts/oracle/prepare_qwn_047c_smoke_fixture.py
+"$SEEN_COMPILER" compile tests/qwn_047c_verify_integration_test.seen \
+    "$OUTPUT_ROOT/qwn_047c_verify_integration_test" \
+    --release --lto=thin --target-cpu=x86-64 --no-cache \
+    --jobs 1 --opt-jobs 1 --no-fork --frozen
+"$OUTPUT_ROOT/qwn_047c_verify_integration_test"
 "$SEEN_COMPILER" compile tests/qwn_040b_reference_utilities_test.seen \
     "$OUTPUT_ROOT/qwn_040b_reference_utilities_test_fast" \
     --target-cpu=x86-64 --no-cache \

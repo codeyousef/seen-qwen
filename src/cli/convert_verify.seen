@@ -1,0 +1,276 @@
+///
+/// QWN-047C bounded offline conversion and artifact verification commands.
+/// Conversion delegates only the byte-streaming transformation to the tracked
+/// offline converter. The native Seen command owns validation, exact request
+/// construction, process status, artifact verification, and cleanup.
+///
+
+import core.result.{Result}
+import crypto.sha256.{sha256File, releaseSha256DigestResult}
+import io.file.{readTextChecked, writeTextAtomically}
+import json.builder.{jsonAppendBorrowedPart, jsonAppendEscapedString,
+    jsonAppendInt, jsonAppendOwnedPart, jsonFinishOwned}
+import process.process.{runProgramRequest}
+import seen_qwen.artifact.engine_artifact.{parseQwenEngineArtifact}
+import seen_qwen.formats.sqw_reader.{SqwReader, SqwReaderPolicy}
+import str.string.{StringBuilder}
+
+extern "C" fun seen_string_clone_owned(value: String) r: String
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+pub class QwenConvertVerifyError {
+    var code: String
+    var field: String
+    var message: String
+    var exitCode: Int
+}
+
+fun convertVerifyError(code: String, field: String, message: String,
+    exitCode: Int = 3) r: QwenConvertVerifyError {
+    return QwenConvertVerifyError{ code: code, field: field,
+        message: message, exitCode: exitCode }
+}
+
+fun cvAppendKey(builder: StringBuilder, ownership: Array<Bool>, key: String)
+    r: Void {
+    jsonAppendEscapedString(builder, ownership, key)
+    jsonAppendBorrowedPart(builder, ownership, ":")
+}
+
+fun cvAppendString(builder: StringBuilder, ownership: Array<Bool>,
+    key: String, value: String, comma: Bool) r: Void {
+    if comma { jsonAppendBorrowedPart(builder, ownership, ",") }
+    cvAppendKey(builder, ownership, key)
+    jsonAppendEscapedString(builder, ownership, value)
+}
+
+fun cvAppendBool(builder: StringBuilder, ownership: Array<Bool>,
+    key: String, value: Bool) r: Void {
+    jsonAppendBorrowedPart(builder, ownership, ",")
+    cvAppendKey(builder, ownership, key)
+    jsonAppendBorrowedPart(builder, ownership,
+        if value { "true" } else { "false" })
+}
+
+fun cvAppendU64(builder: StringBuilder, ownership: Array<Bool>,
+    key: String, value: UInt64) r: Void {
+    jsonAppendBorrowedPart(builder, ownership, ",")
+    cvAppendKey(builder, ownership, key)
+    jsonAppendOwnedPart(builder, ownership, value.toString())
+}
+
+fun convertRequest(modelLock: String, outputRoot: String,
+    quantProfile: String, quantizationConfig: String,
+    calibrationLock: String, jobs: Int, maxHostMemory: UInt64,
+    resume: Bool, verifyOnly: Bool) r: String {
+    let builder = StringBuilder.new(); let ownership = Array<Bool>()
+    jsonAppendBorrowedPart(builder, ownership, "{")
+    cvAppendString(builder, ownership, "schema",
+        "seen-qwen-convert-request-v1", false)
+    cvAppendString(builder, ownership, "model_lock", modelLock, true)
+    cvAppendString(builder, ownership, "output_root", outputRoot, true)
+    cvAppendString(builder, ownership, "quant_profile", quantProfile, true)
+    cvAppendString(builder, ownership, "quantization_config",
+        quantizationConfig, true)
+    cvAppendString(builder, ownership, "calibration_lock",
+        calibrationLock, true)
+    jsonAppendBorrowedPart(builder, ownership, ",")
+    cvAppendKey(builder, ownership, "jobs")
+    jsonAppendInt(builder, ownership, jobs)
+    cvAppendU64(builder, ownership, "max_host_memory", maxHostMemory)
+    cvAppendBool(builder, ownership, "resume", resume)
+    cvAppendBool(builder, ownership, "verify_only", verifyOnly)
+    jsonAppendBorrowedPart(builder, ownership, "}\n")
+    return jsonFinishOwned(builder, ownership)
+}
+
+pub fun convertQwenModel(modelLock: String, outputRoot: String,
+    quantProfile: String, quantizationConfig: String,
+    calibrationLock: String, jobs: Int, maxHostMemory: UInt64,
+    resume: Bool, verifyOnly: Bool)
+    r: Result<Bool, QwenConvertVerifyError> {
+    if quantProfile != "bf16-bringup-v1" {
+        return Err<Bool, QwenConvertVerifyError>(convertVerifyError(
+            "qwen.convert.profile", "--quant-profile",
+            "only the frozen bf16-bringup-v1 lossless profile is supported", 4))
+    }
+    if calibrationLock.length() > 0 {
+        return Err<Bool, QwenConvertVerifyError>(convertVerifyError(
+            "qwen.convert.calibration", "--calibration-lock",
+            "lossless BF16 conversion does not accept calibration", 2))
+    }
+    if jobs != 1 {
+        return Err<Bool, QwenConvertVerifyError>(convertVerifyError(
+            "qwen.convert.jobs", "--jobs",
+            "conversion is serial and requires --jobs 1", 2))
+    }
+    if resume {
+        return Err<Bool, QwenConvertVerifyError>(convertVerifyError(
+            "qwen.convert.resume", "--resume",
+            "resume requires a certified journal and is not supported", 4))
+    }
+    if maxHostMemory > (68719476736 as UInt64) {
+        return Err<Bool, QwenConvertVerifyError>(convertVerifyError(
+            "qwen.convert.memory", "--max-host-memory",
+            "max host memory may not exceed 64 GiB", 2))
+    }
+    let request = convertRequest(modelLock, outputRoot, quantProfile,
+        quantizationConfig, calibrationLock, jobs, maxHostMemory,
+        resume, verifyOnly)
+    let status = runProgramRequest(
+        "scripts/oracle/run_qwn_047c_convert.py", request)
+    seen_string_release_owned(request)
+    if status != 0 {
+        return Err<Bool, QwenConvertVerifyError>(convertVerifyError(
+            "qwen.convert.failed", "source",
+            "bounded offline conversion or verification failed"))
+    }
+    return Ok<Bool, QwenConvertVerifyError>(true)
+}
+
+fun cvRoot(path: String) r: String {
+    var slash = path.length() - 1
+    while slash >= 0 and path.byteAt(slash) != 47 { slash = slash - 1 }
+    if slash < 0 { return seen_string_clone_owned(".") }
+    if slash == 0 { return seen_string_clone_owned("/") }
+    return path.substring(0, slash)
+}
+
+fun cvRead(path: String, maximum: Int, field: String)
+    r: Result<String, QwenConvertVerifyError> {
+    let read = readTextChecked(path)
+    if not read.success or read.content.length() > maximum {
+        if read.success { seen_string_release_owned(read.content) }
+        if not read.error.isNone() { read.error.unwrap().free() }
+        read.error.free(); read.free()
+        return Err<String, QwenConvertVerifyError>(convertVerifyError(
+            "qwen.verify.read", field,
+            "required engine input is missing, unreadable, or exceeds its bound"))
+    }
+    let content = read.content
+    read.error.free(); read.free()
+    return Ok<String, QwenConvertVerifyError>(content)
+}
+
+fun cvDigestMatches(path: String, expected: String) r: Bool {
+    let digest = sha256File(path, 1048576)
+    if digest.isErr() {
+        digest.unwrapErr().free(); digest.releaseContainer()
+        return false
+    }
+    let matches = digest.unwrap() == expected
+    releaseSha256DigestResult(digest)
+    return matches
+}
+
+fun verifyReport(engineId: String, suite: String, tensorCount: Int,
+    weightsSha256: String, wholeSha256: String) r: String {
+    let builder = StringBuilder.new(); let ownership = Array<Bool>()
+    jsonAppendBorrowedPart(builder, ownership, "{")
+    cvAppendString(builder, ownership, "schema",
+        "seen-qwen-verify-v1", false)
+    cvAppendString(builder, ownership, "engine_id", engineId, true)
+    cvAppendString(builder, ownership, "suite", suite, true)
+    jsonAppendBorrowedPart(builder, ownership, ",")
+    cvAppendKey(builder, ownership, "tensor_count")
+    jsonAppendInt(builder, ownership, tensorCount)
+    cvAppendString(builder, ownership, "weights_sha256", weightsSha256, true)
+    cvAppendString(builder, ownership, "sqw_whole_sha256", wholeSha256, true)
+    cvAppendString(builder, ownership, "result", "pass", true)
+    jsonAppendBorrowedPart(builder, ownership, "}\n")
+    return jsonFinishOwned(builder, ownership)
+}
+
+pub fun verifyQwenEngine(enginePath: String, suite: String,
+    outputPath: String) r: Result<Bool, QwenConvertVerifyError> {
+    if suite != "smoke" {
+        return Err<Bool, QwenConvertVerifyError>(convertVerifyError(
+            "qwen.verify.suite-not-installed", "--suite",
+            "this leaf installs artifact smoke verification only; no suite fallback is permitted", 4))
+    }
+    let read = cvRead(enginePath, 1048576, "engine")
+    if read.isErr() {
+        let error = read.unwrapErr(); read.releaseContainer()
+        return Err<Bool, QwenConvertVerifyError>(error)
+    }
+    let text = read.unwrap(); read.releaseContainer()
+    let parsed = parseQwenEngineArtifact(text)
+    seen_string_release_owned(text)
+    if parsed.isErr() {
+        let source = parsed.unwrapErr(); parsed.releaseContainer()
+        let error = convertVerifyError(source.code, source.field,
+            source.message, 3)
+        source.free()
+        return Err<Bool, QwenConvertVerifyError>(error)
+    }
+    let artifact = parsed.unwrap(); parsed.releaseContainer()
+    let root = cvRoot(enginePath)
+    let modelLock = root + "/model-lock.json"
+    let sourceLock = root + "/source-lock.json"
+    let weights = root + "/weights.sqw"
+    let modelResult = artifact.modelLockSha256()
+    let sourceResult = artifact.sourceLockSha256()
+    let weightsResult = artifact.weightsSha256()
+    let wholeResult = artifact.wholeSha256()
+    let policyResult = artifact.policySha256()
+    let modelDigest = modelResult.unwrap()
+    let sourceDigest = sourceResult.unwrap()
+    let weightsDigest = weightsResult.unwrap()
+    let wholeDigest = wholeResult.unwrap()
+    let policyDigest = policyResult.unwrap()
+    modelResult.releaseContainer(); sourceResult.releaseContainer()
+    weightsResult.releaseContainer(); wholeResult.releaseContainer()
+    policyResult.releaseContainer()
+    if not cvDigestMatches(modelLock, modelDigest) or
+        not cvDigestMatches(sourceLock, sourceDigest) or
+        not cvDigestMatches(weights, weightsDigest) {
+        seen_string_release_owned(root); seen_string_release_owned(modelLock)
+        seen_string_release_owned(sourceLock); seen_string_release_owned(weights)
+        artifact.close(); artifact.free()
+        return Err<Bool, QwenConvertVerifyError>(convertVerifyError(
+            "qwen.verify.identity", "engine",
+            "engine lock or weight digest differs from the manifest"))
+    }
+    let policy = SqwReaderPolicy.qwen38(modelDigest, sourceDigest,
+        policyDigest, wholeDigest, 4)
+    let opened = SqwReader.open(weights, policy)
+    policy.free()
+    if opened.isErr() {
+        opened.unwrapErr().free(); opened.releaseContainer()
+        seen_string_release_owned(root); seen_string_release_owned(modelLock)
+        seen_string_release_owned(sourceLock); seen_string_release_owned(weights)
+        artifact.close(); artifact.free()
+        return Err<Bool, QwenConvertVerifyError>(convertVerifyError(
+            "qwen.verify.sqw", "weights.sqw",
+            "SQW structural, section, lock, or whole-file validation failed"))
+    }
+    let reader = opened.unwrap(); opened.releaseContainer()
+    let count = reader.length()
+    let closed = reader.close()
+    if closed.isErr() {
+        closed.unwrapErr().free(); closed.releaseContainer()
+        seen_string_release_owned(root); seen_string_release_owned(modelLock)
+        seen_string_release_owned(sourceLock); seen_string_release_owned(weights)
+        artifact.close(); artifact.free(); reader.free()
+        return Err<Bool, QwenConvertVerifyError>(convertVerifyError(
+            "qwen.verify.cleanup", "weights.sqw",
+            "verified SQW ownership did not close deterministically", 11))
+    }
+    closed.releaseContainer(); reader.free()
+    let engineResult = artifact.engineId()
+    let report = verifyReport(engineResult.unwrap(), suite, count,
+        weightsDigest, wholeDigest)
+    engineResult.releaseContainer()
+    var written = true
+    if outputPath.length() > 0 { written = writeTextAtomically(outputPath, report) }
+    seen_string_release_owned(report)
+    seen_string_release_owned(root); seen_string_release_owned(modelLock)
+    seen_string_release_owned(sourceLock); seen_string_release_owned(weights)
+    artifact.close(); artifact.free()
+    if not written {
+        return Err<Bool, QwenConvertVerifyError>(convertVerifyError(
+            "qwen.verify.output", "--output",
+            "failed to atomically write verification evidence"))
+    }
+    return Ok<Bool, QwenConvertVerifyError>(true)
+}

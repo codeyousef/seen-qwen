@@ -1,0 +1,44 @@
+import seen_qwen.cli.convert_verify.{verifyQwenEngine}
+import seen_qwen.artifact.engine_artifact.{parseQwenEngineArtifact}
+import memory.allocation.{memoryStats}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun main() r: Int {
+    let baseline = memoryStats()
+    let verified = verifyQwenEngine(
+        ".seen/evidence/FEL-1455/smoke/engine.json", "smoke",
+        ".seen/evidence/FEL-1455/smoke/verify.json")
+    require(verified.isOkay(),
+        "verify the complete 866-entry SQW and deterministic reader cleanup")
+    verified.releaseContainer()
+    let after = memoryStats()
+    require(after.usedBytes == baseline.usedBytes and
+        after.allocationFailures == baseline.allocationFailures,
+        "return verifier allocator usage exactly to baseline")
+    let malformedBaseline = memoryStats()
+    let malformed = parseQwenEngineArtifact("{]")
+    require(malformed.isErr() and malformed.unwrapErr().code ==
+        "qwen.artifact.json", "reject malformed strict JSON")
+    let malformedOpen = memoryStats()
+    malformed.unwrapErr().free()
+    let malformedErrorFreed = memoryStats()
+    malformed.releaseContainer()
+    let afterMalformed = memoryStats()
+    require(afterMalformed.usedBytes == malformedBaseline.usedBytes and
+        afterMalformed.allocationFailures == malformedBaseline.allocationFailures,
+        "return malformed strict JSON allocator usage exactly to baseline")
+    println("QWN-047C allocator baseline/after=" +
+        baseline.usedBytes.toString() + "/" + after.usedBytes.toString())
+    println("QWN-047C malformed allocator baseline/after=" +
+        malformedBaseline.usedBytes.toString() + "/" +
+        malformedOpen.usedBytes.toString() +
+        "/" + malformedErrorFreed.usedBytes.toString() + "/" +
+        afterMalformed.usedBytes.toString())
+    println("PASS: QWN-047C native SQW smoke verification")
+    return 0
+}
+
+main()
