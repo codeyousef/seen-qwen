@@ -7,6 +7,8 @@ ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / "scripts/oracle/check_scope_events.sh"
 OUTER = ROOT / "scripts/oracle/run_bounded.sh"
 INNER = ROOT / "scripts/oracle/run_bounded_inner.sh"
+REQUIRED_OUTER = ROOT / "scripts/verification/run_required.sh"
+REQUIRED_INNER = ROOT / "scripts/verification/required_inner.sh"
 
 
 def memory_events(*, oom=0, oom_kill=0, oom_group_kill=0, maximum=0):
@@ -98,6 +100,18 @@ class ScopeEventGateTests(unittest.TestCase):
         self.assertIn('pids_events_before=$(read_metric pids.events)', inner)
         self.assertIn('memory_events_after=$(read_metric memory.events)', inner)
         self.assertIn('pids_events_after=$(read_metric pids.events)', inner)
+        self.assertIn('"$EVENT_GATE" "$status"', inner)
+
+    def test_required_gate_uses_the_same_event_contract(self):
+        outer = REQUIRED_OUTER.read_text(encoding="utf-8")
+        inner = REQUIRED_INNER.read_text(encoding="utf-8")
+        expected = 'EVENT_GATE="$ROOT_DIR/scripts/oracle/check_scope_events.sh"'
+        self.assertIn(expected, outer)
+        self.assertIn(expected, inner)
+        self.assertIn('memory_events_before=$(read_cgroup memory.events)', inner)
+        self.assertIn('pids_events_before=$(read_cgroup pids.events)', inner)
+        self.assertIn('memory_events_after=$(read_cgroup memory.events)', inner)
+        self.assertIn('pids_events_after=$(read_cgroup pids.events)', inner)
         self.assertIn('"$EVENT_GATE" "$status"', inner)
 
 

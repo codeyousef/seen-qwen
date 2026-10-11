@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd -P -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
 PREPARE_INPUTS="$ROOT_DIR/scripts/verification/prepare_inputs.sh"
 INNER_GATE="$ROOT_DIR/scripts/verification/required_inner.sh"
+EVENT_GATE="$ROOT_DIR/scripts/oracle/check_scope_events.sh"
 VERIFICATION_ROOT="$ROOT_DIR/.seen/verification"
 GIT_COMMON_DIR="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)"
 SHARED_ROOT="${GIT_COMMON_DIR%/.git}"
@@ -27,6 +28,8 @@ fail() {
     fail "input preparation entrypoint is missing or unsafe"
 [ -x "$INNER_GATE" ] && [ ! -L "$INNER_GATE" ] ||
     fail "inner required gate is missing or unsafe"
+[ -x "$EVENT_GATE" ] && [ ! -L "$EVENT_GATE" ] ||
+    fail "scope event gate is missing or unsafe"
 command -v docker >/dev/null 2>&1 || fail "Docker is required for the kernel hard scope"
 docker info >/dev/null 2>&1 || fail "Docker daemon is unavailable"
 
