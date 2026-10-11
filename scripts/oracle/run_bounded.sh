@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -P -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
 INNER="$ROOT_DIR/scripts/oracle/run_bounded_inner.sh"
+PROCESS_GROUP_RUNNER="$ROOT_DIR/scripts/oracle/run_owned_process_group.sh"
 EVENT_GATE="$ROOT_DIR/scripts/oracle/check_scope_events.sh"
 MEMORY_CEILING_BYTES=51539607552
 MEMORY_RESERVE_BYTES=8589934592
@@ -22,6 +23,8 @@ case "$timeout_seconds" in *[!0-9]*|"") fail "timeout must be an integer" ;; esa
 [ "$timeout_seconds" -ge 1 ] && [ "$timeout_seconds" -le 28800 ] ||
     fail "timeout must be in 1..28800 seconds"
 [ -x "$INNER" ] && [ ! -L "$INNER" ] || fail "bounded inner runner is missing or unsafe"
+[ -x "$PROCESS_GROUP_RUNNER" ] && [ ! -L "$PROCESS_GROUP_RUNNER" ] ||
+    fail "owned process-group runner is missing or unsafe"
 [ -x "$EVENT_GATE" ] && [ ! -L "$EVENT_GATE" ] || fail "scope event gate is missing or unsafe"
 command -v systemd-run >/dev/null 2>&1 || fail "systemd-run is required"
 case "$TASKS_MAX" in *[!0-9]*|"") fail "task cap must be an integer" ;; esac
