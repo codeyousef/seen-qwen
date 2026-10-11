@@ -43,7 +43,9 @@ cmake -S "$ROOT_DIR/native" -B "$BUILD_ROOT" -G Ninja \
     -DCMAKE_CUDA_COMPILER=/opt/cuda/bin/nvcc \
     -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build "$BUILD_ROOT" --parallel 1
-nvidia-smi --query-gpu=name,uuid,compute_cap,driver_version,memory.total,memory.used,memory.free,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory --format=csv,noheader
+QWEN_GPU_UUID=$("$ROOT_DIR/scripts/cuda/require_idle_gpu.sh")
+export CUDA_VISIBLE_DEVICES="$QWEN_GPU_UUID"
+nvidia-smi --id="$QWEN_GPU_UUID" --query-gpu=name,uuid,compute_cap,driver_version,memory.total,memory.used,memory.free,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory --format=csv,noheader
 "$BUILD_ROOT/qwn_043a_cuda_test"
 for tool in memcheck initcheck racecheck synccheck; do
     args=(--tool "$tool" --error-exitcode 86 --target-processes application-only)

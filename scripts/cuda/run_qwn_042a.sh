@@ -31,7 +31,9 @@ python3 -m unittest tests/test_cuda_attention_qk.py
     --jobs 1 --opt-jobs 1 --no-fork --frozen
 "$ARTIFACT_ROOT/qwn_042a_seen_surface_test"
 QWN_041D_HARD_SCOPE=1 "$ROOT_DIR/scripts/cuda/run_qwn_041d.sh" --inner
-nvidia-smi --query-gpu=name,uuid,compute_cap,driver_version,memory.total,memory.used,memory.free,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory \
+QWEN_GPU_UUID=$("$ROOT_DIR/scripts/cuda/require_idle_gpu.sh")
+export CUDA_VISIBLE_DEVICES="$QWEN_GPU_UUID"
+nvidia-smi --id="$QWEN_GPU_UUID" --query-gpu=name,uuid,compute_cap,driver_version,memory.total,memory.used,memory.free,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory \
     --format=csv,noheader
 "$BUILD_ROOT/qwn_042a_cuda_test"
 for tool in memcheck initcheck racecheck synccheck; do

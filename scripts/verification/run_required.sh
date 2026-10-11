@@ -23,7 +23,7 @@ fail() {
 
 [ "$(uname -s)" = "Linux" ] || fail "Linux is required"
 [ -x /opt/cuda/bin/nvcc ] && [ ! -L /opt/cuda/bin/nvcc ] ||
-    fail "the pinned local CUDA toolkit is required"
+    fail "the pinned local CUDA toolkit is required for bundled runtime linking"
 [ -x "$PREPARE_INPUTS" ] && [ ! -L "$PREPARE_INPUTS" ] ||
     fail "input preparation entrypoint is missing or unsafe"
 [ -x "$INNER_GATE" ] && [ ! -L "$INNER_GATE" ] ||
@@ -68,7 +68,6 @@ esac
 
 docker pull "$VERIFICATION_IMAGE"
 docker run --rm --platform linux/amd64 \
-    --gpus all \
     --network none \
     --read-only \
     --cap-drop ALL \
@@ -89,6 +88,9 @@ docker run --rm --platform linux/amd64 \
     --env HOME=/workspace/.seen/verification/home \
     --env PYTHONPATH=/workspace/.seen/verification/python \
     --env PATH=/opt/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    --env CUDA_VISIBLE_DEVICES= \
+    --env NVIDIA_VISIBLE_DEVICES=void \
+    --env LD_LIBRARY_PATH=/opt/cuda/targets/x86_64-linux/lib \
     --env CUDAToolkit_ROOT=/opt/cuda \
     --env NVCC_CCBIN=/usr/bin/clang++ \
     --env CUDAHOSTCXX=/usr/bin/clang++ \
