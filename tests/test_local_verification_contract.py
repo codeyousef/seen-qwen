@@ -114,6 +114,18 @@ class LocalVerificationContractTests(unittest.TestCase):
         ):
             self.assertIn(required, self.inner)
 
+    def test_convert_verify_gate_is_required(self) -> None:
+        for required in (
+            "tests/test_convert_verify_contract.py",
+            "tests/qwn_047c_convert_verify_test.seen --frozen",
+            "tests/qwn_047c_verify_integration_test.seen --frozen",
+            "qwn_047c_convert_verify_test_fast",
+            '"$OUTPUT_ROOT/qwn_047c_convert_verify_test"',
+            "prepare_qwn_047c_smoke_fixture.py",
+            '"$OUTPUT_ROOT/qwn_047c_verify_integration_test"',
+        ):
+            self.assertIn(required, self.inner)
+
     def test_cuda_reference_contract_is_required(self) -> None:
         self.assertIn("tests/test_cuda_reference_primitives.py", self.inner)
         self.assertIn("tests/test_cuda_reference_utilities.py", self.inner)

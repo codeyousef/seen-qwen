@@ -50,6 +50,7 @@ class EngineArtifactTests(unittest.TestCase):
         expected = self.builder.engine_id(
             fixture["model_lock_sha256"], fixture["source_lock_sha256"],
             fixture["format"]["weights_sha256"], policy_sha,
+            fixture["created_by"]["compiler_sha256"],
         )
         self.assertEqual(fixture["engine_id"], expected)
         self.assertEqual(fixture_bytes, self.builder.canonical_json(fixture) + b"\n")

@@ -41,3 +41,25 @@ does not allocate, fall back, offload, or alter policy.
 The explicit `--output` destination is the command's only file mutation. It is
 written atomically after every input and cleanup gate succeeds. Inputs, shard
 contents, locks, and caches are never modified by inspection.
+
+## `convert` and `verify`
+
+`seen-qwen convert --model-lock PATH --quant-profile bf16-bringup-v1
+--output-root PATH` installs QWN-047C's lossless offline conversion path. The
+native Seen command creates an exact structured request for the tracked,
+bounded streaming converter; it does not invoke a shell. The converter accepts
+only sibling files under the frozen model-lock source root, the configured
+quantization policy, serial execution, and an aggregate host-memory request no
+greater than 64 GiB. Python is confined to this offline conversion tool and
+never enters the production inference runtime. PyTorch, Transformers, remote
+model code, pickle, implicit resume, and hidden policy fallback remain
+prohibited. `--verify-only` performs the complete locked source, header,
+payload-digest, policy, and layout plan without staging or promoting an SQW.
+
+`seen-qwen verify --engine PATH --suite smoke [--output PATH]` strictly checks
+the closed engine manifest, sibling model and source locks, conventional SQW
+digest, SQW logical whole digest, all section digests, directory geometry, and
+deterministic reader cleanup. Optional evidence is written atomically. The
+`operators`, `logits`, `quality`, `long-context`, and `all` suites are parsed
+but explicitly unsupported by this leaf; they never fall back to smoke or CPU.
+Their owning later leaves replace that fail-closed boundary.

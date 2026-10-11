@@ -5,10 +5,12 @@
 ///
 
 import core.result.{Result}
-import crypto.sha256.{sha256}
+import crypto.sha256.{sha256, releaseSha256DigestResult}
 import json.parser.{JsonParseResult, destroyJsonParseResult}
+import json.builder.{jsonAppendBorrowedPart, jsonFinishOwned}
 import json.strict.{StrictJsonLimits, parseStrictJson}
 import json.value.{JsonValue}
+import str.string.{StringBuilder}
 
 extern "C" fun seen_string_release_owned(value: String) r: Void
 
@@ -27,17 +29,23 @@ fun artifactError(code: String, field: String, message: String)
         message: message, exitCode: exitCode, retryable: false }
 }
 
-fun artifactField(object: JsonValue, field: String) r: JsonValue? {
-    if not object.isObject() { return null }
+fun artifactField(object: JsonValue, field: String) r: JsonValue {
+    if not object.isObject() { abort("validated artifact field owner is not an object") }
     var index = 0
     while index < object.length() {
         let key = object.keyAt(index)
         let value = object.valueAt(index)
-        if key.isNone() or value.isNone() { return null }
-        if key.unwrap() == field { return value.unwrap() }
+        if key.isNone() or value.isNone() {
+            key.free(); value.free()
+            abort("validated artifact indexed traversal failed")
+        }
+        let matches = key.unwrap() == field
+        let borrowed = value.unwrap()
+        key.free(); value.free()
+        if matches { return borrowed }
         index = index + 1
     }
-    return null
+    abort("required validated artifact field is absent")
 }
 
 fun artifactExactFields(object: JsonValue, fields: Array<String>) r: Bool {
@@ -48,13 +56,16 @@ fun artifactExactFields(object: JsonValue, fields: Array<String>) r: Bool {
     while index < object.length() {
         let key = object.keyAt(index)
         let value = object.valueAt(index)
-        if key.isNone() or value.isNone() { return false }
+        if key.isNone() or value.isNone() {
+            key.free(); value.free(); return false
+        }
         var found = false
         var fieldIndex = 0
         while fieldIndex < fields.length() {
             if key.unwrap() == fields[fieldIndex] { found = true }
             fieldIndex = fieldIndex + 1
         }
+        key.free(); value.free()
         if not found { return false }
         index = index + 1
     }
@@ -128,21 +139,18 @@ fun createdByFields() r: Array<String> {
 
 fun stringEquals(object: JsonValue, field: String, expected: String) r: Bool {
     let value = artifactField(object, field)
-    return not value.isNone() and value.unwrap().isString() and
-        value.unwrap().getString() == expected
+    return value.isString() and value.getString() == expected
 }
 
 fun intEquals(object: JsonValue, field: String, expected: Int) r: Bool {
     let value = artifactField(object, field)
-    return not value.isNone() and value.unwrap().isNumber() and
-        value.unwrap().getNumber() == expected.toFloat() and
-        value.unwrap().getInt() == expected
+    return value.isNumber() and value.getNumber() == expected.toFloat() and
+        value.getInt() == expected
 }
 
 fun boolEquals(object: JsonValue, field: String, expected: Bool) r: Bool {
     let value = artifactField(object, field)
-    return not value.isNone() and value.unwrap().isBool() and
-        value.unwrap().getBool() == expected
+    return value.isBool() and value.getBool() == expected
 }
 
 fun digestValid(value: String) r: Bool {
@@ -172,21 +180,17 @@ fun decimalValid(value: String, allowZero: Bool) r: Bool {
 
 fun digestFieldValid(object: JsonValue, field: String) r: Bool {
     let value = artifactField(object, field)
-    return not value.isNone() and value.unwrap().isString() and
-        digestValid(value.unwrap().getString())
+    return value.isString() and digestValid(value.getString())
 }
 
 fun decimalFieldValid(object: JsonValue, field: String, allowZero: Bool)
     r: Bool {
     let value = artifactField(object, field)
-    return not value.isNone() and value.unwrap().isString() and
-        decimalValid(value.unwrap().getString(), allowZero)
+    return value.isString() and decimalValid(value.getString(), allowZero)
 }
 
 fun validateFormat(root: JsonValue) r: Bool {
-    let maybe = artifactField(root, "format")
-    if maybe.isNone() { return false }
-    let object = maybe.unwrap(); let fields = formatFields()
+    let object = artifactField(root, "format"); let fields = formatFields()
     let exact = artifactExactFields(object, fields); fields.free()
     return exact and stringEquals(object, "sqw_version", "1.0") and
         stringEquals(object, "weights_file", "weights.sqw") and
@@ -197,9 +201,7 @@ fun validateFormat(root: JsonValue) r: Bool {
 }
 
 fun validateModel(root: JsonValue) r: Bool {
-    let maybe = artifactField(root, "model")
-    if maybe.isNone() { return false }
-    let object = maybe.unwrap(); let fields = modelFields()
+    let object = artifactField(root, "model"); let fields = modelFields()
     let exact = artifactExactFields(object, fields); fields.free()
     return exact and stringEquals(object, "id", "Qwen/Qwen3.8-27B") and
         stringEquals(object, "revision",
@@ -214,9 +216,7 @@ fun validateModel(root: JsonValue) r: Bool {
 }
 
 fun validateQuantization(root: JsonValue) r: Bool {
-    let maybe = artifactField(root, "quantization")
-    if maybe.isNone() { return false }
-    let object = maybe.unwrap(); let fields = quantFields()
+    let object = artifactField(root, "quantization"); let fields = quantFields()
     let exact = artifactExactFields(object, fields); fields.free()
     return exact and stringEquals(object, "policy_id", "bf16-bringup-v1") and
         digestFieldValid(object, "policy_sha256") and
@@ -258,21 +258,22 @@ fun expectedAssetDigests() r: Array<String> {
 }
 
 fun validateTokenizer(root: JsonValue) r: Bool {
-    let maybe = artifactField(root, "tokenizer")
-    if maybe.isNone() or not maybe.unwrap().isArray() or
-        maybe.unwrap().length() != 7 { return false }
+    let tokenizer = artifactField(root, "tokenizer")
+    if not tokenizer.isArray() or tokenizer.length() != 7 { return false }
     let paths = expectedAssetPaths(); let sizes = expectedAssetBytes()
     let digests = expectedAssetDigests()
     var valid = true; var index = 0
     while index < 7 and valid {
-        let entry = maybe.unwrap().getAt(index)
-        if entry.isNone() { valid = false; break }
+        let entry = tokenizer.getAt(index)
+        if entry.isNone() { entry.free(); valid = false; break }
+        let value = entry.unwrap()
+        entry.free()
         let fields = assetFields()
-        let exact = artifactExactFields(entry.unwrap(), fields)
+        let exact = artifactExactFields(value, fields)
         fields.free()
-        valid = exact and stringEquals(entry.unwrap(), "path", paths[index]) and
-            stringEquals(entry.unwrap(), "bytes", sizes[index]) and
-            stringEquals(entry.unwrap(), "sha256", digests[index])
+        valid = exact and stringEquals(value, "path", paths[index]) and
+            stringEquals(value, "bytes", sizes[index]) and
+            stringEquals(value, "sha256", digests[index])
         index = index + 1
     }
     paths.free(); sizes.free(); digests.free()
@@ -280,23 +281,34 @@ fun validateTokenizer(root: JsonValue) r: Bool {
 }
 
 fun validateBackendMemoryAndCreator(root: JsonValue) r: Bool {
-    let backendMaybe = artifactField(root, "intended_backend")
-    let memoryMaybe = artifactField(root, "memory")
-    let creatorMaybe = artifactField(root, "created_by")
-    let profilesMaybe = artifactField(root, "compatible_profiles")
-    if backendMaybe.isNone() or memoryMaybe.isNone() or
-        creatorMaybe.isNone() or profilesMaybe.isNone() or
-        not profilesMaybe.unwrap().isArray() or
-        profilesMaybe.unwrap().length() != 0 { return false }
-    let backend = backendMaybe.unwrap(); let backendNames = backendFields()
+    let backend = artifactField(root, "intended_backend")
+    let memory = artifactField(root, "memory")
+    let creator = artifactField(root, "created_by")
+    let profiles = artifactField(root, "compatible_profiles")
+    if not profiles.isArray() or profiles.length() != 0 { return false }
+    let backendNames = backendFields()
     let backendExact = artifactExactFields(backend, backendNames)
     backendNames.free()
-    let memory = memoryMaybe.unwrap(); let memoryNames = memoryFields()
+    let memoryNames = memoryFields()
     let memoryExact = artifactExactFields(memory, memoryNames)
     memoryNames.free()
-    let creator = creatorMaybe.unwrap(); let creatorNames = createdByFields()
+    let creatorNames = createdByFields()
     let creatorExact = artifactExactFields(creator, creatorNames)
     creatorNames.free()
+    let creatorCurrent = stringEquals(creator, "seen_version", "0.22.9") and
+        stringEquals(creator, "seen_commit",
+            "d39a22295e469a47cfa0b76df49a659389ee78a2") and
+        stringEquals(creator, "compiler_sha256",
+            "58d7181f8b5adf1bb823ee5dcfc0868f9962b302af4dfaabf6a9e806aea16db2") and
+        stringEquals(creator, "compatibility_sha256",
+            "9fc9f4a7d5b59e494148935e863576946cb5f57c768b30b260bfd9fd40359514")
+    let creatorHistorical = stringEquals(creator, "seen_version", "0.19.4") and
+        stringEquals(creator, "seen_commit",
+            "a05932e231e33c7512be3432e9d88a938466f820") and
+        stringEquals(creator, "compiler_sha256",
+            "44a90884a9ff188718ed839aed4c8d692c8c520216c6a7b072ca6d0d35aa7fbc") and
+        stringEquals(creator, "compatibility_sha256",
+            "f39aebda1fdafc20d04b6c6a0072a491afea3f8f9ab836fd173ead0d1fe1ea33")
     return backendExact and stringEquals(backend, "kind", "cuda") and
         stringEquals(backend, "target", "sm_89") and
         boolEquals(backend, "bound", false) and memoryExact and
@@ -304,32 +316,43 @@ fun validateBackendMemoryAndCreator(root: JsonValue) r: Bool {
         stringEquals(memory, "persistent_state_bytes", "0") and
         stringEquals(memory, "max_profile_bytes", "0") and
         stringEquals(memory, "status", "not-runtime-sized") and
-        creatorExact and stringEquals(creator, "seen_version", "0.19.4") and
-        stringEquals(creator, "seen_commit",
-            "a05932e231e33c7512be3432e9d88a938466f820") and
-        stringEquals(creator, "compiler_sha256",
-            "44a90884a9ff188718ed839aed4c8d692c8c520216c6a7b072ca6d0d35aa7fbc") and
-        stringEquals(creator, "compatibility_sha256",
-            "f39aebda1fdafc20d04b6c6a0072a491afea3f8f9ab836fd173ead0d1fe1ea33") and
+        creatorExact and (creatorCurrent or creatorHistorical) and
         stringEquals(creator, "cpu_baseline", "x86-64")
 }
 
 fun computeEngineId(root: JsonValue) r: Result<String, QwenEngineArtifactError> {
-    let format = artifactField(root, "format").unwrap()
-    let quant = artifactField(root, "quantization").unwrap()
-    let material = "seen-qwen-engine-artifact-v1\n" +
-        "model_lock_sha256=" + artifactField(root, "model_lock_sha256").unwrap().getString() + "\n" +
-        "source_lock_sha256=" + artifactField(root, "source_lock_sha256").unwrap().getString() + "\n" +
-        "weights_sha256=" + artifactField(format, "weights_sha256").unwrap().getString() + "\n" +
-        "policy_sha256=" + artifactField(quant, "policy_sha256").unwrap().getString() + "\n" +
-        "compiler_sha256=44a90884a9ff188718ed839aed4c8d692c8c520216c6a7b072ca6d0d35aa7fbc\n"
+    let format = artifactField(root, "format")
+    let quant = artifactField(root, "quantization")
+    let creator = artifactField(root, "created_by")
+    let builder = StringBuilder.new(); let ownership = Array<Bool>()
+    jsonAppendBorrowedPart(builder, ownership,
+        "seen-qwen-engine-artifact-v1\nmodel_lock_sha256=")
+    jsonAppendBorrowedPart(builder, ownership,
+        artifactField(root, "model_lock_sha256").getString())
+    jsonAppendBorrowedPart(builder, ownership, "\nsource_lock_sha256=")
+    jsonAppendBorrowedPart(builder, ownership,
+        artifactField(root, "source_lock_sha256").getString())
+    jsonAppendBorrowedPart(builder, ownership, "\nweights_sha256=")
+    jsonAppendBorrowedPart(builder, ownership,
+        artifactField(format, "weights_sha256").getString())
+    jsonAppendBorrowedPart(builder, ownership, "\npolicy_sha256=")
+    jsonAppendBorrowedPart(builder, ownership,
+        artifactField(quant, "policy_sha256").getString())
+    jsonAppendBorrowedPart(builder, ownership, "\ncompiler_sha256=")
+    jsonAppendBorrowedPart(builder, ownership,
+        artifactField(creator, "compiler_sha256").getString())
+    jsonAppendBorrowedPart(builder, ownership, "\n")
+    let material = jsonFinishOwned(builder, ownership)
     let hashed = sha256(material)
     seen_string_release_owned(material)
     if hashed.isErr() {
+        hashed.unwrapErr().free(); hashed.releaseContainer()
         return Err<String, QwenEngineArtifactError>(artifactError(
             "qwen.artifact.checksum", "engine_id", "failed to hash engine identity"))
     }
-    return Ok<String, QwenEngineArtifactError>(hashed.unwrap())
+    let owned = hashed.unwrap()
+    hashed.releaseContainer()
+    return Ok<String, QwenEngineArtifactError>(owned)
 }
 
 pub class QwenEngineArtifact {
@@ -343,7 +366,7 @@ pub class QwenEngineArtifact {
                 "qwen.artifact.closed", "artifact", "engine artifact is closed"))
         }
         return Ok<String, QwenEngineArtifactError>(artifactField(
-            this.document.value.unwrap(), "engine_id").unwrap().getString())
+            this.document.value.unwrap(), "engine_id").getString())
     }
 
     fun weightBytes() r: Result<String, QwenEngineArtifactError> {
@@ -351,9 +374,57 @@ pub class QwenEngineArtifact {
             return Err<String, QwenEngineArtifactError>(artifactError(
                 "qwen.artifact.closed", "artifact", "engine artifact is closed"))
         }
-        let format = artifactField(this.document.value.unwrap(), "format").unwrap()
+        let format = artifactField(this.document.value.unwrap(), "format")
         return Ok<String, QwenEngineArtifactError>(
-            artifactField(format, "weights_bytes").unwrap().getString())
+            artifactField(format, "weights_bytes").getString())
+    }
+
+    fun modelLockSha256() r: Result<String, QwenEngineArtifactError> {
+        if this.closed {
+            return Err<String, QwenEngineArtifactError>(artifactError(
+                "qwen.artifact.closed", "artifact", "engine artifact is closed"))
+        }
+        return Ok<String, QwenEngineArtifactError>(artifactField(
+            this.document.value.unwrap(), "model_lock_sha256").getString())
+    }
+
+    fun sourceLockSha256() r: Result<String, QwenEngineArtifactError> {
+        if this.closed {
+            return Err<String, QwenEngineArtifactError>(artifactError(
+                "qwen.artifact.closed", "artifact", "engine artifact is closed"))
+        }
+        return Ok<String, QwenEngineArtifactError>(artifactField(
+            this.document.value.unwrap(), "source_lock_sha256").getString())
+    }
+
+    fun weightsSha256() r: Result<String, QwenEngineArtifactError> {
+        if this.closed {
+            return Err<String, QwenEngineArtifactError>(artifactError(
+                "qwen.artifact.closed", "artifact", "engine artifact is closed"))
+        }
+        let format = artifactField(this.document.value.unwrap(), "format")
+        return Ok<String, QwenEngineArtifactError>(
+            artifactField(format, "weights_sha256").getString())
+    }
+
+    fun wholeSha256() r: Result<String, QwenEngineArtifactError> {
+        if this.closed {
+            return Err<String, QwenEngineArtifactError>(artifactError(
+                "qwen.artifact.closed", "artifact", "engine artifact is closed"))
+        }
+        let format = artifactField(this.document.value.unwrap(), "format")
+        return Ok<String, QwenEngineArtifactError>(
+            artifactField(format, "sqw_whole_sha256").getString())
+    }
+
+    fun policySha256() r: Result<String, QwenEngineArtifactError> {
+        if this.closed {
+            return Err<String, QwenEngineArtifactError>(artifactError(
+                "qwen.artifact.closed", "artifact", "engine artifact is closed"))
+        }
+        let quant = artifactField(this.document.value.unwrap(), "quantization")
+        return Ok<String, QwenEngineArtifactError>(
+            artifactField(quant, "policy_sha256").getString())
     }
 
     fun close() r: Void {
@@ -370,15 +441,20 @@ pub fun parseQwenEngineArtifact(text: String)
         return Err<QwenEngineArtifact, QwenEngineArtifactError>(artifactError(
             "qwen.artifact.limit", "manifest", "manifest is empty or exceeds 1 MiB"))
     }
-    let parsed = parseStrictJson(text, StrictJsonLimits{
+    let limits = StrictJsonLimits{
         maxInputBytes: 1048576, maxDepth: 12, maxValues: 512,
         maxStringBytes: 4096,
-    })
+    }
+    let parsed = parseStrictJson(text, limits)
+    limits.free()
     if parsed.isErr() {
+        parsed.unwrapErr().free()
+        parsed.releaseContainer()
         return Err<QwenEngineArtifact, QwenEngineArtifactError>(artifactError(
             "qwen.artifact.json", "manifest", "manifest is not strict bounded JSON"))
     }
     let document = parsed.unwrap()
+    parsed.releaseContainer()
     if document.value.isNone() or not document.value.unwrap().isObject() {
         destroyJsonParseResult(document, true)
         return Err<QwenEngineArtifact, QwenEngineArtifactError>(artifactError(
@@ -407,20 +483,26 @@ pub fun parseQwenEngineArtifact(text: String)
     }
     let expected = computeEngineId(root)
     if expected.isErr() or expected.unwrap() !=
-        artifactField(root, "engine_id").unwrap().getString() {
+        artifactField(root, "engine_id").getString() {
         if expected.isOkay() { seen_string_release_owned(expected.unwrap()) }
+        else { expected.unwrapErr().free() }
+        expected.releaseContainer()
         destroyJsonParseResult(document, true)
         return Err<QwenEngineArtifact, QwenEngineArtifactError>(artifactError(
             "qwen.artifact.identity", "engine_id", "engine identity does not match content identities"))
     }
     seen_string_release_owned(expected.unwrap())
+    expected.releaseContainer()
     let digest = sha256(text)
     if digest.isErr() {
+        digest.unwrapErr().free(); digest.releaseContainer()
         destroyJsonParseResult(document, true)
         return Err<QwenEngineArtifact, QwenEngineArtifactError>(artifactError(
             "qwen.artifact.checksum", "manifest", "failed to hash validated manifest"))
     }
+    let manifestSha256 = seen_string_clone_owned(digest.unwrap())
+    releaseSha256DigestResult(digest)
     return Ok<QwenEngineArtifact, QwenEngineArtifactError>(QwenEngineArtifact{
-        document: document, manifestSha256: digest.unwrap(), closed: false,
+        document: document, manifestSha256: manifestSha256, closed: false,
     })
 }

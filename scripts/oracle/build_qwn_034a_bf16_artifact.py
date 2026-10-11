@@ -27,10 +27,10 @@ MODEL_REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 MODEL_CONTRACT = "seen-qwen38-text-v1"
 INDEX_SHA256 = "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df"
 CATALOG_SHA256 = "5f466d43bae3059e54f0bfe183d0e82c822242f45a834d778414d3e5b5248f1f"
-COMPILER_SHA256 = "44a90884a9ff188718ed839aed4c8d692c8c520216c6a7b072ca6d0d35aa7fbc"
-COMPATIBILITY_SHA256 = "f39aebda1fdafc20d04b6c6a0072a491afea3f8f9ab836fd173ead0d1fe1ea33"
-SEEN_COMMIT = "a05932e231e33c7512be3432e9d88a938466f820"
-SEEN_VERSION = "0.19.4"
+COMPILER_SHA256 = "58d7181f8b5adf1bb823ee5dcfc0868f9962b302af4dfaabf6a9e806aea16db2"
+COMPATIBILITY_SHA256 = "9fc9f4a7d5b59e494148935e863576946cb5f57c768b30b260bfd9fd40359514"
+SEEN_COMMIT = "d39a22295e469a47cfa0b76df49a659389ee78a2"
+SEEN_VERSION = "0.22.9"
 POLICY_ID = "bf16-bringup-v1"
 INCLUDED_TENSORS = 866
 TEXT_TENSORS = 851
@@ -704,11 +704,12 @@ def source_lock_document(source_manifest_sha: str, policy_sha: str, assets: list
     }
 
 
-def engine_id(model_lock: str, source_lock: str, weights: str, policy: str) -> str:
+def engine_id(model_lock: str, source_lock: str, weights: str, policy: str,
+              compiler_sha256: str = COMPILER_SHA256) -> str:
     material = (
         "seen-qwen-engine-artifact-v1\n" f"model_lock_sha256={model_lock}\n"
         f"source_lock_sha256={source_lock}\n" f"weights_sha256={weights}\n"
-        f"policy_sha256={policy}\n" f"compiler_sha256={COMPILER_SHA256}\n"
+        f"policy_sha256={policy}\n" f"compiler_sha256={compiler_sha256}\n"
     )
     return sha256(material.encode()).hexdigest()
 
@@ -763,6 +764,8 @@ def build(args: argparse.Namespace) -> Path:
     source_lock_digest = sha256(source_lock_bytes).hexdigest()
     evidence = conversion_evidence(tensors, model_lock_digest, source_lock_digest, policy_digest, included_bytes)
     layout = compute_layout(tensors, model_lock_digest, source_lock_digest, policy_digest, evidence)
+    if getattr(args, "verify_only", False):
+        return output_root
     staging = Path(tempfile.mkdtemp(prefix=".qwn-034a-stage-", dir=output_root))
     try:
         weights = staging / "weights.sqw"
@@ -814,6 +817,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--policy", type=Path, required=True)
     value.add_argument("--output-root", type=Path, required=True)
     value.add_argument("--chunk-bytes", type=int, default=MAX_CHUNK_BYTES)
+    value.add_argument("--verify-only", action="store_true")
     return value
 
 

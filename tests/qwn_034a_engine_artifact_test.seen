@@ -16,6 +16,17 @@ fun main() r: Int {
         "recompute the content-addressed engine identity")
     require(artifact.weightBytes().unwrap() == "54641399999",
         "retain the exact decimal weight extent")
+    require(artifact.modelLockSha256().unwrap() ==
+        "1111111111111111111111111111111111111111111111111111111111111111" and
+        artifact.sourceLockSha256().unwrap() ==
+        "2222222222222222222222222222222222222222222222222222222222222222" and
+        artifact.weightsSha256().unwrap() ==
+        "3333333333333333333333333333333333333333333333333333333333333333" and
+        artifact.wholeSha256().unwrap() ==
+        "4444444444444444444444444444444444444444444444444444444444444444" and
+        artifact.policySha256().unwrap() ==
+        "ae8ab061f558f57ada0a026ca03a85be95d719e014d07126d33f040563638028",
+        "expose the immutable identities required by native verification")
 
     let wrongId = replaceFirst(text,
         "71fcf096f84a2a9940fe0d31497ddf6970bf15db5640c990348472903f1cd870",

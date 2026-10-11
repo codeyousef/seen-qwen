@@ -1,0 +1,55 @@
+import seen_qwen.cli.convert_verify.{convertQwenModel, verifyQwenEngine}
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun main() r: Int {
+    let profile = convertQwenModel("model-lock.json", ".seen/output",
+        "q4-hidden-policy", "configs/quantization.toml", "", 1,
+        0 as UInt64, false, false)
+    require(profile.isErr() and profile.unwrapErr().code ==
+        "qwen.convert.profile" and profile.unwrapErr().exitCode == 4,
+        "reject an undeclared conversion profile without fallback")
+    profile.unwrapErr().free(); profile.releaseContainer()
+
+    let parallel = convertQwenModel("model-lock.json", ".seen/output",
+        "bf16-bringup-v1", "configs/quantization.toml", "", 2,
+        0 as UInt64, false, false)
+    require(parallel.isErr() and parallel.unwrapErr().code ==
+        "qwen.convert.jobs", "require serial conversion")
+    parallel.unwrapErr().free(); parallel.releaseContainer()
+
+    let resumed = convertQwenModel("model-lock.json", ".seen/output",
+        "bf16-bringup-v1", "configs/quantization.toml", "", 1,
+        0 as UInt64, true, false)
+    require(resumed.isErr() and resumed.unwrapErr().code ==
+        "qwen.convert.resume", "reject uncertified resume semantics")
+    resumed.unwrapErr().free(); resumed.releaseContainer()
+
+    let memory = convertQwenModel("model-lock.json", ".seen/output",
+        "bf16-bringup-v1", "configs/quantization.toml", "", 1,
+        68719476737 as UInt64, false, false)
+    require(memory.isErr() and memory.unwrapErr().code ==
+        "qwen.convert.memory", "enforce the 64 GiB command bound")
+    memory.unwrapErr().free(); memory.releaseContainer()
+
+    let suite = verifyQwenEngine(
+        "tests/fixtures/qwn_034a_engine_artifact.json", "operators", "")
+    require(suite.isErr() and suite.unwrapErr().code ==
+        "qwen.verify.suite-not-installed" and suite.unwrapErr().exitCode == 4,
+        "reject unavailable verification suites without silent fallback")
+    suite.unwrapErr().free(); suite.releaseContainer()
+
+    let missing = verifyQwenEngine(
+        "tests/fixtures/qwn_034a_engine_artifact.json", "smoke", "")
+    require(missing.isErr() and missing.unwrapErr().code ==
+        "qwen.verify.identity",
+        "reject an engine whose sibling locks or weights are absent")
+    missing.unwrapErr().free(); missing.releaseContainer()
+
+    println("PASS: QWN-047C bounded convert and verify command contract")
+    return 0
+}
+
+main()
