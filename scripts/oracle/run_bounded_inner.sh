@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+ROOT_DIR="$(cd -P -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
+EVENT_GATE="$ROOT_DIR/scripts/oracle/check_scope_events.sh"
+
 fail() {
     echo "oracle-inner: $*" >&2
     exit 126
@@ -39,14 +42,23 @@ cpu_max=$(read_metric cpu.max)
 [ "$swap_max" = 0 ] || fail "memory.swap.max is not zero"
 [ "$pids_max" = "${QWN_EXPECTED_TASKS_MAX:?}" ] || fail "pids.max readback mismatch"
 [ "$cpu_max" = "100000 100000" ] || fail "CPU quota does not enforce one aggregate worker"
+[ -x "$EVENT_GATE" ] && [ ! -L "$EVENT_GATE" ] || fail "scope event gate is missing or unsafe"
 ulimit -v "${QWN_VMEM_KIB:?}"
 ulimit -s 8192
 [ "$(ulimit -v)" = "$QWN_VMEM_KIB" ] || fail "virtual-memory readback mismatch"
 [ "$(ulimit -s)" = 8192 ] || fail "stack readback is not 8 MiB"
 echo "oracle-inner: verified cgroup=$cgroup_path memory.max=$memory_max memory.swap.max=$swap_max pids.max=$pids_max cpu.max='$cpu_max' vmem_kib=$QWN_VMEM_KIB stack_kib=$(ulimit -s)"
 
+memory_events_before=$(read_metric memory.events)
+pids_events_before=$(read_metric pids.events)
+
 set +e
 timeout --foreground --signal=TERM --kill-after=30 "${QWN_TIMEOUT_SECONDS:?}" "$@"
+status=$?
+memory_events_after=$(read_metric memory.events)
+pids_events_after=$(read_metric pids.events)
+"$EVENT_GATE" "$status" "$memory_events_before" "$memory_events_after" \
+    "$pids_events_before" "$pids_events_after"
 status=$?
 set -e
 trap - EXIT
