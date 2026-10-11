@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -P -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
 PROCESS_GROUP_RUNNER="$ROOT_DIR/scripts/oracle/run_owned_process_group.sh"
+EVENT_GATE="$ROOT_DIR/scripts/oracle/check_scope_events.sh"
 
 fail() {
     echo "oracle-inner: $*" >&2
@@ -82,6 +83,7 @@ cpu_max=$(read_metric cpu.max)
 [ "$cpu_max" = "100000 100000" ] || fail "CPU quota does not enforce one aggregate worker"
 [ -x "$PROCESS_GROUP_RUNNER" ] && [ ! -L "$PROCESS_GROUP_RUNNER" ] ||
     fail "owned process-group runner is missing or unsafe"
+[ -x "$EVENT_GATE" ] && [ ! -L "$EVENT_GATE" ] || fail "scope event gate is missing or unsafe"
 ulimit -v "${QWN_VMEM_KIB:?}"
 ulimit -s 8192
 [ "$(ulimit -v)" = "$QWN_VMEM_KIB" ] || fail "virtual-memory readback mismatch"
@@ -93,6 +95,8 @@ case "$pids_current_before" in
     *[!0-9]*|"") fail "pids.current baseline is invalid" ;;
 esac
 snapshot_baseline_pids
+memory_events_before=$(read_metric memory.events)
+pids_events_before=$(read_metric pids.events)
 
 set +e
 "$PROCESS_GROUP_RUNNER" "${QWN_TIMEOUT_SECONDS:?}" "$@"
@@ -130,6 +134,11 @@ if [ "$pids_current_after" -gt "$pids_current_before" ]; then
         "$pids_current_before" "$pids_current_after" >&2
     [ "$status" -ne 0 ] || status=125
 fi
+memory_events_after=$(read_metric memory.events)
+pids_events_after=$(read_metric pids.events)
+"$EVENT_GATE" "$status" "$memory_events_before" "$memory_events_after" \
+    "$pids_events_before" "$pids_events_after"
+status=$?
 set -e
 trap - EXIT
 report_metrics "$status"

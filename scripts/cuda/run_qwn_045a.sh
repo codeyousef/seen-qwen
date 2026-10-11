@@ -77,7 +77,9 @@ grep -q 'i32 -1' "$engine_ir"
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
     "$ARTIFACT_ROOT/qwn_045a_ubsan"
 
-gpu_identity=$(nvidia-smi --query-gpu=name,uuid,compute_cap,driver_version,memory.total,memory.used,memory.free,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory --format=csv,noheader)
+QWEN_GPU_UUID=$("$ROOT_DIR/scripts/cuda/require_idle_gpu.sh")
+export CUDA_VISIBLE_DEVICES="$QWEN_GPU_UUID"
+gpu_identity=$(nvidia-smi --id="$QWEN_GPU_UUID" --query-gpu=name,uuid,compute_cap,driver_version,memory.total,memory.used,memory.free,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory --format=csv,noheader)
 printf 'QWN-045A hardware: %s\n' "$gpu_identity"
 printf '%s\n' "$gpu_identity" | grep -F 'NVIDIA GeForce RTX 4090'
 printf '%s\n' "$gpu_identity" | grep -F '8.9'

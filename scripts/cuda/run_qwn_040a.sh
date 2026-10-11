@@ -55,7 +55,9 @@ cmake -S "$ROOT_DIR/native" -B "$BUILD_ROOT" -G Ninja \
     -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build "$BUILD_ROOT" --parallel 1
 "$BUILD_ROOT/qwn_040a_header_contract"
-nvidia-smi --query-gpu=name,uuid,compute_cap,driver_version,memory.total,memory.used,memory.free,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory \
+QWEN_GPU_UUID=$("$ROOT_DIR/scripts/cuda/require_idle_gpu.sh")
+export CUDA_VISIBLE_DEVICES="$QWEN_GPU_UUID"
+nvidia-smi --id="$QWEN_GPU_UUID" --query-gpu=name,uuid,compute_cap,driver_version,memory.total,memory.used,memory.free,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory \
     --format=csv,noheader
 "$BUILD_ROOT/qwn_040a_cuda_test"
 
@@ -70,7 +72,7 @@ done
 
 sha256sum "$BUILD_ROOT/libseen_qwen_cuda.so" \
     "$BUILD_ROOT/qwn_040a_cuda_test" "$BUILD_ROOT/seen_cuda_build/libseen_cuda.so.1.0.0"
-nvidia-smi --query-gpu=name,uuid,memory.total,memory.used,memory.free,temperature.gpu,power.draw,pstate \
+nvidia-smi --id="$QWEN_GPU_UUID" --query-gpu=name,uuid,memory.total,memory.used,memory.free,temperature.gpu,power.draw,pstate \
     --format=csv,noheader
 
 toolchain_hash_after=$(find "$TOOLCHAIN_ROOT" -type f -print0 | sort -z |

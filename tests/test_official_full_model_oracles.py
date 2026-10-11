@@ -151,9 +151,12 @@ class OfficialFullModelOracleTests(unittest.TestCase):
         self.assertIn("local_files_only=True, trust_remote_code=False", capture_source)
         self.assertNotIn("AutoModel", capture_source)
         self.assertNotIn("urllib", capture_source)
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(ValueError, "ignored project .seen root"):
-                validate_output_root(Path(temporary))
+        with self.assertRaisesRegex(ValueError, "ignored project .seen root"):
+            validate_output_root(ROOT)
+        ignored_root = ROOT / ".seen"
+        ignored_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ignored_root) as temporary:
+            validate_output_root(Path(temporary))
 
 
 if __name__ == "__main__":
