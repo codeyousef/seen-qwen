@@ -84,10 +84,9 @@ cp "$NATIVE_BUILD/libseen_qwen_cuda.so" \
     "$ARTIFACT_ROOT/qwn_046b_oracle_ubsan" --sanitize undefined \
     --target-cpu=x86-64 --no-cache --jobs 1 --opt-jobs 1 --no-fork --frozen
 
-compute_pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits |
-    sed '/^[[:space:]]*$/d')
-[ -z "$compute_pids" ] || fail "GPU has an active compute process; no process was terminated"
-gpu_identity=$(nvidia-smi --query-gpu=name,uuid,compute_cap,driver_version,memory.total,memory.used,memory.free,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory,utilization.gpu --format=csv,noheader)
+QWEN_GPU_UUID=$("$ROOT_DIR/scripts/cuda/require_idle_gpu.sh")
+export CUDA_VISIBLE_DEVICES="$QWEN_GPU_UUID"
+gpu_identity=$(nvidia-smi --id="$QWEN_GPU_UUID" --query-gpu=name,uuid,compute_cap,driver_version,memory.total,memory.used,memory.free,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory,utilization.gpu --format=csv,noheader)
 printf 'QWN-046B hardware: %s\n' "$gpu_identity"
 printf '%s\n' "$gpu_identity" | grep -F 'NVIDIA GeForce RTX 4090'
 printf '%s\n' "$gpu_identity" | grep -F '8.9'

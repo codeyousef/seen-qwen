@@ -93,8 +93,9 @@ class FullCudaContractTests(unittest.TestCase):
             "--release --lto=thin", "--sanitize undefined",
             "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1",
             "compute-sanitizer",
-            "--query-compute-apps=pid",
-            "GPU has an active compute process; no process was terminated",
+            'QWEN_GPU_UUID=$("$ROOT_DIR/scripts/cuda/require_idle_gpu.sh")',
+            'export CUDA_VISIBLE_DEVICES="$QWEN_GPU_UUID"',
+            'nvidia-smi --id="$QWEN_GPU_UUID"',
         ):
             self.assertIn(required, runner)
         for forbidden in ("sudo", "pkexec", "kill ", "pkill", "killall"):

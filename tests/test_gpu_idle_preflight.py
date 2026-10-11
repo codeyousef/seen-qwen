@@ -133,7 +133,7 @@ class GpuIdlePreflightTests(unittest.TestCase):
             self.assertLess(source.index(guard), source.index("nvidia-smi"), runner.name)
             self.assertIn('export CUDA_VISIBLE_DEVICES="$QWEN_GPU_UUID"', source)
             self.assertIn('nvidia-smi --id="$QWEN_GPU_UUID"', source)
-        self.assertEqual(len(guarded), 17)
+        self.assertEqual(len(guarded), 18)
 
 
 if __name__ == "__main__":
