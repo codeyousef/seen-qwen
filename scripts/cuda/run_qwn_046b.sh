@@ -80,6 +80,9 @@ cp "$NATIVE_BUILD/libseen_qwen_cuda.so" \
 "$SEEN_BIN" compile tests/qwn_046b_full_cuda_oracle_test.seen \
     "$ARTIFACT_ROOT/qwn_046b_oracle_release" --release --lto=thin \
     --target-cpu=x86-64 --no-cache --jobs 1 --opt-jobs 1 --no-fork --frozen
+"$SEEN_BIN" compile tests/qwn_046b_full_cuda_oracle_test.seen \
+    "$ARTIFACT_ROOT/qwn_046b_oracle_ubsan" --sanitize undefined \
+    --target-cpu=x86-64 --no-cache --jobs 1 --opt-jobs 1 --no-fork --frozen
 
 compute_pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits |
     sed '/^[[:space:]]*$/d')
@@ -91,12 +94,15 @@ printf '%s\n' "$gpu_identity" | grep -F '8.9'
 
 "$ARTIFACT_ROOT/qwn_046b_oracle_fast" "$WEIGHTS" "$ORACLE"
 "$ARTIFACT_ROOT/qwn_046b_oracle_release" "$WEIGHTS" "$ORACLE"
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+    "$ARTIFACT_ROOT/qwn_046b_oracle_ubsan" "$WEIGHTS" "$ORACLE"
 /opt/cuda/bin/compute-sanitizer --tool memcheck --leak-check full \
     --error-exitcode 86 --target-processes application-only \
     "$ARTIFACT_ROOT/qwn_046b_oracle_release" "$WEIGHTS" "$ORACLE"
 
 sha256sum "$ARTIFACT_ROOT/qwn_046b_oracle_fast" \
     "$ARTIFACT_ROOT/qwn_046b_oracle_release" \
+    "$ARTIFACT_ROOT/qwn_046b_oracle_ubsan" \
     "$NATIVE_BUILD/libseen_qwen_cuda.so" "$WEIGHTS" "$ORACLE"
 toolchain_hash_after=$(find "$SEEN_BIN" "$SEEN_PACKAGE_CLIENT" \
     "$COMPATIBILITY_MANIFEST" "$SEEN_PREFIX/lib/seen" -type f \

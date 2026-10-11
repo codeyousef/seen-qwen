@@ -90,7 +90,9 @@ class FullCudaContractTests(unittest.TestCase):
             self.assertIn(required, test)
         for required in (
             "run_bounded.sh", "QWN_TASKS_MAX=24", "--parallel 1",
-            "--release --lto=thin", "compute-sanitizer",
+            "--release --lto=thin", "--sanitize undefined",
+            "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1",
+            "compute-sanitizer",
             "--query-compute-apps=pid",
             "GPU has an active compute process; no process was terminated",
         ):
