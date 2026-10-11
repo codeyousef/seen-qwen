@@ -1,6 +1,7 @@
 import env.env.{args}
 import memory.allocation.{memoryStats}
 import seen_qwen.formats.sqw_reader.{SqwReader, SqwReaderPolicy}
+import seen_qwen.runtime.full_model_memory.{QWEN_FULL_MAX_CONTEXT}
 import seen_qwen.runtime.full_model_cuda.{createQwenFullCudaResidency}
 
 extern "C" fun seen_string_release_owned(value: String) r: Void
@@ -23,7 +24,8 @@ fun main() r: Int {
     require(opened.isOkay(), "open the exact validated complete-model SQW")
     let reader = opened.unwrap()
     opened.releaseContainer(); policy.free()
-    let made = createQwenFullCudaResidency(0 as Int32, 128 as UInt64)
+    let made = createQwenFullCudaResidency(0 as Int32,
+        QWEN_FULL_MAX_CONTEXT)
     require(made.isOkay(), "create the fixed complete-model residency")
     let residency = made.unwrap()
     made.releaseContainer()
@@ -42,8 +44,9 @@ fun main() r: Int {
     prompt.push(248069 as Int32); prompt.push(271 as Int32)
     let sampled = residency.executeTokens(prompt, false)
     require(sampled.isOkay(), "execute the complete-model CUDA forward")
-    let sampledToken = sampled.unwrap()
+    let sampledStep = sampled.unwrap()
     sampled.releaseContainer()
+    let sampledToken = sampledStep.tokenId
     let sampledTokenText = (sampledToken as Int64).toString()
     let sampledTokenLine = "QWN-046B sampled token: " + sampledTokenText
     println(sampledTokenLine)
@@ -52,6 +55,7 @@ fun main() r: Int {
     require(sampledToken == (109430 as Int32) and
         residency.position == (12 as UInt64),
         "match the independent sealed-Q4 CPU differential token")
+    sampledStep.free()
     prompt.free()
 
     let readerClosed = reader.close()

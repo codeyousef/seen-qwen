@@ -27,10 +27,10 @@ fun report() r: QwenInspectReport {
         visionBytes: 921460192 as UInt64,
         textTensors: 851, mtpTensors: 15, visionTensors: 333,
         q4WeightBytes: 14515042384 as UInt64,
-        q4AllocationBytes: 16627529808 as UInt64,
-        q4MinimumDeviceBytes: 17164400720 as UInt64,
+        q4AllocationBytes: 16631461968 as UInt64,
+        q4MinimumDeviceBytes: 17168332880 as UInt64,
         q4TargetDeviceBytes: 25757220864 as UInt64,
-        q4TargetAdmittedBytes: 17400246432 as UInt64,
+        q4TargetAdmittedBytes: 17404178592 as UInt64,
         deviceRequested: false, deviceOrdinal: -1 as Int32,
         deviceComputeMajor: 0 as Int32, deviceComputeMinor: 0 as Int32,
         deviceTotalBytes: 0 as UInt64, deviceFreeBytes: 0 as UInt64,
@@ -48,7 +48,7 @@ fun main() r: Int {
         firstJson.contains("\"text_bytes\":53791996928") and
         firstJson.contains("\"mtp_bytes\":849398784") and
         firstJson.contains("\"vision_bytes\":921460192") and
-        firstJson.contains("\"q4_minimum_device_bytes\":17164400720") and
+        firstJson.contains("\"q4_minimum_device_bytes\":17168332880") and
         firstJson.contains("\"device_probe\":\"not-requested\"") and
         not firstJson.contains("device_ordinal"),
         "render complete CPU-only inspection contract")

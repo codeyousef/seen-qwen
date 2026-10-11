@@ -1922,7 +1922,7 @@ extern "C" SeenCudaStatus seen_qwen_gdn_recurrent_prefill_f32(
 namespace {
 
 constexpr uint64_t kFullTensorCount = 2 + 64 * 16 + 1;
-constexpr uint64_t kFullContext = 128;
+constexpr uint64_t kFullContext = 188;
 constexpr uint64_t kFullHidden = 5120;
 constexpr uint64_t kFullIntermediate = 17408;
 constexpr uint64_t kFullVocabulary = 248320;
@@ -2207,8 +2207,9 @@ struct FullQ4Forward {
             head.packed, head.scales, logits, 1, kFullHidden,
             kFullVocabulary);
         if (result.code != SEEN_CUDA_OK) return result;
-        return seen_qwen_greedy_argmax_f32(token, logits, token_ids, 1,
-                                           kFullVocabulary, kFullVocabulary);
+        return seen_qwen_top_k_f32(token, logits, token_ids,
+                                   full_subview(scratch, 0, sizeof(float)),
+                                   1, kFullVocabulary, kFullVocabulary, 1);
     }
 };
 
@@ -2249,10 +2250,10 @@ extern "C" SeenCudaStatus seen_qwen_full_forward_q4_f32(
                        "full-model tensor count is not 1027");
     if (token_count == 0 || token_count > kFullContext)
         return invalid(token->device_ordinal, op,
-                       "full-model token count is outside 1..128");
+                       "full-model token count is outside 1..188");
     if (cache_capacity != kFullContext)
         return invalid(token->device_ordinal, op,
-                       "full-model cache capacity is not 128");
+                       "full-model cache capacity is not 188");
     if (start_position >= cache_capacity ||
         token_count > cache_capacity - start_position)
         return invalid(token->device_ordinal, op,

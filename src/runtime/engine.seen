@@ -11,6 +11,7 @@
 
 import core.result.{Result}
 import seen_qwen.model.sampling.{QwenSampler, createQwenSampler}
+import seen_qwen.runtime.full_model_memory.{QWEN_FULL_MAX_CONTEXT}
 
 extern "C" fun seen_string_clone_owned(value: String) r: String
 extern "C" fun seen_string_release_owned(value: String) r: Void
@@ -144,6 +145,14 @@ fun qwenStepKindValid(kind: Int32, prefill: Bool) r: Bool {
         kind == QWEN_PLAN_SAMPLE or kind == QWEN_PLAN_MTP
 }
 
+fun qwenPlanContextValid(modelLayers: Int, maxContext: UInt64) r: Bool {
+    return maxContext > (0 as UInt64) and
+        ((modelLayers == QWEN_MINI_LAYERS and
+            maxContext <= QWEN_MINI_CONTEXT) or
+         (modelLayers == QWEN_FULL_LAYERS and
+            maxContext <= QWEN_FULL_MAX_CONTEXT))
+}
+
 fun validatePhasePlan(steps: Array<QwenExecutionStep>, prefill: Bool,
     includeMtp: Bool, layerCount: Int) r: Bool {
     let terminal = 1 + layerCount * 6
@@ -193,8 +202,7 @@ pub class QwenExecutionPlan {
         return not this.closed and this.deviceOrdinal >= (0 as Int32) and
             qwenDigestValid(this.engineIdentity) and
             qwenDigestValid(this.manifestIdentity) and
-            this.maxContext > (0 as UInt64) and
-            this.maxContext <= QWEN_MINI_CONTEXT and
+            qwenPlanContextValid(this.modelLayers, this.maxContext) and
             this.maxGenerated > (0 as UInt64) and
             this.maxGenerated <= this.maxContext and
             (this.fallbackPolicy == QWEN_FALLBACK_PROHIBITED or
@@ -262,7 +270,7 @@ pub fun createQwenFullExecutionPlan(engineIdentity: String,
     r: Result<QwenExecutionPlan, QwenEngineError> {
     if not qwenDigestValid(engineIdentity) or
         not qwenDigestValid(manifestIdentity) or deviceOrdinal < (0 as Int32) or
-        maxContext == (0 as UInt64) or maxContext > QWEN_MINI_CONTEXT or
+        maxContext == (0 as UInt64) or maxContext > QWEN_FULL_MAX_CONTEXT or
         maxGenerated == (0 as UInt64) or maxGenerated > maxContext {
         return Err<QwenExecutionPlan, QwenEngineError>(qwenEngineError(
             "qwen.engine.plan", "engine.plan.full",

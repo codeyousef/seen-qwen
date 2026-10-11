@@ -1,6 +1,7 @@
 import env.env.{args}
 import memory.allocation.{memoryStats}
 import seen_qwen.formats.sqw_reader.{SqwReader, SqwReaderPolicy}
+import seen_qwen.runtime.full_model_memory.{QWEN_FULL_MAX_CONTEXT}
 import seen_qwen.runtime.full_model_cuda.{createQwenFullCudaResidency}
 
 fun require(condition: Bool, message: String) r: Void {
@@ -21,11 +22,12 @@ fun main() r: Int {
     require(opened.isOkay(), "open and validate the exact Q4 SQW artifact")
     let reader = opened.unwrap()
     let usedAfterOpen = memoryStats().usedBytes
-    let made = createQwenFullCudaResidency(0 as Int32, 128 as UInt64)
+    let made = createQwenFullCudaResidency(0 as Int32,
+        QWEN_FULL_MAX_CONTEXT)
     require(made.isOkay(), "create the complete Seen-owned CUDA residency")
     let residency = made.unwrap()
     require(residency.allocations.length() == 10 and
-        residency.plan.allocationBytes == (16627529808 as UInt64) and
+        residency.plan.allocationBytes == (16631461968 as UInt64) and
         residency.stream.handle != (0 as UInt64) and not residency.closed,
         "own every coarse allocation and the exact Seen stream")
     require(residency.loadValidatedQ4Weights(reader).isOkay() and

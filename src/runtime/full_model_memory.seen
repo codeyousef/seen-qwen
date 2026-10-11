@@ -3,14 +3,15 @@
 ///
 /// The experimental Q4 profile is intentionally explicit and has no fallback
 /// or offload path. The safety reserve remains unallocated. All other values
-/// are exact allocation bounds for one batch and at most 128 tokens.
+/// are exact allocation bounds for one batch and at most 188 tokens: the
+/// longest frozen 60-token certification prompt plus 128 generated tokens.
 ///
 
 import core.result.{Result}
 import inference.scalars.{checkedAdd64, checkedMultiply64}
 
 pub let QWEN_FULL_Q4_WEIGHT_BYTES: UInt64 = 14515042384 as UInt64
-pub let QWEN_FULL_MAX_CONTEXT: UInt64 = 128 as UInt64
+pub let QWEN_FULL_MAX_CONTEXT: UInt64 = 188 as UInt64
 pub let QWEN_FULL_ACTIVATION_BYTES: UInt64 = 536870912 as UInt64
 pub let QWEN_FULL_LOGITS_BYTES: UInt64 = 1048576 as UInt64
 pub let QWEN_FULL_CUBLASLT_WORKSPACE_BYTES: UInt64 = 536870912 as UInt64
@@ -88,7 +89,7 @@ pub fun createQwenFullMemoryPlan(deviceOrdinal: Int32, deviceBytes: UInt64,
         contextTokens > QWEN_FULL_MAX_CONTEXT {
         return Err<QwenFullMemoryPlan, QwenFullMemoryError>(qwenFullMemoryError(
             "qwen.memory.context", "context_tokens",
-            "QWN-046A context must be within 1 through 128"))
+            "QWN-046 context must be within 1 through 188"))
     }
 
     var next = checkedMultiply64(48 as UInt64, 48 as UInt64)

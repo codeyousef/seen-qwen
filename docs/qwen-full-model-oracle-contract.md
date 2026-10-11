@@ -43,3 +43,13 @@ the BF16 classification silently.
 
 This corpus is `verified-cpu-reference`. It is not CUDA evidence, a performance
 claim, a quantization waiver, or release-consumer certification.
+
+FEL-2513 supplies the bounded Q4 CUDA comparison harness for the two frozen
+128-step records. It compares the prompt result and the next 127 one-token
+decode results, then commits the final generated token so both records prove
+all 128 generated positions. It records the first token and selected-logit
+divergence plus maximum selected-logit absolute error, and exercises the exact
+188-position boundary on the 60-token prompt. Divergence is evidence, not an
+implicit waiver: the experimental Q4 profile remains subject to the separately
+frozen quantized full-model quality gates. The harness fails on non-finite
+output, state mutation above capacity, cleanup drift, fallback, or offload.

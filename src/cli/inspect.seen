@@ -21,7 +21,7 @@ import seen_qwen.model.config.{parseQwen38Config}
 import seen_qwen.model.tensor_catalog.{QwenTensorCatalog,
     parseQwenTensorCatalog}
 import seen_qwen.runtime.full_model_memory.{QWEN_FULL_Q4_WEIGHT_BYTES,
-    createQwenFullMemoryPlan}
+    QWEN_FULL_MAX_CONTEXT, createQwenFullMemoryPlan}
 import str.string.{StringBuilder}
 
 extern "C" fun seen_string_clone_owned(value: String) r: String
@@ -42,7 +42,7 @@ let QWEN_INSPECT_CATALOG_SHA256: String =
     "5f466d43bae3059e54f0bfe183d0e82c822242f45a834d778414d3e5b5248f1f"
 let QWEN_INSPECT_TOTAL_BYTES: UInt64 = 55562855904 as UInt64
 let QWEN_INSPECT_TARGET_BYTES: UInt64 = 25757220864 as UInt64
-let QWEN_INSPECT_MINIMUM_DEVICE_BYTES: UInt64 = 17164400720 as UInt64
+let QWEN_INSPECT_MINIMUM_DEVICE_BYTES: UInt64 = 17168332880 as UInt64
 
 pub class QwenInspectError {
     var code: String
@@ -644,7 +644,8 @@ pub fun inspectQwenModel(modelLockPath: String, outputPath: String,
     catalog.close(); catalog.shardIndex.free(); catalog.free()
 
     let candidate = createQwenFullMemoryPlan(0 as Int32,
-        QWEN_INSPECT_TARGET_BYTES, QWEN_FULL_Q4_WEIGHT_BYTES, 128 as UInt64)
+        QWEN_INSPECT_TARGET_BYTES, QWEN_FULL_Q4_WEIGHT_BYTES,
+        QWEN_FULL_MAX_CONTEXT)
     if candidate.isErr() {
         summary.free()
         seen_string_release_owned(ownedModelHash); seen_string_release_owned(ownedSourceHash)
