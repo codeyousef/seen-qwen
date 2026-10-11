@@ -1,0 +1,53 @@
+import env.env.{args}
+import memory.allocation.{memoryStats}
+import seen_qwen.cli.inspect.{inspectQwenModel}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun main() r: Int {
+    let arguments = args()
+    require(arguments.length() == 3,
+        "usage: qwn_047b_inspect_integration_test MODEL_LOCK OUTPUT")
+    let baseline = memoryStats()
+    let inspected = inspectQwenModel(arguments[1], arguments[2], -1 as Int32)
+    if inspected.isErr() {
+        let error = inspected.unwrapErr()
+        println(error.code)
+        println(error.field)
+        println(error.message)
+        error.free()
+        inspected.releaseContainer()
+        arguments.free()
+        abort("inspect the exact locked source without CUDA")
+    }
+    let report = inspected.unwrap(); inspected.releaseContainer()
+    require(report.sourceBytes == (55562855904 as UInt64) and
+        report.textBytes == (53791996928 as UInt64) and
+        report.mtpBytes == (849398784 as UInt64) and
+        report.visionBytes == (921460192 as UInt64) and
+        report.textTensors == 851 and report.mtpTensors == 15 and
+        report.visionTensors == 333 and not report.deviceRequested,
+        "match exact source classification without device initialization")
+    report.close(); report.close(); report.free()
+    let after = memoryStats()
+    let baselineText = baseline.usedBytes.toString()
+    let afterText = after.usedBytes.toString()
+    let readings = "QWN-047B allocator baseline/after=" + baselineText +
+        "/" + afterText
+    println(readings)
+    seen_string_release_owned(readings)
+    seen_string_release_owned(afterText)
+    seen_string_release_owned(baselineText)
+    require(after.usedBytes == baseline.usedBytes and
+        after.allocationFailures == baseline.allocationFailures,
+        "return allocator live usage to the exact pre-inspection baseline")
+    arguments.free()
+    println("PASS: QWN-047B exact locked source metadata and cleanup")
+    return 0
+}
+
+main()

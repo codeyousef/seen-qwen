@@ -23,3 +23,21 @@ Machine diagnostics use canonical one-line JSON with schema
 `seen-qwen-diagnostic-v1`, stable code, field, message, and numeric exit code.
 The QWN-047A executable honestly reports recognized commands as not installed;
 QWN-047B through QWN-047E replace that terminal dispatch one command at a time.
+
+## `inspect` source audit
+
+`seen-qwen inspect --model-lock PATH --output PATH` is the installed QWN-047B
+read-only source inspection leaf. It strictly validates the pinned model lock,
+the sibling source lock, `config.json`, `model.safetensors.index.json`, and the
+metadata headers of all eighteen assigned safetensors shards. It reports exact
+text, MTP, vision, and total source bytes plus the checked experimental Q4
+memory plan. Tensor payloads are not mapped or converted.
+
+The command does not initialize CUDA unless `--device ORDINAL` is explicitly
+provided. With no device option its evidence records `device_probe` as
+`not-requested`. With a requested device it reports compatibility and fit; it
+does not allocate, fall back, offload, or alter policy.
+
+The explicit `--output` destination is the command's only file mutation. It is
+written atomically after every input and cleanup gate succeeds. Inputs, shard
+contents, locks, and caches are never modified by inspection.

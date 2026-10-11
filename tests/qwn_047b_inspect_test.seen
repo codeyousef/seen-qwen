@@ -1,0 +1,72 @@
+import seen_qwen.cli.inspect.{QwenInspectReport, inspectQwenModel,
+    renderQwenInspectReport}
+import memory.allocation.{memoryStats}
+
+extern "C" fun seen_string_release_owned(value: String) r: Void
+extern "C" fun seen_string_clone_owned(value: String) r: String
+
+fun require(condition: Bool, message: String) r: Void {
+    if not condition { abort(message) }
+}
+
+fun report() r: QwenInspectReport {
+    return QwenInspectReport{
+        modelLockSha256: seen_string_clone_owned(
+            "399b6f25f8cd20ae5d233040005f0ebb82b7e5b396e0eb91214dbe94b828c3be"),
+        sourceLockSha256: seen_string_clone_owned(
+            "f43b83cd9174a91a2ccb2669dc1751c83b9c6730593abe6004bc185855cc78bb"),
+        configSha256: seen_string_clone_owned(
+            "191e0af232104ed8b65258cf3fb2b842e288008baca7633c11b82a1ac7203aab"),
+        tensorIndexSha256: seen_string_clone_owned(
+            "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df"),
+        catalogSha256: seen_string_clone_owned(
+            "5f466d43bae3059e54f0bfe183d0e82c822242f45a834d778414d3e5b5248f1f"),
+        sourceBytes: 55562855904 as UInt64,
+        textBytes: 53791996928 as UInt64,
+        mtpBytes: 849398784 as UInt64,
+        visionBytes: 921460192 as UInt64,
+        textTensors: 851, mtpTensors: 15, visionTensors: 333,
+        q4WeightBytes: 14515042384 as UInt64,
+        q4AllocationBytes: 16627529808 as UInt64,
+        q4MinimumDeviceBytes: 17164400720 as UInt64,
+        q4TargetDeviceBytes: 25757220864 as UInt64,
+        q4TargetAdmittedBytes: 17400246432 as UInt64,
+        deviceRequested: false, deviceOrdinal: -1 as Int32,
+        deviceComputeMajor: 0 as Int32, deviceComputeMinor: 0 as Int32,
+        deviceTotalBytes: 0 as UInt64, deviceFreeBytes: 0 as UInt64,
+        deviceFits: false, closed: false }
+}
+
+fun main() r: Int {
+    let baseline = memoryStats()
+    let first = report(); let second = report()
+    let firstJson = renderQwenInspectReport(first)
+    let secondJson = renderQwenInspectReport(second)
+    require(firstJson == secondJson, "render deterministic inspection evidence")
+    require(firstJson.startsWith("{\"schema\":\"seen-qwen-inspect-v1\"") and
+        firstJson.contains("\"source_bytes\":55562855904") and
+        firstJson.contains("\"text_bytes\":53791996928") and
+        firstJson.contains("\"mtp_bytes\":849398784") and
+        firstJson.contains("\"vision_bytes\":921460192") and
+        firstJson.contains("\"q4_minimum_device_bytes\":17164400720") and
+        firstJson.contains("\"device_probe\":\"not-requested\"") and
+        not firstJson.contains("device_ordinal"),
+        "render complete CPU-only inspection contract")
+    let missing = inspectQwenModel("", "", -1 as Int32)
+    require(missing.isErr() and missing.unwrapErr().code ==
+        "qwen.inspect.path" and missing.unwrapErr().exitCode == 2,
+        "reject missing paths before file or CUDA access")
+    let missingError = missing.unwrapErr()
+    missingError.free(); missing.releaseContainer()
+    first.close(); first.close(); second.close(); second.close()
+    first.free(); second.free()
+    seen_string_release_owned(firstJson); seen_string_release_owned(secondJson)
+    let after = memoryStats()
+    require(after.usedBytes == baseline.usedBytes and
+        after.allocationFailures == baseline.allocationFailures,
+        "return Seen allocator live usage to baseline")
+    println("PASS: QWN-047B deterministic CPU-only inspect contract")
+    return 0
+}
+
+main()
