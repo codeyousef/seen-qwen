@@ -82,6 +82,8 @@ class FullCudaContractTests(unittest.TestCase):
             'role == "128-step"', "while step < 128",
             "firstTokenDivergence", "firstLogitDivergence",
             "maximumSelectedLogitError",
+            "(inputValues.length() + 128) as UInt64",
+            "commit every generated token in the frozen sequence",
             "residency.position == QWEN_FULL_MAX_CONTEXT",
             "comparedPrompts == 2", "allocatorAfter.usedBytes ==",
         ):

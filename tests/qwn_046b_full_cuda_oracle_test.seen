@@ -149,26 +149,28 @@ fun main() r: Int {
             }
             require(residency.position ==
                 (inputValues.length() + 127) as UInt64,
-                "commit the exact prompt plus 127 decode inputs")
+                "compare the exact prompt plus 128 generated tokens")
+            let finalInput = Array<Int32>()
+            finalInput.push(actualToken)
+            let committed = residency.executeTokens(finalInput, true)
+            require(committed.isOkay() and residency.position ==
+                (inputValues.length() + 128) as UInt64,
+                "commit every generated token in the frozen sequence")
+            let committedStep = committed.unwrap()
+            committed.releaseContainer()
+            committedStep.free()
             if inputValues.length() == 60 {
-                let boundaryInput = Array<Int32>()
-                boundaryInput.push(actualToken)
-                let boundary = residency.executeTokens(boundaryInput, true)
-                require(boundary.isOkay() and
-                    residency.position == QWEN_FULL_MAX_CONTEXT,
+                require(residency.position == QWEN_FULL_MAX_CONTEXT,
                     "admit the exact 188-position execution boundary")
-                let boundaryStep = boundary.unwrap()
-                boundary.releaseContainer()
-                boundaryStep.free()
-                let rejected = residency.executeTokens(boundaryInput, true)
+                let rejected = residency.executeTokens(finalInput, true)
                 require(rejected.isErr() and
                     residency.position == QWEN_FULL_MAX_CONTEXT,
                     "reject execution above 188 without mutating state")
                 let rejectedError = rejected.unwrapErr()
                 rejected.releaseContainer()
                 rejectedError.free()
-                boundaryInput.free()
             }
+            finalInput.free()
             printIntegerMetric(
                 "QWN-046B first token divergence step: ",
                 firstTokenDivergence)

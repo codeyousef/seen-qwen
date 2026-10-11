@@ -14,8 +14,10 @@ fail() {
 
 if [ "${1:-}" != "--inner" ]; then
     [ "$#" -eq 1 ] || fail "usage: run_qwn_046b.sh ENGINE_ROOT"
-    resolved_seen=${SEEN_BIN:-$(command -v seen || true)}
+    resolved_seen=${SEEN_BIN:-}
     [ -n "$resolved_seen" ] || fail "set SEEN_BIN to the audited Seen 0.22.9 compiler"
+    [ "${resolved_seen#/}" != "$resolved_seen" ] && [ -x "$resolved_seen" ] ||
+        fail "SEEN_BIN must be an explicit executable absolute path"
     exec env -u SEEN_DATA_PATH -u SEEN_STDLIB_PATH -u SEEN_RUNTIME_PATH \
         -u SEEN_COMPILER_SOURCE_ROOT -u SEEN_PACKAGE_CLIENT \
         QWN_TASKS_MAX=24 QWN_046B_HARD_SCOPE=1 \
@@ -52,7 +54,8 @@ readelf -n "$SEEN_BIN" | grep -F 'Build ID: 2e8228365322fc6462555d115160a863d1ed
 (cd "$ENGINE_ROOT" && sha256sum -c checksums.sha256)
 printf '%s  %s\n' 42ba8e0b9d5adec7c5ce1708bfc60d7b9911c126af9e6703b35efd108fedc921 "$ORACLE" | sha256sum -c -
 
-toolchain_hash_before=$(find "$(dirname "$SEEN_BIN")" -maxdepth 1 -type f \
+toolchain_hash_before=$(find "$SEEN_BIN" "$SEEN_PACKAGE_CLIENT" \
+    "$COMPATIBILITY_MANIFEST" "$SEEN_PREFIX/lib/seen" -type f \
     -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
 outside_objects_before=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o \
     -type f \( -name '*.o' -o -name '*.sig' -o -name '*.a' \) -print0 |
@@ -95,7 +98,8 @@ printf '%s\n' "$gpu_identity" | grep -F '8.9'
 sha256sum "$ARTIFACT_ROOT/qwn_046b_oracle_fast" \
     "$ARTIFACT_ROOT/qwn_046b_oracle_release" \
     "$NATIVE_BUILD/libseen_qwen_cuda.so" "$WEIGHTS" "$ORACLE"
-toolchain_hash_after=$(find "$(dirname "$SEEN_BIN")" -maxdepth 1 -type f \
+toolchain_hash_after=$(find "$SEEN_BIN" "$SEEN_PACKAGE_CLIENT" \
+    "$COMPATIBILITY_MANIFEST" "$SEEN_PREFIX/lib/seen" -type f \
     -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
 [ "$toolchain_hash_after" = "$toolchain_hash_before" ] ||
     fail "compiler installation changed during verification"
