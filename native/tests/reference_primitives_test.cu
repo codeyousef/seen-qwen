@@ -306,7 +306,7 @@ int main() {
     full_request.tensors = full_tensors;
     full_request.tensor_count = 1027;
     full_request.token_count = 1;
-    full_request.cache_capacity = 128;
+    full_request.cache_capacity = 188;
     full_status = seen_qwen_full_forward_q4_f32(&token, &full_request);
     CHECK(full_status.code == SEEN_CUDA_INVALID_ARGUMENT);
     CHECK(std::strcmp(full_status.message,
@@ -323,12 +323,18 @@ int main() {
     CHECK(std::strcmp(full_status.message,
                       "full-model tensor count is not 1027") == 0);
     full_request.tensor_count = 1027;
-    full_request.cache_capacity = 127;
+    full_request.cache_capacity = 187;
     full_status = seen_qwen_full_forward_q4_f32(&token, &full_request);
     CHECK(full_status.code == SEEN_CUDA_INVALID_ARGUMENT);
     CHECK(std::strcmp(full_status.message,
-                      "full-model cache capacity is not 128") == 0);
-    full_request.cache_capacity = 128;
+                      "full-model cache capacity is not 188") == 0);
+    full_request.cache_capacity = 188;
+    full_request.token_count = 189;
+    full_status = seen_qwen_full_forward_q4_f32(&token, &full_request);
+    CHECK(full_status.code == SEEN_CUDA_INVALID_ARGUMENT);
+    CHECK(std::strcmp(full_status.message,
+                      "full-model token count is outside 1..188") == 0);
+    full_request.token_count = 1;
     full_request.decode = 2;
     full_status = seen_qwen_full_forward_q4_f32(&token, &full_request);
     CHECK(full_status.code == SEEN_CUDA_INVALID_ARGUMENT);

@@ -12,6 +12,8 @@ MEMORY = ROOT / "src/runtime/full_model_memory.seen"
 NATIVE = ROOT / "native/tests/full_model_residency_test.cu"
 RUNNER = ROOT / "scripts/cuda/run_qwn_046a.sh"
 ORACLE = ROOT / "tests/fixtures/qwn_025b_full_model_oracles.json"
+SEQUENCE_TEST = ROOT / "tests/qwn_046b_full_cuda_oracle_test.seen"
+SEQUENCE_RUNNER = ROOT / "scripts/cuda/run_qwn_046b.sh"
 
 
 class FullCudaContractTests(unittest.TestCase):
@@ -30,6 +32,15 @@ class FullCudaContractTests(unittest.TestCase):
         self.assertIn("let capacity = this.plan.contextTokens", source)
         self.assertIn("cacheCapacity: capacity", source)
         self.assertNotIn("cacheCapacity: 128 as UInt64", source)
+        self.assertIn("Result<QwenFullStepResult, CudaError>", source)
+        self.assertIn("selectedLogit: selectedLogits[0]", source)
+
+        native = (ROOT / "native/src/reference_primitives.cu").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("constexpr uint64_t kFullContext = 188", native)
+        self.assertIn("seen_qwen_top_k_f32(token, logits, token_ids", native)
+        self.assertNotIn("constexpr uint64_t kFullContext = 128", native)
 
     def test_capacity_covers_frozen_generated_token_sequences(self) -> None:
         oracle = json.loads(ORACLE.read_text(encoding="utf-8"))
@@ -63,6 +74,27 @@ class FullCudaContractTests(unittest.TestCase):
                          "qwn_046a_full_cuda_hardware_test.seen"):
             self.assertIn(required, runner)
         self.assertNotIn("/usr/local/bin/seen", runner)
+
+    def test_two_prompt_oracle_gate_is_bounded_and_gpu_polite(self) -> None:
+        test = SEQUENCE_TEST.read_text(encoding="utf-8")
+        runner = SEQUENCE_RUNNER.read_text(encoding="utf-8")
+        for required in (
+            'role == "128-step"', "while step < 128",
+            "firstTokenDivergence", "firstLogitDivergence",
+            "maximumSelectedLogitError",
+            "residency.position == QWEN_FULL_MAX_CONTEXT",
+            "comparedPrompts == 2", "allocatorAfter.usedBytes ==",
+        ):
+            self.assertIn(required, test)
+        for required in (
+            "run_bounded.sh", "QWN_TASKS_MAX=24", "--parallel 1",
+            "--release --lto=thin", "compute-sanitizer",
+            "--query-compute-apps=pid",
+            "GPU has an active compute process; no process was terminated",
+        ):
+            self.assertIn(required, runner)
+        for forbidden in ("sudo", "pkexec", "kill ", "pkill", "killall"):
+            self.assertNotIn(forbidden, runner)
 
 
 if __name__ == "__main__":

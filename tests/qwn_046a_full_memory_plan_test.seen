@@ -26,6 +26,16 @@ fun main() r: Int {
     require(not plan.fallbackAllowed and not plan.offloadAllowed,
         "prohibit implicit fallback and offload")
 
+    let below = createQwenFullMemoryPlan(0 as Int32, deviceBytes,
+        QWEN_FULL_Q4_WEIGHT_BYTES, QWEN_FULL_MAX_CONTEXT - (1 as UInt64))
+    require(below.isOkay(),
+        "admit the position immediately below the certification capacity")
+    let belowPlan = below.unwrap()
+    below.releaseContainer()
+    require(belowPlan.contextTokens == (187 as UInt64),
+        "retain the position immediately below the certification capacity")
+    belowPlan.free()
+
     require(createQwenFullMemoryPlan(-1 as Int32, deviceBytes,
         QWEN_FULL_Q4_WEIGHT_BYTES, QWEN_FULL_MAX_CONTEXT).unwrapErr().code ==
         "qwen.memory.device", "reject invalid device")

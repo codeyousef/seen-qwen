@@ -44,8 +44,9 @@ fun main() r: Int {
     prompt.push(248069 as Int32); prompt.push(271 as Int32)
     let sampled = residency.executeTokens(prompt, false)
     require(sampled.isOkay(), "execute the complete-model CUDA forward")
-    let sampledToken = sampled.unwrap()
+    let sampledStep = sampled.unwrap()
     sampled.releaseContainer()
+    let sampledToken = sampledStep.tokenId
     let sampledTokenText = (sampledToken as Int64).toString()
     let sampledTokenLine = "QWN-046B sampled token: " + sampledTokenText
     println(sampledTokenLine)
@@ -54,6 +55,7 @@ fun main() r: Int {
     require(sampledToken == (109430 as Int32) and
         residency.position == (12 as UInt64),
         "match the independent sealed-Q4 CPU differential token")
+    sampledStep.free()
     prompt.free()
 
     let readerClosed = reader.close()

@@ -32,3 +32,10 @@ identity, allocation addresses and device ownership, resident VRAM delta,
 serial transfer completion, reverse-order cleanup, idempotent teardown, and
 post-cleanup VRAM recovery. This gate initializes the complete engine only;
 it deliberately performs no model math, sampling, or quality inference.
+
+FEL-2513 extends the execution capacity to the same 188-position bound and
+keeps the native prefill/decode schedule on the Seen-owned stream. Each forward
+returns the deterministic greedy token and its selected FP32 logit from device
+scratch after the existing result-boundary synchronization. The interface does
+not copy the full vocabulary to host, allocate in the native adapter, change
+sampling, or introduce fallback/offload.
