@@ -10,6 +10,8 @@ import unittest
 
 
 FIXTURE = Path(__file__).parent / "fixtures/qwen3_8_tokenizer_oracles.json"
+ROOT = Path(__file__).resolve().parents[1]
+GENERATOR = ROOT / "tools/generate_qwen_tokenizer_oracles.py"
 MODEL_REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 TRANSFORMERS_COMMIT = "562cfd944ee1f20702cfb0f4404014ee27c24813"
 
@@ -93,6 +95,12 @@ class QwenTokenizerOracleTest(unittest.TestCase):
         self.assertIn("Supported types are xhigh (default), medium, and low", rejected["invalid_reasoning_effort"]["error"])
         self.assertEqual(rejected["late_system_message"]["error_type"], "TemplateError")
         self.assertEqual(rejected["late_system_message"]["error"], "System message must be at the beginning.")
+
+    def test_generator_preserves_lexical_output_path(self) -> None:
+        source = GENERATOR.read_text(encoding="utf-8")
+        self.assertIn("from atomic_output_file import write_atomic_file", source)
+        self.assertIn("args.output.absolute()", source)
+        self.assertNotIn("args.output.resolve()", source)
 
 
 if __name__ == "__main__":

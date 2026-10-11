@@ -114,7 +114,7 @@ python3 -m unittest tests/test_local_verification_contract.py tests/test_cuda_re
     tests/test_cuda_lm_head_greedy.py \
     tests/test_cuda_mini_execution.py \
     tests/test_qwen_sampler.py tests/test_qwen_engine_ownership.py \
-    tests/test_qwen_tokenizer_oracles.py \
+    tests/test_qwen_tokenizer_oracles.py tests/test_atomic_output_file.py \
     tests/test_sampling_profiles.py tests/test_hybrid_mini_contract.py \
     tests/test_hybrid_mini_assets.py tests/test_hybrid_mini_oracle.py \
     tests/test_cpu_attention_oracle.py tests/test_cpu_gdn_oracle.py \

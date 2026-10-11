@@ -7,13 +7,13 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
-import os
 from pathlib import Path
 import sys
-import tempfile
 from typing import Any
 
 from transformers import AutoTokenizer
+
+from atomic_output_file import write_atomic_file
 
 
 MODEL_ID = "Qwen/Qwen3.8-27B"
@@ -294,23 +294,8 @@ def build_document(assets_root: Path, transformers_source_root: Path) -> dict[st
 
 
 def atomic_write_json(output: Path, document: dict[str, Any]) -> None:
-    output.parent.mkdir(parents=True, exist_ok=True)
     encoded = (json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    if len(encoded) > 1024 * 1024:
-        raise ValueError("oracle output exceeds the 1 MiB bound")
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
-    try:
-        with os.fdopen(descriptor, "wb") as temporary:
-            temporary.write(encoded)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        os.replace(temporary_name, output)
-    except Exception:
-        try:
-            os.unlink(temporary_name)
-        except FileNotFoundError:
-            pass
-        raise
+    write_atomic_file(output, encoded, maximum_bytes=1024 * 1024)
 
 
 def main() -> int:
@@ -320,7 +305,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     document = build_document(args.assets_root.resolve(), args.transformers_source_root.resolve())
-    atomic_write_json(args.output.resolve(), document)
+    atomic_write_json(args.output.absolute(), document)
     print(f"wrote {args.output}: {document['payload_sha256']}")
     return 0
 
