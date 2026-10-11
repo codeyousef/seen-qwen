@@ -114,6 +114,13 @@ class ScopeEventGateTests(unittest.TestCase):
         self.assertIn('pids_events_after=$(read_cgroup pids.events)', inner)
         self.assertIn('"$EVENT_GATE" "$status"', inner)
 
+    def test_required_gate_preserves_multiline_event_snapshots(self):
+        inner = REQUIRED_INNER.read_text(encoding="utf-8")
+        self.assertIn('cat "/sys/fs/cgroup/$name"', inner)
+        self.assertNotIn(
+            'IFS= read -r value < "/sys/fs/cgroup/$name"', inner
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

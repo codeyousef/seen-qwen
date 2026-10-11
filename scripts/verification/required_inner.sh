@@ -21,10 +21,8 @@ fail() {
 
 read_cgroup() {
     local name=$1
-    local value=""
     [ -r "/sys/fs/cgroup/$name" ] || fail "missing cgroup readback: $name"
-    IFS= read -r value < "/sys/fs/cgroup/$name"
-    printf '%s' "$value"
+    cat "/sys/fs/cgroup/$name"
 }
 
 report_metrics() {
