@@ -16,8 +16,10 @@ ORACLE = ROOT / "tests/fixtures/qwen3_8_hybrid_mini_oracle"
 EXPECTED = ORACLE / "expected.safetensors"
 MANIFEST = ORACLE / "manifest.json"
 GENERATOR = ROOT / "tools/generate_hybrid_mini_oracle.py"
+PROMOTION_HELPER = ROOT / "tools/hybrid_mini_oracle_output.py"
 EXPECTED_SHA256 = "dfa4e8eb7550e7e694c9044d63f602e406fea09153a849274250b046db350096"
-GENERATOR_SHA256 = "fea88c9dd92e1e5ffa12699be84b52293557e91234917191083f4bcc41c858ab"
+GENERATOR_SHA256 = "a2dbf7f9c0f4b83b926bf8745982402fa1b042ef0247da323d8ac7314024e462"
+PROMOTION_HELPER_SHA256 = "4f6b65299bafe809eda72c77f9053cf5328ceffa4beba98a86154acda8871164"
 CONTRACT_SHA256 = "f29839615771e344bf89329f2195e5921fc8ea371849249be55722ab1999dddf"
 MODEL_SHA256 = "16ecca9cb396099db0c92d835840264e7b45d12cd6221d7af5462ac8576c94a9"
 
@@ -71,6 +73,10 @@ class HybridMiniOracleTest(unittest.TestCase):
             self.manifest["sources"]["qwen_mtp_source_sha256"],
             "cf97664e82371425df14e412c9d351405d05ae8db3622fc817813ddda6858622",
         )
+        self.assertEqual(
+            self.manifest["sources"]["promotion_helper_sha256"],
+            PROMOTION_HELPER_SHA256,
+        )
         self.assertEqual(self.manifest["environment"]["torch"], "2.11.0+cpu")
         self.assertEqual(self.manifest["environment"]["threads"], 1)
         self.assertTrue(self.manifest["environment"]["deterministic_algorithms"])
@@ -78,6 +84,7 @@ class HybridMiniOracleTest(unittest.TestCase):
 
     def test_assets_and_generator_are_content_addressed(self) -> None:
         self.assertEqual(digest(GENERATOR), GENERATOR_SHA256)
+        self.assertEqual(digest(PROMOTION_HELPER), PROMOTION_HELPER_SHA256)
         self.assertEqual(self.manifest["generator_sha256"], GENERATOR_SHA256)
         self.assertEqual(digest(EXPECTED), EXPECTED_SHA256)
         self.assertEqual(self.manifest["assets"]["expected.safetensors"]["sha256"], EXPECTED_SHA256)

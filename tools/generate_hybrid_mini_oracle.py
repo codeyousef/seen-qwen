@@ -7,15 +7,14 @@ import argparse
 from hashlib import sha256
 import json
 import math
-import os
 from pathlib import Path
-import shutil
 import struct
 import sys
-import tempfile
 
 import torch
 import torch.nn.functional as F
+
+from hybrid_mini_oracle_output import promote_oracle_output
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +22,7 @@ ASSET_ROOT = ROOT / "tests/fixtures/qwen3_8_hybrid_mini"
 MODEL_PATH = ASSET_ROOT / "model.safetensors"
 CONTRACT_PATH = ROOT / "tests/fixtures/qwen3_8_hybrid_mini_contract.json"
 DEFAULT_OUTPUT = ROOT / "tests/fixtures/qwen3_8_hybrid_mini_oracle"
+PROMOTION_HELPER = ROOT / "tools/hybrid_mini_oracle_output.py"
 CONTRACT_SHA256 = "f29839615771e344bf89329f2195e5921fc8ea371849249be55722ab1999dddf"
 MODEL_SHA256 = "16ecca9cb396099db0c92d835840264e7b45d12cd6221d7af5462ac8576c94a9"
 TRANSFORMERS_COMMIT = "562cfd944ee1f20702cfb0f4404014ee27c24813"
@@ -360,13 +360,6 @@ def safetensors_bytes(tensors: dict[str, torch.Tensor]) -> bytes:
     return struct.pack("<Q", len(encoded)) + encoded + b"".join(chunks)
 
 
-def write_atomic(path: Path, data: bytes) -> None:
-    with path.open("wb") as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
-
-
 def generate(output: Path) -> None:
     if digest(CONTRACT_PATH) != CONTRACT_SHA256 or digest(MODEL_PATH) != MODEL_SHA256:
         raise ValueError("QWN-023A/B dependency hash mismatch")
@@ -420,6 +413,7 @@ def generate(output: Path) -> None:
             "qwen_mtp_repository": "QwenLM/Confident-Decoding",
             "qwen_mtp_commit": MTP_COMMIT,
             "qwen_mtp_source_sha256": MTP_SOURCE_SHA256,
+            "promotion_helper_sha256": digest(PROMOTION_HELPER),
         },
         "environment": {
             "python": "3.14.7",
@@ -449,26 +443,15 @@ def generate(output: Path) -> None:
         },
     }
     manifest_bytes = (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
-    if output in (Path("/"), ROOT, ROOT.parent) or output.is_symlink():
+    if output in (Path("/"), ROOT, ROOT.parent):
         raise ValueError("unsafe output directory")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
-    backup: Path | None = None
-    try:
-        write_atomic(temporary / "expected.safetensors", oracle)
-        write_atomic(temporary / "manifest.json", manifest_bytes)
-        if output.exists():
-            backup = Path(tempfile.mkdtemp(prefix=f".{output.name}.previous.", dir=output.parent))
-            backup.rmdir()
-            os.replace(output, backup)
-        os.replace(temporary, output)
-        if backup is not None:
-            shutil.rmtree(backup)
-            backup = None
-    finally:
-        shutil.rmtree(temporary, ignore_errors=True)
-        if backup is not None:
-            shutil.rmtree(backup, ignore_errors=True)
+    promote_oracle_output(
+        output,
+        {
+            "expected.safetensors": oracle,
+            "manifest.json": manifest_bytes,
+        },
+    )
 
 
 def main() -> None:

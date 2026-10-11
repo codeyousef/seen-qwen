@@ -44,7 +44,7 @@ printf '%s  %s\n' 426530e3eb99e367ec06b2805aefc7bcad10cc18e1265ff3d5d4263b6a607b
 "$SEEN_PACKAGE_CLIENT" --expect-version 0.20.9 version | grep -Fx 'seen-pkg 0.20.9 (SEENPKG1)'
 readelf -n "$SEEN_BIN" | grep -F 'Build ID: 9ad1afa96e2a848ce4fd75651dce4ee0f41a5755'
 printf '%s  %s\n' 16ecca9cb396099db0c92d835840264e7b45d12cd6221d7af5462ac8576c94a9 "$MODEL" | sha256sum -c -
-printf '%s  %s\n' 350bc70fb4c7dc010643cfd0c44f93fb60cb75cacfcddda08bc02eff26906857 "$ORACLE" | sha256sum -c -
+printf '%s  %s\n' 833035cd88d3f854b1658501b6f1c7412ce8167c2f7100eeed76c03253437ec4 "$ORACLE" | sha256sum -c -
 
 toolchain_hash_before=$(find "$TOOLCHAIN_ROOT" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
 outside_objects_before=$(find "$ROOT_DIR" -path "$ROOT_DIR/.seen" -prune -o -type f \( -name '*.o' -o -name '*.sig' -o -name '*.a' \) -print0 | sort -z | xargs -0 -r sha256sum | sha256sum | awk '{print $1}')

@@ -9,9 +9,9 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 ORACLE = ROOT / "tests/fixtures/qwn_024e_cpu_engine_oracle.json"
 EXTRACTOR = ROOT / "tools/extract_cpu_engine_oracle.py"
-ORACLE_SHA256 = "350bc70fb4c7dc010643cfd0c44f93fb60cb75cacfcddda08bc02eff26906857"
+ORACLE_SHA256 = "833035cd88d3f854b1658501b6f1c7412ce8167c2f7100eeed76c03253437ec4"
 SOURCE_SHA256 = "dfa4e8eb7550e7e694c9044d63f602e406fea09153a849274250b046db350096"
-MANIFEST_SHA256 = "da4ead2d07206e9f091ac180802da58c770d58c993d72a8cb70c15098fe51baa"
+MANIFEST_SHA256 = "448f7caee2fa0fb2b2c1e95693bb3d87dc406a32c1cb294ac1299dd2075b3b16"
 
 
 class CpuEngineOracleTests(unittest.TestCase):
