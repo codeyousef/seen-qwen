@@ -14,8 +14,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "tests/fixtures/qwen3_8_hybrid_mini"
 GENERATOR = ROOT / "tools/generate_hybrid_mini_fixture.py"
+PROMOTION_HELPER = ROOT / "tools/hybrid_mini_oracle_output.py"
+PROMOTION_HELPER_SHA256 = "4f6b65299bafe809eda72c77f9053cf5328ceffa4beba98a86154acda8871164"
 EXPECTED = {
-    "manifest.json": "98fa563ccd9036804832749844d1327ad6d20c3e12b0ace219ef53b5ae35e884",
+    "manifest.json": "9cfe5b3714ff35c0b6f5a4fd4c90afb4810c815cba120979832006489ec6612b",
     "merges.txt": "215a6aba00d27bcd42b8ad1dccc4b4d23f40decc150bdbf0d5ce6bb2410708df",
     "model.safetensors": "16ecca9cb396099db0c92d835840264e7b45d12cd6221d7af5462ac8576c94a9",
     "tokenizer_config.json": "17b53cbb51444a64f73a18201605cbae2321153fd7eefba3c66be25c6555baa6",
@@ -101,6 +103,21 @@ class HybridMiniAssetTests(unittest.TestCase):
             self.manifest["sources"]["transformers_commit"],
             "562cfd944ee1f20702cfb0f4404014ee27c24813",
         )
+        self.assertEqual(
+            self.manifest["sources"]["promotion_helper_sha256"],
+            PROMOTION_HELPER_SHA256,
+        )
+        self.assertEqual(
+            sha256(PROMOTION_HELPER.read_bytes()).hexdigest(),
+            PROMOTION_HELPER_SHA256,
+        )
+
+    def test_generator_delegates_output_transaction(self) -> None:
+        source = GENERATOR.read_text(encoding="utf-8")
+        self.assertIn("from hybrid_mini_oracle_output import promote_oracle_output", source)
+        self.assertIn("promote_oracle_output(output, assets)", source)
+        self.assertNotIn("shutil.rmtree", source)
+        self.assertNotIn("os.replace", source)
 
     def test_safetensors_names_shapes_and_ranges_are_canonical(self) -> None:
         tensors = {name: value for name, value in self.header.items() if name != "__metadata__"}
