@@ -73,7 +73,9 @@ cp -a "$BUILD_ROOT"/seen_cuda_build/libseen_cuda.so* "$SEEN_PROJECT/native/lib/"
     "$ARTIFACT_ROOT/qwn_044a_seen_test" --release --lto=thin \
     --target-cpu=x86-64 --no-cache --jobs 1 --opt-jobs 1 --no-fork --offline
 "$ARTIFACT_ROOT/qwn_044a_seen_test"
-nvidia-smi --query-gpu=name,uuid,compute_cap,driver_version,memory.total,memory.used,memory.free,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory --format=csv,noheader
+QWEN_GPU_UUID=$("$ROOT_DIR/scripts/cuda/require_idle_gpu.sh")
+export CUDA_VISIBLE_DEVICES="$QWEN_GPU_UUID"
+nvidia-smi --id="$QWEN_GPU_UUID" --query-gpu=name,uuid,compute_cap,driver_version,memory.total,memory.used,memory.free,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory --format=csv,noheader
 "$BUILD_ROOT/qwn_043a_cuda_test"
 "$BUILD_ROOT/qwn_044a_cuda_test"
 for tool in memcheck initcheck racecheck synccheck; do

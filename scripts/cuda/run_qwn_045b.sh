@@ -63,7 +63,9 @@ cmake -S "$ROOT_DIR/native" -B "$BUILD_ROOT" -G Ninja \
     -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build "$BUILD_ROOT" --target qwn_045b_cuda_test --parallel 1
 
-gpu_identity=$(nvidia-smi --query-gpu=name,uuid,compute_cap,driver_version,memory.total,memory.used,memory.free,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory --format=csv,noheader)
+QWEN_GPU_UUID=$("$ROOT_DIR/scripts/cuda/require_idle_gpu.sh")
+export CUDA_VISIBLE_DEVICES="$QWEN_GPU_UUID"
+gpu_identity=$(nvidia-smi --id="$QWEN_GPU_UUID" --query-gpu=name,uuid,compute_cap,driver_version,memory.total,memory.used,memory.free,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory --format=csv,noheader)
 printf 'QWN-045B hardware: %s\n' "$gpu_identity"
 printf '%s\n' "$gpu_identity" | grep -F 'NVIDIA GeForce RTX 4090'
 printf '%s\n' "$gpu_identity" | grep -F '8.9'
