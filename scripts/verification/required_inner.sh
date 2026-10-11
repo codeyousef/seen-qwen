@@ -10,6 +10,8 @@ COMPATIBILITY_MANIFEST="$TOOLCHAIN_ROOT/bin/compatibility-manifest.json"
 ASSET_ROOT="$ROOT_DIR/.seen/oracle-assets-qwen38"
 OUTPUT_ROOT="$ROOT_DIR/.seen/verification/output"
 ARTIFACT_ROOT="$ROOT_DIR/.seen/verification/artifacts"
+NATIVE_BUILD_ROOT="$ROOT_DIR/.seen/verification/native-build-serial"
+NATIVE_LIB_ROOT="$ROOT_DIR/.seen/native/lib"
 
 fail() {
     echo "verification-inner: $*" >&2
@@ -179,6 +181,14 @@ python3 -m unittest tests/test_local_verification_contract.py tests/test_cuda_re
 "$SEEN_COMPILER" check tests/qwn_022d_sampling_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022b_tokenizer_test.seen --frozen
 "$SEEN_COMPILER" check tests/qwn_022c_chat_template_test.seen --frozen
+
+mkdir -p "$NATIVE_BUILD_ROOT" "$NATIVE_LIB_ROOT"
+cmake -S "$ROOT_DIR/native" -B "$NATIVE_BUILD_ROOT" \
+    -DSEEN_CUDA_SOURCE_ROOT="$TOOLCHAIN_ROOT/lib/seen/runtime/cuda" \
+    -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_BUILD_TYPE=Release
+cmake --build "$NATIVE_BUILD_ROOT" --target seen_qwen_cuda --parallel 1
+cp "$NATIVE_BUILD_ROOT/libseen_qwen_cuda.so" \
+    "$NATIVE_LIB_ROOT/libseen_qwen_cuda.so"
 
 "$SEEN_COMPILER" compile tests/qwn_030b_sqw_reader_test.seen \
     "$OUTPUT_ROOT/qwn_030b_sqw_reader_test_fast" \
