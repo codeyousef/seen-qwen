@@ -14,7 +14,7 @@ SOURCE = ROOT / "tests/fixtures/qwen3_8_hybrid_mini_oracle/expected.safetensors"
 MANIFEST = ROOT / "tests/fixtures/qwen3_8_hybrid_mini_oracle/manifest.json"
 OUTPUT = ROOT / "tests/fixtures/qwn_024e_cpu_engine_oracle.json"
 SOURCE_SHA256 = "dfa4e8eb7550e7e694c9044d63f602e406fea09153a849274250b046db350096"
-MANIFEST_SHA256 = "5fa58c208dfb050c5cb62fd88502e91253129a8f44d07450d772a9208ee21591"
+MANIFEST_SHA256 = "448f7caee2fa0fb2b2c1e95693bb3d87dc406a32c1cb294ac1299dd2075b3b16"
 
 
 def digest(path: Path) -> str:

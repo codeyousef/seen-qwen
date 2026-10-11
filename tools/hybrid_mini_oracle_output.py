@@ -10,6 +10,7 @@ import tempfile
 
 
 Replace = Callable[[Path, Path], None]
+SyncDirectory = Callable[[Path], None]
 
 
 def _fsync_directory(path: Path) -> None:
@@ -32,6 +33,7 @@ def promote_oracle_output(
     assets: Mapping[str, bytes],
     *,
     replace: Replace = os.replace,
+    sync_directory: SyncDirectory = _fsync_directory,
 ) -> None:
     """Atomically replace ``output`` while preserving it on promotion failure."""
 
@@ -51,7 +53,7 @@ def promote_oracle_output(
     try:
         for name, data in assets.items():
             _write_file(temporary / name, data)
-        _fsync_directory(temporary)
+        sync_directory(temporary)
 
         if output.exists():
             backup = Path(
@@ -68,11 +70,29 @@ def promote_oracle_output(
                 _fsync_directory(output.parent)
             raise
 
-        _fsync_directory(output.parent)
+        try:
+            sync_directory(output.parent)
+        except BaseException:
+            if backup is not None and output.exists():
+                failed = Path(
+                    tempfile.mkdtemp(prefix=f".{output.name}.failed.", dir=output.parent)
+                )
+                failed.rmdir()
+                replace(output, failed)
+                try:
+                    replace(backup, output)
+                except BaseException:
+                    if not output.exists() and failed.exists():
+                        replace(failed, output)
+                    raise
+                backup = None
+                _fsync_directory(output.parent)
+                shutil.rmtree(failed)
+            raise
         if backup is not None:
             shutil.rmtree(backup)
             backup = None
-            _fsync_directory(output.parent)
+            sync_directory(output.parent)
     finally:
         if temporary.exists() and not temporary.is_symlink():
             shutil.rmtree(temporary, ignore_errors=True)

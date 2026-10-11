@@ -99,6 +99,28 @@ class HybridMiniOracleOutputTest(unittest.TestCase):
             self.assertFalse((output / "new").exists())
             self.assertEqual(sorted(parent.iterdir()), [output])
 
+    def test_restores_existing_directory_when_commit_sync_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            output = parent / "oracle"
+            output.mkdir()
+            (output / "old").write_bytes(b"original")
+
+            def fail_parent_sync(path: Path) -> None:
+                if path == parent:
+                    raise OSError("injected parent fsync failure")
+
+            with self.assertRaisesRegex(OSError, "injected parent fsync failure"):
+                promote_oracle_output(
+                    output,
+                    {"new": b"replacement"},
+                    sync_directory=fail_parent_sync,
+                )
+
+            self.assertEqual((output / "old").read_bytes(), b"original")
+            self.assertFalse((output / "new").exists())
+            self.assertEqual(sorted(parent.iterdir()), [output])
+
     def test_rejects_nested_asset_name_before_creating_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "oracle"

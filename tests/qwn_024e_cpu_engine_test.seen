@@ -58,7 +58,7 @@ fun main() r: Int {
     let oraclePath = "tests/fixtures/qwn_024e_cpu_engine_oracle.json"
     let oracleHash = sha256File(oraclePath, 65536)
     require(oracleHash.isOkay() and oracleHash.unwrap() ==
-        "64051270841d39e7023cd383c09c11dacdae363d9ed189e28b38364d42c833cf",
+        "833035cd88d3f854b1658501b6f1c7412ce8167c2f7100eeed76c03253437ec4",
         "match content-addressed CPU engine oracle")
     let hashText = oracleHash.unwrap(); seen_string_release_owned(hashText)
     let read = readTextChecked(oraclePath)
