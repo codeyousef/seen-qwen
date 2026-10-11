@@ -15,10 +15,11 @@ file/section digests, and then atomically promotes the content-addressed
 artifact. It imports neither model code nor PyTorch and keeps its staging and
 output below the ignored `.seen` artifact root.
 
-The 128-token, batch-one memory plan accounts for 14,515,042,384 weight bytes,
-150,994,944 recurrent GDN bytes, 5,898,240 convolution-state bytes, 8,388,608
-KV bytes, and 1,947,205,632 bounded activation, logit, cuBLASLt, scratch,
-graph, and telemetry bytes. The allocation total is 16,627,529,808 bytes. It
+The 188-position, batch-one certification memory plan accounts for
+14,515,042,384 weight bytes, 150,994,944 recurrent GDN bytes, 5,898,240
+convolution-state bytes, 12,320,768 KV bytes, and 1,947,205,632 bounded
+activation, logit, cuBLASLt, scratch,
+graph, and telemetry bytes. The allocation total is 16,631,461,968 bytes. It
 also reserves the greater of 512 MiB or 3% of physical device memory and
 rejects insufficient capacity before allocation with a stable typed error.
 All arithmetic is checked 64-bit geometry.

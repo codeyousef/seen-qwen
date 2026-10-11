@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Static ownership contract for QWN-046A complete-model CUDA residency."""
 
+import json
 from pathlib import Path
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src/runtime/full_model_cuda.seen"
+MEMORY = ROOT / "src/runtime/full_model_memory.seen"
 NATIVE = ROOT / "native/tests/full_model_residency_test.cu"
 RUNNER = ROOT / "scripts/cuda/run_qwn_046a.sh"
+ORACLE = ROOT / "tests/fixtures/qwn_025b_full_model_oracles.json"
 
 
 class FullCudaContractTests(unittest.TestCase):
@@ -24,6 +27,22 @@ class FullCudaContractTests(unittest.TestCase):
         for forbidden in ("cudaMalloc", "cudaFree", "cudaDeviceSynchronize",
                           "fallback", "offload"):
             self.assertNotIn(forbidden, source)
+        self.assertIn("let capacity = this.plan.contextTokens", source)
+        self.assertIn("cacheCapacity: capacity", source)
+        self.assertNotIn("cacheCapacity: 128 as UInt64", source)
+
+    def test_capacity_covers_frozen_generated_token_sequences(self) -> None:
+        oracle = json.loads(ORACLE.read_text(encoding="utf-8"))
+        required_positions = max(
+            prompt["input_token_count"] + len(prompt["greedy_token_ids"])
+            for prompt in oracle["prompts"]
+            if prompt["greedy_sequence_role"] == "128-step"
+        )
+        self.assertEqual(required_positions, 188)
+        memory = MEMORY.read_text(encoding="utf-8")
+        self.assertIn(
+            "QWEN_FULL_MAX_CONTEXT: UInt64 = 188 as UInt64", memory
+        )
 
     def test_hardware_gate_uses_actual_sqw_and_seen_runtime(self) -> None:
         native = NATIVE.read_text(encoding="utf-8")

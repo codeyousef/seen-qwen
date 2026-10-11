@@ -452,10 +452,11 @@ pub class QwenFullCudaResidency {
     fun executeTokens(tokenIds: Array<Int32>, decode: Bool)
         r: Result<Int32, CudaError> {
         let count = tokenIds.length() as UInt64
+        let capacity = this.plan.contextTokens
         if this.closed or this.cancelled or
             this.executionTensors.length() != 1027 or count == (0 as UInt64) or
-            count > (128 as UInt64) or this.position > (128 as UInt64) or
-            count > (128 as UInt64) - this.position or
+            capacity == (0 as UInt64) or count > capacity or
+            this.position > capacity or count > capacity - this.position or
             (decode and (count != (1 as UInt64) or
                 this.position == (0 as UInt64))) or
             (not decode and this.position != (0 as UInt64)) {
@@ -495,7 +496,7 @@ pub class QwenFullCudaResidency {
             convolutionState: this.allocationView(2),
             kvState: this.allocationView(8),
             logits: this.allocationView(5), tokenCount: count,
-            startPosition: this.position, cacheCapacity: 128 as UInt64,
+            startPosition: this.position, cacheCapacity: capacity,
             decode: if decode { 1 as Int32 } else { 0 as Int32 },
             reserved: 0 as UInt32 }
         status = seen_qwen_full_forward_q4_f32(&token, &request)

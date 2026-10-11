@@ -37,5 +37,7 @@ offload, precision change, or default-stream path.
 
 QWN-046A extends plan construction with the complete 64-layer 3:1 hybrid
 schedule for the explicitly experimental short-context Q4 bring-up profile.
-The full plan remains capped at 128 tokens, always prohibits fallback, and
-does not claim token or logit correctness; QWN-046B owns that certification.
+The full plan is capped at 188 total positions so the longest frozen 60-token
+certification prompt can retain state through 128 generated tokens. It always
+prohibits fallback and does not claim token or logit correctness; QWN-046B
+owns that certification.

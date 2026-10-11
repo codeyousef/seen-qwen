@@ -66,7 +66,9 @@ class Q4ArtifactTests(unittest.TestCase):
         for required in ("MAX_BATCH_BYTES", "MAX_ARTIFACT_BYTES",
                          "tempfile.mkdtemp", "validate_sqw(weights",
                          "quality_approved\": False", "fallback\": \"prohibited",
-                         "allocation_bytes_at_max_context\": \"16627529808"):
+                         "allocation_bytes_at_max_context\": \"16631461968",
+                         "minimum_admitted_device_bytes\": \"17168332880",
+                         "max_context_tokens\": \"188"):
             self.assertIn(required, source)
 
 
