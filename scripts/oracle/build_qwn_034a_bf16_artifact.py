@@ -110,6 +110,65 @@ def digest_file(path: Path, chunk_bytes: int) -> tuple[int, str]:
     return total, digest.hexdigest()
 
 
+def validate_existing_artifact(
+    destination: Path,
+    expected_checksums: bytes,
+    chunk_bytes: int,
+    maximum_bytes: int,
+) -> None:
+    if destination.is_symlink() or not destination.is_dir():
+        raise FileExistsError("content-addressed destination is not a safe directory")
+    if not expected_checksums or len(expected_checksums) > 65536 or not expected_checksums.endswith(b"\n"):
+        raise ValueError("checksums file is empty, malformed, or exceeds its bound")
+
+    entries: dict[str, str] = {}
+    for line in expected_checksums.splitlines():
+        if len(line) < 67 or line[64:66] != b"  ":
+            raise ValueError("checksums file has a malformed line")
+        try:
+            expected = line[:64].decode("ascii")
+            name = line[66:].decode("utf-8", errors="strict")
+        except UnicodeError as error:
+            raise ValueError("checksums file has invalid text") from error
+        if len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
+            raise ValueError("checksums file has an invalid SHA-256")
+        if not name or Path(name).name != name or name in (".", "..", "checksums.sha256"):
+            raise ValueError("checksums file has an unsafe member name")
+        if name in entries or len(entries) >= 64:
+            raise ValueError("checksums file has duplicate or excessive members")
+        entries[name] = expected
+
+    checksum_path = destination / "checksums.sha256"
+    if checksum_path.is_symlink() or not checksum_path.is_file():
+        raise FileExistsError("existing artifact has no safe checksums file")
+    if checksum_path.stat().st_size != len(expected_checksums):
+        raise FileExistsError("existing artifact checksums differ")
+    if checksum_path.read_bytes() != expected_checksums:
+        raise FileExistsError("existing artifact checksums differ")
+
+    actual_names: set[str] = set()
+    for member in destination.iterdir():
+        if len(actual_names) >= 65:
+            raise FileExistsError("existing artifact has excessive members")
+        if member.is_symlink() or not member.is_file():
+            raise FileExistsError("existing artifact contains a non-regular member")
+        actual_names.add(member.name)
+    expected_names = set(entries) | {"checksums.sha256"}
+    if actual_names != expected_names:
+        raise FileExistsError("existing artifact members differ")
+
+    total_bytes = len(expected_checksums)
+    for name, expected in entries.items():
+        path = destination / name
+        size = path.stat().st_size
+        if size < 0 or size > maximum_bytes - total_bytes:
+            raise FileExistsError("existing artifact exceeds its byte bound")
+        total_bytes += size
+        actual_size, actual = digest_file(path, chunk_bytes)
+        if actual_size != size or actual != expected:
+            raise FileExistsError(f"existing artifact member hash differs: {name}")
+
+
 def is_included(name: str) -> bool:
     return name == "lm_head.weight" or name.startswith("model.language_model.") or name.startswith("mtp.")
 
@@ -790,10 +849,13 @@ def build(args: argparse.Namespace) -> Path:
         engine_doc = strict_json_bytes(engine, maximum=1024 * 1024)
         artifact_id = engine_doc["engine_id"]
         destination = output_root / artifact_id
-        if destination.exists():
-            existing = (destination / "checksums.sha256").read_bytes()
-            if existing != (staging / "checksums.sha256").read_bytes():
-                raise FileExistsError("content-addressed destination exists with different checksums")
+        if destination.exists() or destination.is_symlink():
+            validate_existing_artifact(
+                destination,
+                (staging / "checksums.sha256").read_bytes(),
+                args.chunk_bytes,
+                MAX_ARTIFACT_BYTES,
+            )
             shutil.rmtree(staging)
             return destination
         os.rename(staging, destination)

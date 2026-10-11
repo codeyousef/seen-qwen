@@ -103,6 +103,74 @@ class EngineArtifactTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.builder.validate_sqw(output, tensors, layout, model_lock, policy, whole, conventional, 257)
 
+    def make_existing_artifact(self, root: Path) -> tuple[Path, bytes]:
+        destination = root / "artifact"
+        destination.mkdir()
+        payload = b"bounded artifact payload"
+        (destination / "payload.bin").write_bytes(payload)
+        checksums = f"{sha256(payload).hexdigest()}  payload.bin\n".encode("ascii")
+        (destination / "checksums.sha256").write_bytes(checksums)
+        return destination, checksums
+
+    def validate_existing(self, destination: Path, checksums: bytes) -> None:
+        self.builder.validate_existing_artifact(destination, checksums, 7, 1024)
+
+    def test_existing_artifact_requires_every_exact_regular_member(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination, checksums = self.make_existing_artifact(root)
+            self.validate_existing(destination, checksums)
+
+            (destination / "payload.bin").write_bytes(b"corrupt")
+            with self.assertRaisesRegex(FileExistsError, "hash differs"):
+                self.validate_existing(destination, checksums)
+
+            (destination / "payload.bin").unlink()
+            with self.assertRaisesRegex(FileExistsError, "members differ"):
+                self.validate_existing(destination, checksums)
+
+    def test_existing_artifact_rejects_extra_and_non_regular_members(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination, checksums = self.make_existing_artifact(root)
+            (destination / "extra").write_bytes(b"unexpected")
+            with self.assertRaisesRegex(FileExistsError, "members differ"):
+                self.validate_existing(destination, checksums)
+            (destination / "extra").unlink()
+            (destination / "nested").mkdir()
+            with self.assertRaisesRegex(FileExistsError, "non-regular"):
+                self.validate_existing(destination, checksums)
+
+    def test_existing_artifact_rejects_destination_and_member_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target, checksums = self.make_existing_artifact(root)
+            link = root / "linked-artifact"
+            link.symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(FileExistsError, "safe directory"):
+                self.validate_existing(link, checksums)
+            regular = root / "regular-artifact"
+            regular.write_bytes(b"not a directory")
+            with self.assertRaisesRegex(FileExistsError, "safe directory"):
+                self.validate_existing(regular, checksums)
+
+            (target / "payload.bin").unlink()
+            (target / "payload.bin").symlink_to(root / "outside")
+            with self.assertRaisesRegex(FileExistsError, "non-regular"):
+                self.validate_existing(target, checksums)
+
+    def test_existing_artifact_rejects_malformed_or_unsafe_checksums(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination, _ = self.make_existing_artifact(Path(directory))
+            with self.assertRaisesRegex(ValueError, "malformed"):
+                self.validate_existing(destination, b"not-a-checksum\n")
+            line = f"{'0' * 64}  payload.bin\n".encode("ascii")
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                self.validate_existing(destination, line + line)
+            unsafe = f"{'0' * 64}  ../escape\n".encode("ascii")
+            with self.assertRaisesRegex(ValueError, "unsafe member"):
+                self.validate_existing(destination, unsafe)
+
     def test_builder_is_bounded_local_and_runtime_independent(self) -> None:
         source = BUILDER.read_text(encoding="utf-8")
         lowered = source.lower()
