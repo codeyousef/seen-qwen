@@ -37,7 +37,6 @@ class LocalVerificationContractTests(unittest.TestCase):
         )
         for required in (
             '--network none',
-            '--gpus all',
             '--read-only',
             '--cap-drop ALL',
             '--security-opt no-new-privileges',
@@ -50,11 +49,14 @@ class LocalVerificationContractTests(unittest.TestCase):
             'src=/opt/cuda,dst=/opt/cuda,readonly',
             'dst=/tmp',
             'PYTHONPATH=/workspace/.seen/verification/python',
+            'LD_LIBRARY_PATH=/opt/cuda/targets/x86_64-linux/lib',
             'CUDAToolkit_ROOT=/opt/cuda',
             'NVCC_CCBIN=/usr/bin/clang++',
             'CUDAHOSTCXX=/usr/bin/clang++',
         ):
             self.assertIn(required, self.runner)
+        for forbidden in ('--gpus', 'nvidia-smi'):
+            self.assertNotIn(forbidden, self.runner)
         self.assertNotIn("sudo", self.runner + self.prepare + self.inner)
         self.assertNotIn("pkexec", self.runner + self.prepare + self.inner)
         self.assertNotIn("/usr/local/bin/seen", self.runner + self.inner)
@@ -197,6 +199,9 @@ class LocalVerificationContractTests(unittest.TestCase):
         self.assertIn("qwn_044b_sampler_test_fast", self.inner)
         self.assertIn("qwn_044b_sampler_test", self.inner)
         self.assertIn("clang -shared -fPIC -O2 -Wl,--no-undefined", self.inner)
+        self.assertIn("--target seen_qwen_cuda --parallel 1", self.inner)
+        self.assertIn("$NATIVE_BUILD_ROOT/libseen_qwen_cuda.so", self.inner)
+        self.assertIn("$NATIVE_LIB_ROOT/libseen_qwen_cuda.so", self.inner)
         self.assertNotIn("nvcc", self.inner)
 
     def test_qwen_engine_ownership_contract_is_required(self) -> None:
