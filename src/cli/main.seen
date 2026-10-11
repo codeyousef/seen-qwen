@@ -1,7 +1,9 @@
 import env.env.{args}
-import seen_qwen.cli.command.{QWEN_CLI_HELP, QWEN_CLI_VERSION,
+import seen_qwen.cli.command.{QwenCliError, QWEN_CLI_HELP, QWEN_CLI_INSPECT,
+    QWEN_CLI_VERSION,
     QWEN_EXIT_UNSUPPORTED, parseQwenCli, qwenCliHelp,
     renderQwenCliDiagnostic}
+import seen_qwen.cli.inspect.{inspectQwenModel}
 
 extern "C" fun seen_string_release_owned(value: String) r: Void
 
@@ -40,6 +42,29 @@ fun main() r: Int {
     }
     if invocation.kind == QWEN_CLI_VERSION {
         println("seen-qwen 0.15.0-dev")
+        invocation.close(); invocation.free(); arguments.free()
+        return 0
+    }
+    if invocation.kind == QWEN_CLI_INSPECT {
+        let inspected = inspectQwenModel(invocation.modelLock,
+            invocation.output, invocation.device)
+        if inspected.isErr() {
+            let inspectError = inspected.unwrapErr()
+            let diagnostic = QwenCliError{ code: inspectError.code,
+                field: inspectError.field, message: inspectError.message,
+                exitCode: inspectError.exitCode }
+            let rendered = renderQwenCliDiagnostic(diagnostic,
+                invocation.diagnosticFormat)
+            println(rendered)
+            let code = inspectError.exitCode
+            seen_string_release_owned(rendered)
+            diagnostic.free(); inspectError.free(); inspected.releaseContainer()
+            invocation.close(); invocation.free(); arguments.free()
+            return code
+        }
+        let report = inspected.unwrap(); inspected.releaseContainer()
+        println("seen-qwen: inspect: wrote verified source report")
+        report.close(); report.free()
         invocation.close(); invocation.free(); arguments.free()
         return 0
     }

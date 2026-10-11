@@ -1,17 +1,18 @@
 version = 2
-manifest_sha256 = "87691e02f21a8771d3fae876ad271eefeadcdf0c6627ac29c5e77f975a381dbc"
+manifest_sha256 = "36b69edb2cddc3f0d6a3bf87e174347cfeef63dfcdbb06eaf58dc237293a84b0"
 
 # Audited Seen release toolchain identity (paths are intentionally excluded).
-# release_tag = "v0.22.4"
-# certified_commit = "a19d2e9345fdf0a46737fee8b1529355d494b6a8"
-# source_tree = "0f3d38f8b0d308c72057bb45c25e5c13490f2df8"
-# tag_object = "198ef8f03783ffb6f510d85d83e6fb4e65062180"
-# linux_x64_archive_sha256 = "7df93bef4058bf8f891043e374d10d977aee5d63f12ffa7eab68626e82fe71a1"
-# packaged_compiler_sha256 = "b3fecba2fb9d35434fa02f1cbc15d4208eda79b5c1903a3b19be55c47578b620"
-# compiler_build_id = "92251d4b331b286c08947ba2f2875227dda855fe"
-# packaged_package_client_sha256 = "7af85e6aa94d61f660a22f2900eaca6b2d57b0f5276a34da165ba3cf5c8b416a"
-# compatibility_manifest_sha256 = "97eb0a982a06f3f54c37a21bde08b6e03f2c9ae7e19f8a4fda6519d3e5f54ad4"
-# compatibility = "seen-compatibility-manifest-v1; compiler=0.22.4; layout=seen-layout-abi-v2; object-cache=seen-object-cache-abi-v3; package-interface=seen-package-interface-v2; package-object-manifest=seen-package-object-manifest-v2; prebuilt-package=seen-prebuilt-package-v2; package-client=0.22.4/SEENPKG1; runtime=runtime-v4; stdlib=0.5.0/manifest-v1; llvm-min=19; target=linux-x86_64; cpu=x86-64"
+# release_tag = "v0.22.9"
+# certified_commit = "d39a22295e469a47cfa0b76df49a659389ee78a2"
+# source_tree = "e6c535a9dda5c84d1fd11f16c0dcce93a9a70b66"
+# tag_object = "e3ff57c7a3d9072ed5a2c0a8f68886b8d6b87bc8"
+# source_archive_sha256 = "1701f592f6698e8e3e10dab59223cc00e6544f68e2ad575fcfcb32b1ee47daa4"
+# linux_x64_archive_sha256 = "7a9848d253a322c3f1229716dde7c06fbc32e2c2aca1499d778b60dfd01a7faf"
+# packaged_compiler_sha256 = "58d7181f8b5adf1bb823ee5dcfc0868f9962b302af4dfaabf6a9e806aea16db2"
+# compiler_build_id = "2e8228365322fc6462555d115160a863d1ed1ce7"
+# packaged_package_client_sha256 = "e6e4d78bee4f01ac5580a6115b35b648adfad75fd9f05603ec8a726e5e32171a"
+# compatibility_manifest_sha256 = "9fc9f4a7d5b59e494148935e863576946cb5f57c768b30b260bfd9fd40359514"
+# compatibility = "seen-compatibility-manifest-v1; compiler=0.22.9; layout=seen-layout-abi-v2; object-cache=seen-object-cache-abi-v3; package-interface=seen-package-interface-v2; package-object-manifest=seen-package-object-manifest-v2; prebuilt-package=seen-prebuilt-package-v2; package-client=0.22.9/SEENPKG1; runtime=runtime-v4; stdlib=0.5.0/manifest-v1; llvm-min=19; target=linux-x86_64; cpu=x86-64"
 
 [root]
 name = "seen_qwen"

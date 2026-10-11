@@ -70,20 +70,35 @@ fun qwenConfigError(code: String, field: String, message: String)
 
 fun qwenExactString(object: JsonValue, field: String, expected: String) r: Bool {
     let value = object.get(field)
-    return not value.isNone() and value.unwrap().isString() and
+    let matches = not value.isNone() and value.unwrap().isString() and
         value.unwrap().getString() == expected
+    value.free()
+    return matches
 }
 
 fun qwenExactBool(object: JsonValue, field: String, expected: Bool) r: Bool {
     let value = object.get(field)
-    return not value.isNone() and value.unwrap().isBool() and
+    let matches = not value.isNone() and value.unwrap().isBool() and
         value.unwrap().getBool() == expected
+    value.free()
+    return matches
 }
 
 fun qwenExactNumber(object: JsonValue, field: String, expected: Float) r: Bool {
     let value = object.get(field)
-    return not value.isNone() and value.unwrap().isNumber() and
+    let matches = not value.isNone() and value.unwrap().isNumber() and
         value.unwrap().getNumber() == expected
+    value.free()
+    return matches
+}
+
+fun qwenExactArrayString(array: JsonValue, index: Int, expected: String)
+    r: Bool {
+    let value = array.getAt(index)
+    let matches = not value.isNone() and value.unwrap().isString() and
+        value.unwrap().getString() == expected
+    value.free()
+    return matches
 }
 
 fun qwenExactInt(object: JsonValue, field: String, expected: Int) r: Bool {
@@ -104,6 +119,7 @@ fun validateQwenLayerSchedule(config: JsonValue) r: Result<Bool, QwenConfigError
     let layerTypes = config.get("layer_types")
     if layerTypes.isNone() or not layerTypes.unwrap().isArray() or
         layerTypes.unwrap().length() != 64 {
+        layerTypes.free()
         return Err<Bool, QwenConfigError>(qwenConfigError(
             "qwen.config.layer-count", "text_config.layer_types",
             "exactly 64 layer types are required"))
@@ -118,23 +134,28 @@ fun validateQwenLayerSchedule(config: JsonValue) r: Result<Bool, QwenConfigError
         }
         if entry.isNone() or not entry.unwrap().isString() or
             entry.unwrap().getString() != expected {
+            entry.free(); layerTypes.free()
             return Err<Bool, QwenConfigError>(qwenConfigError(
                 "qwen.config.layer-schedule", "text_config.layer_types",
                 "the pinned 3:1 linear/full attention schedule is required"))
         }
+        entry.free()
         layer = layer + 1
     }
+    layerTypes.free()
     return Ok<Bool, QwenConfigError>(true)
 }
 
 fun validateQwenRopeGeometry(config: JsonValue) r: Result<Bool, QwenConfigError> {
     let ropeValue = config.get("rope_parameters")
     if ropeValue.isNone() or not ropeValue.unwrap().isObject() {
+        ropeValue.free()
         return Err<Bool, QwenConfigError>(qwenConfigError(
             "qwen.config.rope", "text_config.rope_parameters",
             "the pinned RoPE object is required"))
     }
     let rope = ropeValue.unwrap()
+    ropeValue.free()
     if not qwenExactString(rope, "rope_type", "default") or
         not qwenExactNumber(rope, "rope_theta", 10000000.0) or
         not qwenExactNumber(rope, "partial_rotary_factor", 0.25) or
@@ -146,22 +167,26 @@ fun validateQwenRopeGeometry(config: JsonValue) r: Result<Bool, QwenConfigError>
     let sectionValue = rope.get("mrope_section")
     if sectionValue.isNone() or not sectionValue.unwrap().isArray() or
         sectionValue.unwrap().length() != 3 {
+        sectionValue.free()
         return Err<Bool, QwenConfigError>(qwenConfigError(
             "qwen.config.rope-section", "text_config.rope_parameters.mrope_section",
             "the text MRoPE section must contain three entries"))
     }
     let section = sectionValue.unwrap()
+    sectionValue.free()
     var index = 0
     while index < 3 {
         let value = section.getAt(index)
         let expected = if index < 2 { 11.0 } else { 10.0 }
         if value.isNone() or not value.unwrap().isNumber() or
             value.unwrap().getNumber() != expected {
+            value.free()
             return Err<Bool, QwenConfigError>(qwenConfigError(
                 "qwen.config.rope-section",
                 "text_config.rope_parameters.mrope_section",
                 "the pinned MRoPE section [11, 11, 10] is required"))
         }
+        value.free()
         index = index + 1
     }
     return Ok<Bool, QwenConfigError>(true)
@@ -169,17 +194,23 @@ fun validateQwenRopeGeometry(config: JsonValue) r: Result<Bool, QwenConfigError>
 
 pub fun parseQwen38Config(text: String)
     r: Result<Qwen38Config, QwenConfigError> {
-    let parsed = parseStrictJson(text, StrictJsonLimits{
+    let limits = StrictJsonLimits{
         maxInputBytes: 1048576,
         maxDepth: 24,
         maxValues: 8192,
         maxStringBytes: 65536,
-    })
+    }
+    let parsed = parseStrictJson(text, limits)
+    limits.free()
     if parsed.isErr() {
+        let message = parsed.unwrapErr().message
+        parsed.unwrapErr().free()
+        parsed.releaseContainer()
         return Err<Qwen38Config, QwenConfigError>(qwenConfigError(
-            "qwen.config.json", "json", parsed.unwrapErr().message))
+            "qwen.config.json", "json", message))
     }
     let document = parsed.unwrap()
+    parsed.releaseContainer()
     let rootValue = document.value
     if rootValue.isNone() or not rootValue.unwrap().isObject() {
         destroyJsonParseResult(document, true)
@@ -188,13 +219,13 @@ pub fun parseQwen38Config(text: String)
     }
     let root = rootValue.unwrap()
     let architectures = root.get("architectures")
-    if architectures.isNone() or not architectures.unwrap().isArray() or
-        architectures.unwrap().length() != 1 or
-        architectures.unwrap().getAt(0).isNone() or
-        not architectures.unwrap().getAt(0).unwrap().isString() or
-        architectures.unwrap().getAt(0).unwrap().getString() !=
-            "Qwen3_5ForConditionalGeneration" or
-        not qwenExactString(root, "model_type", "qwen3_5") or
+    let identityValid = not architectures.isNone() and
+        architectures.unwrap().isArray() and
+        architectures.unwrap().length() == 1 and
+        qwenExactArrayString(architectures.unwrap(), 0,
+            "Qwen3_5ForConditionalGeneration")
+    architectures.free()
+    if not identityValid or not qwenExactString(root, "model_type", "qwen3_5") or
         not qwenExactBool(root, "language_model_only", false) or
         not qwenExactBool(root, "tie_word_embeddings", false) {
         destroyJsonParseResult(document, true)
@@ -204,11 +235,13 @@ pub fun parseQwen38Config(text: String)
     }
     let textConfigValue = root.get("text_config")
     if textConfigValue.isNone() or not textConfigValue.unwrap().isObject() {
+        textConfigValue.free()
         destroyJsonParseResult(document, true)
         return Err<Qwen38Config, QwenConfigError>(qwenConfigError(
             "qwen.config.text", "text_config", "text_config must be an object"))
     }
     let config = textConfigValue.unwrap()
+    textConfigValue.free()
     if not qwenExactString(config, "model_type", "qwen3_5_text") or
         not qwenExactString(config, "dtype", "bfloat16") or
         not qwenExactInt(config, "num_hidden_layers", 64) or
@@ -254,15 +287,19 @@ pub fun parseQwen38Config(text: String)
     let layers = validateQwenLayerSchedule(config)
     if layers.isErr() {
         let error = layers.unwrapErr()
+        layers.releaseContainer()
         destroyJsonParseResult(document, true)
         return Err<Qwen38Config, QwenConfigError>(error)
     }
+    layers.releaseContainer()
     let rope = validateQwenRopeGeometry(config)
     if rope.isErr() {
         let error = rope.unwrapErr()
+        rope.releaseContainer()
         destroyJsonParseResult(document, true)
         return Err<Qwen38Config, QwenConfigError>(error)
     }
+    rope.releaseContainer()
     destroyJsonParseResult(document, true)
     return Ok<Qwen38Config, QwenConfigError>(Qwen38Config{
         layers: 64,
@@ -290,6 +327,7 @@ fun validateHybridMiniSchedule(root: JsonValue) r: Result<Bool, QwenConfigError>
     let layerTypes = root.get("layer_types")
     if layerTypes.isNone() or not layerTypes.unwrap().isArray() or
         layerTypes.unwrap().length() != 8 {
+        layerTypes.free()
         return Err<Bool, QwenConfigError>(qwenConfigError(
             "qwen.mini.schedule", "layer_types",
             "exactly eight layer types are required"))
@@ -304,12 +342,15 @@ fun validateHybridMiniSchedule(root: JsonValue) r: Result<Bool, QwenConfigError>
         }
         if value.isNone() or not value.unwrap().isString() or
             value.unwrap().getString() != expected {
+            value.free(); layerTypes.free()
             return Err<Bool, QwenConfigError>(qwenConfigError(
                 "qwen.mini.schedule", "layer_types",
                 "the exact 3:1 GDN/full-attention schedule is required"))
         }
+        value.free()
         layer = layer + 1
     }
+    layerTypes.free()
     return Ok<Bool, QwenConfigError>(true)
 }
 
@@ -317,6 +358,7 @@ fun validateHybridMiniArrays(root: JsonValue) r: Result<Bool, QwenConfigError> {
     let sectionValue = root.get("mrope_section")
     if sectionValue.isNone() or not sectionValue.unwrap().isArray() or
         sectionValue.unwrap().length() != 3 {
+        sectionValue.free()
         return Err<Bool, QwenConfigError>(qwenConfigError(
             "qwen.mini.semantics", "mrope_section",
             "the exact MRoPE section [1, 1, 1] is required"))
@@ -326,36 +368,43 @@ fun validateHybridMiniArrays(root: JsonValue) r: Result<Bool, QwenConfigError> {
         let value = sectionValue.unwrap().getAt(index)
         if value.isNone() or not value.unwrap().isNumber() or
             value.unwrap().getNumber() != 1.0 {
+            value.free(); sectionValue.free()
             return Err<Bool, QwenConfigError>(qwenConfigError(
                 "qwen.mini.semantics", "mrope_section",
                 "the exact MRoPE section [1, 1, 1] is required"))
         }
+        value.free()
         index = index + 1
     }
+    sectionValue.free()
     let requiredValue = root.get("required_namespaces")
     if requiredValue.isNone() or not requiredValue.unwrap().isArray() or
         requiredValue.unwrap().length() != 3 {
+        requiredValue.free()
         return Err<Bool, QwenConfigError>(qwenConfigError(
             "qwen.mini.namespaces", "required_namespaces",
             "the exact text, LM-head, and MTP namespaces are required"))
     }
     let required = requiredValue.unwrap()
-    if required.getAt(0).isNone() or not required.getAt(0).unwrap().isString() or
-        required.getAt(0).unwrap().getString() != "model.language_model.*" or
-        required.getAt(1).isNone() or not required.getAt(1).unwrap().isString() or
-        required.getAt(1).unwrap().getString() != "lm_head.weight" or
-        required.getAt(2).isNone() or not required.getAt(2).unwrap().isString() or
-        required.getAt(2).unwrap().getString() != "mtp.*" {
+    requiredValue.free()
+    if not qwenExactArrayString(required, 0, "model.language_model.*") or
+        not qwenExactArrayString(required, 1, "lm_head.weight") or
+        not qwenExactArrayString(required, 2, "mtp.*") {
         return Err<Bool, QwenConfigError>(qwenConfigError(
             "qwen.mini.namespaces", "required_namespaces",
             "the exact text, LM-head, and MTP namespaces are required"))
     }
     let excludedValue = root.get("excluded_namespaces")
     if excludedValue.isNone() or not excludedValue.unwrap().isArray() or
-        excludedValue.unwrap().length() != 1 or
-        excludedValue.unwrap().getAt(0).isNone() or
-        not excludedValue.unwrap().getAt(0).unwrap().isString() or
-        excludedValue.unwrap().getAt(0).unwrap().getString() != "model.visual.*" {
+        excludedValue.unwrap().length() != 1 {
+        excludedValue.free()
+        return Err<Bool, QwenConfigError>(qwenConfigError(
+            "qwen.mini.namespaces", "excluded_namespaces",
+            "the visual namespace must be excluded"))
+    }
+    let excluded = excludedValue.unwrap()
+    excludedValue.free()
+    if not qwenExactArrayString(excluded, 0, "model.visual.*") {
         return Err<Bool, QwenConfigError>(qwenConfigError(
             "qwen.mini.namespaces", "excluded_namespaces",
             "the visual namespace must be excluded"))
@@ -366,17 +415,23 @@ fun validateHybridMiniArrays(root: JsonValue) r: Result<Bool, QwenConfigError> {
 /// Parse the exact deterministic QWN-023 hybrid mini-model fixture contract.
 pub fun parseQwenHybridMiniContract(text: String)
     r: Result<QwenHybridMiniContract, QwenConfigError> {
-    let parsed = parseStrictJson(text, StrictJsonLimits{
+    let limits = StrictJsonLimits{
         maxInputBytes: 16384,
         maxDepth: 8,
         maxValues: 128,
         maxStringBytes: 4096,
-    })
+    }
+    let parsed = parseStrictJson(text, limits)
+    limits.free()
     if parsed.isErr() {
+        let message = parsed.unwrapErr().message
+        parsed.unwrapErr().free()
+        parsed.releaseContainer()
         return Err<QwenHybridMiniContract, QwenConfigError>(qwenConfigError(
-            "qwen.mini.parse", "json", parsed.unwrapErr().message))
+            "qwen.mini.parse", "json", message))
     }
     let document = parsed.unwrap()
+    parsed.releaseContainer()
     let rootValue = document.value
     if rootValue.isNone() or not rootValue.unwrap().isObject() {
         destroyJsonParseResult(document, true)
@@ -443,15 +498,19 @@ pub fun parseQwenHybridMiniContract(text: String)
     let schedule = validateHybridMiniSchedule(root)
     if schedule.isErr() {
         let error = schedule.unwrapErr()
+        schedule.releaseContainer()
         destroyJsonParseResult(document, true)
         return Err<QwenHybridMiniContract, QwenConfigError>(error)
     }
+    schedule.releaseContainer()
     let arrays = validateHybridMiniArrays(root)
     if arrays.isErr() {
         let error = arrays.unwrapErr()
+        arrays.releaseContainer()
         destroyJsonParseResult(document, true)
         return Err<QwenHybridMiniContract, QwenConfigError>(error)
     }
+    arrays.releaseContainer()
     destroyJsonParseResult(document, true)
     return Ok<QwenHybridMiniContract, QwenConfigError>(QwenHybridMiniContract{
         deterministicSeed: 20260827,

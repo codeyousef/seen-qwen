@@ -42,8 +42,11 @@ pub class QwenTensorCatalog {
     fun nameAt(index: Int) r: Result<String, QwenTensorCatalogError> {
         let valid = qwenCatalogIndexValid(this, index)
         if valid.isErr() {
-            return Err<String, QwenTensorCatalogError>(valid.unwrapErr())
+            let error = valid.unwrapErr()
+            valid.releaseContainer()
+            return Err<String, QwenTensorCatalogError>(error)
         }
+        valid.releaseContainer()
         return Ok<String, QwenTensorCatalogError>(
             this.shardIndex.tensorNames[index])
     }
@@ -51,8 +54,11 @@ pub class QwenTensorCatalog {
     fun shardAt(index: Int) r: Result<String, QwenTensorCatalogError> {
         let valid = qwenCatalogIndexValid(this, index)
         if valid.isErr() {
-            return Err<String, QwenTensorCatalogError>(valid.unwrapErr())
+            let error = valid.unwrapErr()
+            valid.releaseContainer()
+            return Err<String, QwenTensorCatalogError>(error)
         }
+        valid.releaseContainer()
         return Ok<String, QwenTensorCatalogError>(
             this.shardIndex.shardNames[index])
     }
@@ -60,8 +66,11 @@ pub class QwenTensorCatalog {
     fun categoryAt(index: Int) r: Result<String, QwenTensorCatalogError> {
         let valid = qwenCatalogIndexValid(this, index)
         if valid.isErr() {
-            return Err<String, QwenTensorCatalogError>(valid.unwrapErr())
+            let error = valid.unwrapErr()
+            valid.releaseContainer()
+            return Err<String, QwenTensorCatalogError>(error)
         }
+        valid.releaseContainer()
         return Ok<String, QwenTensorCatalogError>(
             qwenTensorCategoryName(this.categories[index]))
     }
@@ -88,8 +97,11 @@ pub class QwenTensorCatalog {
     fun shouldExtractAt(index: Int) r: Result<Bool, QwenTensorCatalogError> {
         let valid = qwenCatalogIndexValid(this, index)
         if valid.isErr() {
-            return Err<Bool, QwenTensorCatalogError>(valid.unwrapErr())
+            let error = valid.unwrapErr()
+            valid.releaseContainer()
+            return Err<Bool, QwenTensorCatalogError>(error)
         }
+        valid.releaseContainer()
         return Ok<Bool, QwenTensorCatalogError>(
             this.categories[index] != QWEN_TENSOR_EXCLUDED_VISION)
     }
@@ -137,12 +149,16 @@ fun qwenTensorCategoryCode(name: String)
     r: Result<Int, QwenTensorCatalogError> {
     let category = classifyQwenTensorName(name)
     if category.isErr() {
-        return Err<Int, QwenTensorCatalogError>(category.unwrapErr())
+        let error = category.unwrapErr()
+        category.releaseContainer()
+        return Err<Int, QwenTensorCatalogError>(error)
     }
-    if category.unwrap() == "text" {
+    let categoryName = category.unwrap()
+    category.releaseContainer()
+    if categoryName == "text" {
         return Ok<Int, QwenTensorCatalogError>(QWEN_TENSOR_REQUIRED_TEXT)
     }
-    if category.unwrap() == "mtp" {
+    if categoryName == "mtp" {
         return Ok<Int, QwenTensorCatalogError>(QWEN_TENSOR_REQUIRED_MTP)
     }
     return Ok<Int, QwenTensorCatalogError>(QWEN_TENSOR_EXCLUDED_VISION)
@@ -178,6 +194,7 @@ pub fun parseQwenTensorCatalog(indexText: String)
             parsed.unwrapErr().message))
     }
     let shardIndex = parsed.unwrap()
+    parsed.releaseContainer()
     let categories = Array<Int>()
     if shardIndex.tensorNames.length() != 1199 {
         releaseQwenCatalogParts(shardIndex, categories)
@@ -195,12 +212,15 @@ pub fun parseQwenTensorCatalog(indexText: String)
         let name = shardIndex.tensorNames[tensorIndex]
         let classified = qwenTensorCategoryCode(name)
         if classified.isErr() {
-            canonical.clear(); canonical.free()
+            let error = classified.unwrapErr()
+            classified.releaseContainer()
+            canonical.parts.free(); canonical.free()
             releaseQwenCatalogParts(shardIndex, categories)
             return Err<QwenTensorCatalog, QwenTensorCatalogError>(
-                classified.unwrapErr())
+                error)
         }
         let category = classified.unwrap()
+        classified.releaseContainer()
         categories.push(category)
         if category == QWEN_TENSOR_REQUIRED_TEXT {
             requiredText = requiredText + 1
@@ -219,7 +239,7 @@ pub fun parseQwenTensorCatalog(indexText: String)
     }
 
     if requiredText != 851 or requiredMtp != 15 or excludedVision != 333 {
-        canonical.clear(); canonical.free()
+        canonical.parts.free(); canonical.free()
         releaseQwenCatalogParts(shardIndex, categories)
         return Err<QwenTensorCatalog, QwenTensorCatalogError>(qwenCatalogError(
             "qwen.catalog.class-count", "weight_map",
@@ -227,7 +247,7 @@ pub fun parseQwenTensorCatalog(indexText: String)
     }
 
     let canonicalText = canonical.buildAndClear()
-    canonical.free()
+    canonical.parts.free(); canonical.free()
     let hashed = sha256(canonicalText)
     seen_string_release_owned(canonicalText)
     if hashed.isErr() {
@@ -237,6 +257,7 @@ pub fun parseQwenTensorCatalog(indexText: String)
             "failed to hash the canonical tensor catalog"))
     }
     let fingerprint = hashed.unwrap()
+    hashed.releaseContainer()
     if fingerprint !=
         "5f466d43bae3059e54f0bfe183d0e82c822242f45a834d778414d3e5b5248f1f" {
         seen_string_release_owned(fingerprint)

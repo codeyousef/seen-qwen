@@ -1,0 +1,711 @@
+///
+/// QWN-047B read-only inspection of the pinned Qwen3.8-27B source.
+///
+/// Inspection validates the exact model/source locks, configuration, tensor
+/// index, and all eighteen safetensors headers. Tensor payloads are never
+/// mapped. CUDA is initialized only when the caller supplies --device.
+///
+
+import accelerator.cuda.{CudaDevice}
+import core.result.{Result}
+import crypto.sha256.{sha256File, releaseSha256DigestResult}
+import formats.safetensors.{SafeTensorFile, SafeTensorPolicy,
+    closeSafeTensorPolicy}
+import io.file.{readTextChecked, writeTextAtomically}
+import json.builder.{jsonAppendBorrowedPart, jsonAppendEscapedString,
+    jsonAppendInt, jsonAppendOwnedPart, jsonFinishOwned}
+import json.parser.{destroyJsonParseResult}
+import json.strict.{StrictJsonLimits, parseStrictJson}
+import json.value.{JsonValue}
+import seen_qwen.model.config.{parseQwen38Config}
+import seen_qwen.model.tensor_catalog.{QwenTensorCatalog,
+    parseQwenTensorCatalog}
+import seen_qwen.runtime.full_model_memory.{QWEN_FULL_Q4_WEIGHT_BYTES,
+    createQwenFullMemoryPlan}
+import str.string.{StringBuilder}
+
+extern "C" fun seen_string_clone_owned(value: String) r: String
+extern "C" fun seen_string_release_owned(value: String) r: Void
+
+let QWEN_INSPECT_MODEL_ID: String = "Qwen/Qwen3.8-27B"
+let QWEN_INSPECT_REVISION: String =
+    "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+let QWEN_INSPECT_CONFIG_SHA256: String =
+    "191e0af232104ed8b65258cf3fb2b842e288008baca7633c11b82a1ac7203aab"
+let QWEN_INSPECT_MODEL_LOCK_SHA256: String =
+    "399b6f25f8cd20ae5d233040005f0ebb82b7e5b396e0eb91214dbe94b828c3be"
+let QWEN_INSPECT_SOURCE_LOCK_SHA256: String =
+    "f43b83cd9174a91a2ccb2669dc1751c83b9c6730593abe6004bc185855cc78bb"
+let QWEN_INSPECT_INDEX_SHA256: String =
+    "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df"
+let QWEN_INSPECT_CATALOG_SHA256: String =
+    "5f466d43bae3059e54f0bfe183d0e82c822242f45a834d778414d3e5b5248f1f"
+let QWEN_INSPECT_TOTAL_BYTES: UInt64 = 55562855904 as UInt64
+let QWEN_INSPECT_TARGET_BYTES: UInt64 = 25757220864 as UInt64
+let QWEN_INSPECT_MINIMUM_DEVICE_BYTES: UInt64 = 17164400720 as UInt64
+
+pub class QwenInspectError {
+    var code: String
+    var field: String
+    var message: String
+    var exitCode: Int
+}
+
+fun inspectError(code: String, field: String, message: String,
+    exitCode: Int = 3) r: QwenInspectError {
+    return QwenInspectError{ code: code, field: field, message: message,
+        exitCode: exitCode }
+}
+
+pub class QwenInspectReport {
+    var modelLockSha256: String
+    var sourceLockSha256: String
+    var configSha256: String
+    var tensorIndexSha256: String
+    var catalogSha256: String
+    var sourceBytes: UInt64
+    var textBytes: UInt64
+    var mtpBytes: UInt64
+    var visionBytes: UInt64
+    var textTensors: Int
+    var mtpTensors: Int
+    var visionTensors: Int
+    var q4WeightBytes: UInt64
+    var q4AllocationBytes: UInt64
+    var q4MinimumDeviceBytes: UInt64
+    var q4TargetDeviceBytes: UInt64
+    var q4TargetAdmittedBytes: UInt64
+    var deviceRequested: Bool
+    var deviceOrdinal: Int32
+    var deviceComputeMajor: Int32
+    var deviceComputeMinor: Int32
+    var deviceTotalBytes: UInt64
+    var deviceFreeBytes: UInt64
+    var deviceFits: Bool
+    var closed: Bool
+
+    fun close() r: Void {
+        if this.closed { return }
+        seen_string_release_owned(this.modelLockSha256)
+        seen_string_release_owned(this.sourceLockSha256)
+        seen_string_release_owned(this.configSha256)
+        seen_string_release_owned(this.tensorIndexSha256)
+        seen_string_release_owned(this.catalogSha256)
+        this.closed = true
+    }
+}
+
+fun inspectString(object: JsonValue, field: String, expected: String) r: Bool {
+    let value = object.get(field)
+    let matches = not value.isNone() and value.unwrap().isString() and
+        value.unwrap().getString() == expected
+    value.free()
+    return matches
+}
+
+fun inspectNumber(object: JsonValue, field: String, expected: UInt64) r: Bool {
+    let value = object.get(field)
+    let matches = not value.isNone() and value.unwrap().isNumber() and
+        value.unwrap().getNumber() == expected as Float
+    value.free()
+    return matches
+}
+
+fun inspectRead(path: String, maximumBytes: Int, field: String)
+    r: Result<String, QwenInspectError> {
+    let read = readTextChecked(path)
+    if not read.success or read.content.length() > maximumBytes {
+        if read.success { seen_string_release_owned(read.content) }
+        if not read.error.isNone() { read.error.unwrap().free() }
+        read.error.free(); read.free()
+        return Err<String, QwenInspectError>(inspectError(
+            "qwen.inspect.read", field,
+            "required input is missing, unreadable, or exceeds its bound"))
+    }
+    let content = read.content
+    read.error.free(); read.free()
+    return Ok<String, QwenInspectError>(content)
+}
+
+fun inspectDigest(path: String, expected: String, field: String)
+    r: Result<String, QwenInspectError> {
+    let digest = sha256File(path, 1048576)
+    if digest.isErr() {
+        digest.unwrapErr().free()
+        digest.releaseContainer()
+        return Err<String, QwenInspectError>(inspectError(
+            "qwen.inspect.digest", field, "failed to hash required input"))
+    }
+    if digest.unwrap() != expected {
+        releaseSha256DigestResult(digest)
+        return Err<String, QwenInspectError>(inspectError(
+            "qwen.inspect.identity", field,
+            "input SHA-256 differs from the frozen source identity"))
+    }
+    let owned = seen_string_clone_owned(digest.unwrap())
+    releaseSha256DigestResult(digest)
+    return Ok<String, QwenInspectError>(owned)
+}
+
+fun inspectValidateModelLock(text: String) r: Result<Bool, QwenInspectError> {
+    let limits = StrictJsonLimits{
+        maxInputBytes: 131072, maxDepth: 12, maxValues: 1024,
+        maxStringBytes: 4096 }
+    let parsed = parseStrictJson(text, limits)
+    limits.free()
+    if parsed.isErr() {
+        parsed.unwrapErr().free()
+        parsed.releaseContainer()
+        return Err<Bool, QwenInspectError>(inspectError(
+            "qwen.inspect.model-lock-json", "model_lock",
+            "model lock is not strict bounded JSON"))
+    }
+    let document = parsed.unwrap()
+    parsed.releaseContainer()
+    if document.value.isNone() or not document.value.unwrap().isObject() {
+        destroyJsonParseResult(document, true)
+        return Err<Bool, QwenInspectError>(inspectError(
+            "qwen.inspect.model-lock", "model_lock",
+            "model lock root must be an object"))
+    }
+    let root = document.value.unwrap()
+    let tensorIndex = root.get("tensor_index")
+    let files = root.get("files")
+    let valid = inspectString(root, "schema", "seen-qwen-model-lock-v1") and
+        inspectString(root, "model_id", QWEN_INSPECT_MODEL_ID) and
+        inspectString(root, "revision", QWEN_INSPECT_REVISION) and
+        inspectString(root, "license", "Apache-2.0") and
+        inspectString(root, "config_sha256", QWEN_INSPECT_CONFIG_SHA256) and
+        inspectString(root, "text_contract", "seen-qwen38-text-v1") and
+        not files.isNone() and files.unwrap().isArray() and
+        files.unwrap().length() == 27 and not tensorIndex.isNone() and
+        tensorIndex.unwrap().isObject() and
+        inspectNumber(tensorIndex.unwrap(), "total_size", QWEN_INSPECT_TOTAL_BYTES) and
+        inspectNumber(tensorIndex.unwrap(), "shards", 18 as UInt64) and
+        inspectNumber(tensorIndex.unwrap(), "required_text_tensors", 851 as UInt64) and
+        inspectNumber(tensorIndex.unwrap(), "required_mtp_tensors", 15 as UInt64) and
+        inspectNumber(tensorIndex.unwrap(), "excluded_vision_tensors", 333 as UInt64)
+    files.free(); tensorIndex.free()
+    destroyJsonParseResult(document, true)
+    if not valid {
+        return Err<Bool, QwenInspectError>(inspectError(
+            "qwen.inspect.model-lock", "model_lock",
+            "model lock differs from the frozen Qwen3.8-27B source contract"))
+    }
+    return Ok<Bool, QwenInspectError>(true)
+}
+
+fun inspectValidateSourceLock(text: String) r: Result<Bool, QwenInspectError> {
+    let limits = StrictJsonLimits{
+        maxInputBytes: 65536, maxDepth: 12, maxValues: 1024,
+        maxStringBytes: 4096 }
+    let parsed = parseStrictJson(text, limits)
+    limits.free()
+    if parsed.isErr() {
+        parsed.unwrapErr().free()
+        parsed.releaseContainer()
+        return Err<Bool, QwenInspectError>(inspectError(
+            "qwen.inspect.source-lock-json", "source_lock",
+            "source lock is not strict bounded JSON"))
+    }
+    let document = parsed.unwrap()
+    parsed.releaseContainer()
+    if document.value.isNone() or not document.value.unwrap().isObject() {
+        destroyJsonParseResult(document, true)
+        return Err<Bool, QwenInspectError>(inspectError(
+            "qwen.inspect.source-lock", "source_lock",
+            "source lock root must be an object"))
+    }
+    let root = document.value.unwrap()
+    let assets = root.get("assets")
+    let valid = inspectString(root, "schema", "seen-qwen-source-lock-v1") and
+        inspectString(root, "model_id", QWEN_INSPECT_MODEL_ID) and
+        inspectString(root, "model_revision", QWEN_INSPECT_REVISION) and
+        inspectString(root, "catalog_sha256", QWEN_INSPECT_CATALOG_SHA256) and
+        inspectString(root, "tensor_index_sha256", QWEN_INSPECT_INDEX_SHA256) and
+        not assets.isNone() and assets.unwrap().isArray() and
+        assets.unwrap().length() == 7
+    assets.free()
+    destroyJsonParseResult(document, true)
+    if not valid {
+        return Err<Bool, QwenInspectError>(inspectError(
+            "qwen.inspect.source-lock", "source_lock",
+            "source lock differs from the frozen Qwen3.8-27B source contract"))
+    }
+    return Ok<Bool, QwenInspectError>(true)
+}
+
+fun inspectShardName(index: Int) r: String {
+    if index == 0 { return "model-00001-of-00018.safetensors" }
+    if index == 1 { return "model-00002-of-00018.safetensors" }
+    if index == 2 { return "model-00003-of-00018.safetensors" }
+    if index == 3 { return "model-00004-of-00018.safetensors" }
+    if index == 4 { return "model-00005-of-00018.safetensors" }
+    if index == 5 { return "model-00006-of-00018.safetensors" }
+    if index == 6 { return "model-00007-of-00018.safetensors" }
+    if index == 7 { return "model-00008-of-00018.safetensors" }
+    if index == 8 { return "model-00009-of-00018.safetensors" }
+    if index == 9 { return "model-00010-of-00018.safetensors" }
+    if index == 10 { return "model-00011-of-00018.safetensors" }
+    if index == 11 { return "model-00012-of-00018.safetensors" }
+    if index == 12 { return "model-00013-of-00018.safetensors" }
+    if index == 13 { return "model-00014-of-00018.safetensors" }
+    if index == 14 { return "model-00015-of-00018.safetensors" }
+    if index == 15 { return "model-00016-of-00018.safetensors" }
+    if index == 16 { return "model-00017-of-00018.safetensors" }
+    return "model-00018-of-00018.safetensors"
+}
+
+fun inspectCatalogIndex(catalog: QwenTensorCatalog, name: String) r: Int {
+    var index = 0
+    while index < catalog.length() {
+        let candidate = catalog.nameAt(index)
+        let matches = candidate.isOkay() and candidate.unwrap() == name
+        candidate.releaseContainer()
+        if matches { return index }
+        index = index + 1
+    }
+    return -1
+}
+
+class QwenInspectTensorSummary {
+    var totalBytes: UInt64
+    var textBytes: UInt64
+    var mtpBytes: UInt64
+    var visionBytes: UInt64
+    var textTensors: Int
+    var mtpTensors: Int
+    var visionTensors: Int
+}
+
+class QwenInspectPaths {
+    var root: String
+    var sourceLock: String
+    var config: String
+    var tensorIndex: String
+    var closed: Bool
+
+    fun close() r: Void {
+        if this.closed { return }
+        seen_string_release_owned(this.root)
+        seen_string_release_owned(this.sourceLock)
+        seen_string_release_owned(this.config)
+        seen_string_release_owned(this.tensorIndex)
+        this.closed = true
+    }
+}
+
+fun inspectCloseTensorFile(file: SafeTensorFile) r: Bool {
+    let closed = file.close()
+    let okay = closed.isOkay()
+    if closed.isErr() { closed.unwrapErr().free() }
+    closed.releaseContainer()
+    file.metadata.free()
+    file.file.free()
+    file.free()
+    return okay
+}
+
+fun inspectTensorHeaders(root: String, catalog: QwenTensorCatalog)
+    r: Result<QwenInspectTensorSummary, QwenInspectError> {
+    let seen = Array<Int>()
+    var fill = 0
+    while fill < 1199 { seen.push(0); fill = fill + 1 }
+    var total: UInt64 = 0 as UInt64
+    var textBytes: UInt64 = 0 as UInt64
+    var mtpBytes: UInt64 = 0 as UInt64
+    var visionBytes: UInt64 = 0 as UInt64
+    var textCount = 0; var mtpCount = 0; var visionCount = 0
+    var shard = 0
+    while shard < 18 {
+        let name = inspectShardName(shard)
+        let policy = SafeTensorPolicy.modelWeights()
+        policy.maxTensors = 1199 as UInt64
+        let shardRoot = root + "/"
+        let shardPath = shardRoot + name
+        let opened = SafeTensorFile.open(shardPath, policy)
+        seen_string_release_owned(shardPath)
+        seen_string_release_owned(shardRoot)
+        closeSafeTensorPolicy(policy)
+        policy.free()
+        if opened.isErr() {
+            opened.unwrapErr().free()
+            opened.releaseContainer()
+            seen.free()
+            return Err<QwenInspectTensorSummary, QwenInspectError>(inspectError(
+                "qwen.inspect.shard", name,
+                "failed to open and validate required safetensors header"))
+        }
+        let file = opened.unwrap()
+        opened.releaseContainer()
+        var metadata = 0
+        while metadata < file.metadata.names.length() {
+            let tensorName = file.metadata.names[metadata]
+            let pinned = inspectCatalogIndex(catalog, tensorName)
+            if pinned < 0 {
+                let _ = inspectCloseTensorFile(file); seen.free()
+                return Err<QwenInspectTensorSummary, QwenInspectError>(inspectError(
+                    "qwen.inspect.tensor-identity", "tensor_index",
+                    "shard metadata contains an unknown, duplicate, or misplaced tensor"))
+            }
+            let expectedShard = catalog.shardAt(pinned)
+            let shardMatches = expectedShard.isOkay() and
+                expectedShard.unwrap() == name
+            if expectedShard.isErr() { expectedShard.unwrapErr().free() }
+            expectedShard.releaseContainer()
+            if not shardMatches or seen[pinned] != 0 {
+                let _ = inspectCloseTensorFile(file); seen.free()
+                return Err<QwenInspectTensorSummary, QwenInspectError>(inspectError(
+                    "qwen.inspect.tensor-identity", "tensor_index",
+                    "shard metadata contains an unknown, duplicate, or misplaced tensor"))
+            }
+            seen[pinned] = 1
+            let bytes = file.metadata.tensors[metadata].dataLength
+            if bytes == (0 as UInt64) or total >
+                (0xFFFFFFFFFFFFFFFF as UInt64) - bytes {
+                let _ = inspectCloseTensorFile(file); seen.free()
+                return Err<QwenInspectTensorSummary, QwenInspectError>(inspectError(
+                    "qwen.inspect.tensor-geometry", "tensor_index",
+                    "tensor byte geometry is empty or overflows UInt64"))
+            }
+            total = total + bytes
+            let category = catalog.categoryAt(pinned)
+            if category.isErr() {
+                category.unwrapErr().free(); category.releaseContainer()
+                let _ = inspectCloseTensorFile(file); seen.free()
+                return Err<QwenInspectTensorSummary, QwenInspectError>(inspectError(
+                    "qwen.inspect.tensor-category", "tensor_index",
+                    "tensor category is unavailable"))
+            }
+            let categoryName = category.unwrap()
+            if categoryName == "text" {
+                textBytes = textBytes + bytes; textCount = textCount + 1
+            } else if categoryName == "mtp" {
+                mtpBytes = mtpBytes + bytes; mtpCount = mtpCount + 1
+            } else if categoryName == "vision" {
+                visionBytes = visionBytes + bytes; visionCount = visionCount + 1
+            } else {
+                category.releaseContainer()
+                let _ = inspectCloseTensorFile(file); seen.free()
+                return Err<QwenInspectTensorSummary, QwenInspectError>(inspectError(
+                    "qwen.inspect.tensor-category", "tensor_index",
+                    "tensor category is outside the frozen contract"))
+            }
+            category.releaseContainer()
+            metadata = metadata + 1
+        }
+        if not inspectCloseTensorFile(file) {
+            seen.free()
+            return Err<QwenInspectTensorSummary, QwenInspectError>(inspectError(
+                "qwen.inspect.cleanup", name,
+                "failed to close source shard deterministically"))
+        }
+        shard = shard + 1
+    }
+    var present = 0
+    while present < seen.length() {
+        if seen[present] != 1 {
+            seen.free()
+            return Err<QwenInspectTensorSummary, QwenInspectError>(inspectError(
+                "qwen.inspect.tensor-missing", "tensor_index",
+                "a pinned tensor is absent from its assigned shard"))
+        }
+        present = present + 1
+    }
+    seen.free()
+    if total != QWEN_INSPECT_TOTAL_BYTES or textCount != 851 or
+        mtpCount != 15 or visionCount != 333 or
+        textBytes + mtpBytes + visionBytes != total {
+        return Err<QwenInspectTensorSummary, QwenInspectError>(inspectError(
+            "qwen.inspect.tensor-summary", "tensor_index",
+            "tensor counts or category bytes differ from the frozen source"))
+    }
+    return Ok<QwenInspectTensorSummary, QwenInspectError>(
+        QwenInspectTensorSummary{ totalBytes: total, textBytes: textBytes,
+            mtpBytes: mtpBytes, visionBytes: visionBytes,
+            textTensors: textCount, mtpTensors: mtpCount,
+            visionTensors: visionCount })
+}
+
+fun inspectAppendKey(builder: StringBuilder, ownership: Array<Bool>,
+    key: String) r: Void {
+    jsonAppendEscapedString(builder, ownership, key)
+    jsonAppendBorrowedPart(builder, ownership, ":")
+}
+
+fun inspectAppendString(builder: StringBuilder, ownership: Array<Bool>,
+    key: String, value: String, comma: Bool) r: Void {
+    if comma { jsonAppendBorrowedPart(builder, ownership, ",") }
+    inspectAppendKey(builder, ownership, key)
+    jsonAppendEscapedString(builder, ownership, value)
+}
+
+fun inspectAppendU64(builder: StringBuilder, ownership: Array<Bool>,
+    key: String, value: UInt64) r: Void {
+    jsonAppendBorrowedPart(builder, ownership, ",")
+    inspectAppendKey(builder, ownership, key)
+    jsonAppendOwnedPart(builder, ownership, value.toString())
+}
+
+fun inspectAppendInt(builder: StringBuilder, ownership: Array<Bool>,
+    key: String, value: Int) r: Void {
+    jsonAppendBorrowedPart(builder, ownership, ",")
+    inspectAppendKey(builder, ownership, key)
+    jsonAppendInt(builder, ownership, value)
+}
+
+pub fun renderQwenInspectReport(report: QwenInspectReport) r: String {
+    let builder = StringBuilder.new(); let ownership = Array<Bool>()
+    jsonAppendBorrowedPart(builder, ownership, "{")
+    inspectAppendString(builder, ownership, "schema",
+        "seen-qwen-inspect-v1", false)
+    inspectAppendString(builder, ownership, "model_id",
+        QWEN_INSPECT_MODEL_ID, true)
+    inspectAppendString(builder, ownership, "model_revision",
+        QWEN_INSPECT_REVISION, true)
+    inspectAppendString(builder, ownership, "model_lock_sha256",
+        report.modelLockSha256, true)
+    inspectAppendString(builder, ownership, "source_lock_sha256",
+        report.sourceLockSha256, true)
+    inspectAppendString(builder, ownership, "config_sha256",
+        report.configSha256, true)
+    inspectAppendString(builder, ownership, "tensor_index_sha256",
+        report.tensorIndexSha256, true)
+    inspectAppendString(builder, ownership, "catalog_sha256",
+        report.catalogSha256, true)
+    inspectAppendU64(builder, ownership, "source_bytes", report.sourceBytes)
+    inspectAppendU64(builder, ownership, "text_bytes", report.textBytes)
+    inspectAppendU64(builder, ownership, "mtp_bytes", report.mtpBytes)
+    inspectAppendU64(builder, ownership, "vision_bytes", report.visionBytes)
+    inspectAppendInt(builder, ownership, "text_tensors", report.textTensors)
+    inspectAppendInt(builder, ownership, "mtp_tensors", report.mtpTensors)
+    inspectAppendInt(builder, ownership, "vision_tensors", report.visionTensors)
+    inspectAppendU64(builder, ownership, "q4_weight_bytes", report.q4WeightBytes)
+    inspectAppendU64(builder, ownership, "q4_allocation_bytes",
+        report.q4AllocationBytes)
+    inspectAppendU64(builder, ownership, "q4_minimum_device_bytes",
+        report.q4MinimumDeviceBytes)
+    inspectAppendU64(builder, ownership, "q4_target_device_bytes",
+        report.q4TargetDeviceBytes)
+    inspectAppendU64(builder, ownership, "q4_target_admitted_bytes",
+        report.q4TargetAdmittedBytes)
+    inspectAppendString(builder, ownership, "device_probe",
+        if report.deviceRequested { "requested" } else { "not-requested" }, true)
+    if report.deviceRequested {
+        inspectAppendInt(builder, ownership, "device_ordinal",
+            report.deviceOrdinal as Int)
+        inspectAppendInt(builder, ownership, "device_compute_major",
+            report.deviceComputeMajor as Int)
+        inspectAppendInt(builder, ownership, "device_compute_minor",
+            report.deviceComputeMinor as Int)
+        inspectAppendU64(builder, ownership, "device_total_bytes",
+            report.deviceTotalBytes)
+        inspectAppendU64(builder, ownership, "device_free_bytes",
+            report.deviceFreeBytes)
+        inspectAppendString(builder, ownership, "device_fit",
+            if report.deviceFits { "fits" } else { "does-not-fit" }, true)
+    }
+    jsonAppendBorrowedPart(builder, ownership, "}\n")
+    return jsonFinishOwned(builder, ownership)
+}
+
+pub fun inspectQwenModel(modelLockPath: String, outputPath: String,
+    deviceOrdinal: Int32) r: Result<QwenInspectReport, QwenInspectError> {
+    if modelLockPath.length() == 0 or outputPath.length() == 0 {
+        return Err<QwenInspectReport, QwenInspectError>(inspectError(
+            "qwen.inspect.path", "arguments",
+            "model lock and output paths are required", 2))
+    }
+    var slash = modelLockPath.length() - 1
+    while slash >= 0 and modelLockPath.byteAt(slash) != 47 { slash = slash - 1 }
+    let root = if slash < 0 { seen_string_clone_owned(".") }
+        else if slash == 0 { seen_string_clone_owned("/") }
+        else { modelLockPath.substring(0, slash) }
+    let paths = QwenInspectPaths{ root: root,
+        sourceLock: root + "/source-lock.json",
+        config: root + "/config.json",
+        tensorIndex: root + "/model.safetensors.index.json", closed: false }
+
+    let modelRead = inspectRead(modelLockPath, 131072, "model_lock")
+    if modelRead.isErr() {
+        let error = modelRead.unwrapErr(); modelRead.releaseContainer()
+        paths.close(); paths.free()
+        return Err<QwenInspectReport, QwenInspectError>(error)
+    }
+    let modelText = modelRead.unwrap(); modelRead.releaseContainer()
+    let modelValid = inspectValidateModelLock(modelText)
+    if modelValid.isErr() {
+        let error = modelValid.unwrapErr(); modelValid.releaseContainer()
+        seen_string_release_owned(modelText)
+        paths.close(); paths.free()
+        return Err<QwenInspectReport, QwenInspectError>(error)
+    }
+    modelValid.releaseContainer(); seen_string_release_owned(modelText)
+
+    let sourceRead = inspectRead(paths.sourceLock, 65536, "source_lock")
+    if sourceRead.isErr() {
+        let error = sourceRead.unwrapErr(); sourceRead.releaseContainer()
+        paths.close(); paths.free()
+        return Err<QwenInspectReport, QwenInspectError>(error)
+    }
+    let sourceText = sourceRead.unwrap(); sourceRead.releaseContainer()
+    let sourceValid = inspectValidateSourceLock(sourceText)
+    if sourceValid.isErr() {
+        let error = sourceValid.unwrapErr(); sourceValid.releaseContainer()
+        seen_string_release_owned(sourceText)
+        paths.close(); paths.free()
+        return Err<QwenInspectReport, QwenInspectError>(error)
+    }
+    sourceValid.releaseContainer(); seen_string_release_owned(sourceText)
+
+    let modelHash = inspectDigest(modelLockPath,
+        QWEN_INSPECT_MODEL_LOCK_SHA256, "model_lock")
+    if modelHash.isErr() {
+        let error = modelHash.unwrapErr(); modelHash.releaseContainer()
+        paths.close(); paths.free()
+        return Err<QwenInspectReport, QwenInspectError>(error)
+    }
+    let sourceHash = inspectDigest(paths.sourceLock,
+        QWEN_INSPECT_SOURCE_LOCK_SHA256, "source_lock")
+    if sourceHash.isErr() {
+        seen_string_release_owned(modelHash.unwrap())
+        modelHash.releaseContainer()
+        let error = sourceHash.unwrapErr(); sourceHash.releaseContainer()
+        paths.close(); paths.free()
+        return Err<QwenInspectReport, QwenInspectError>(error)
+    }
+    let ownedModelHash = modelHash.unwrap(); modelHash.releaseContainer()
+    let ownedSourceHash = sourceHash.unwrap(); sourceHash.releaseContainer()
+
+    let configHash = inspectDigest(paths.config, QWEN_INSPECT_CONFIG_SHA256,
+        "config")
+    let indexHash = inspectDigest(paths.tensorIndex, QWEN_INSPECT_INDEX_SHA256,
+        "tensor_index")
+    if configHash.isErr() or indexHash.isErr() {
+        seen_string_release_owned(ownedModelHash)
+        seen_string_release_owned(ownedSourceHash)
+        if configHash.isOkay() { seen_string_release_owned(configHash.unwrap()) }
+        if indexHash.isOkay() { seen_string_release_owned(indexHash.unwrap()) }
+        let error = if configHash.isErr() { configHash.unwrapErr() }
+            else { indexHash.unwrapErr() }
+        if configHash.isErr() and indexHash.isErr() {
+            indexHash.unwrapErr().free()
+        }
+        configHash.releaseContainer(); indexHash.releaseContainer()
+        paths.close(); paths.free()
+        return Err<QwenInspectReport, QwenInspectError>(error)
+    }
+    let ownedConfigHash = configHash.unwrap(); configHash.releaseContainer()
+    let ownedIndexHash = indexHash.unwrap(); indexHash.releaseContainer()
+
+    let configRead = inspectRead(paths.config, 1048576, "config")
+    let indexRead = inspectRead(paths.tensorIndex, 1048576, "tensor_index")
+    if configRead.isErr() or indexRead.isErr() {
+        seen_string_release_owned(ownedModelHash); seen_string_release_owned(ownedSourceHash)
+        seen_string_release_owned(ownedConfigHash); seen_string_release_owned(ownedIndexHash)
+        let error = if configRead.isErr() { configRead.unwrapErr() }
+            else { indexRead.unwrapErr() }
+        if configRead.isErr() and indexRead.isErr() {
+            indexRead.unwrapErr().free()
+        }
+        configRead.releaseContainer(); indexRead.releaseContainer()
+        paths.close(); paths.free()
+        return Err<QwenInspectReport, QwenInspectError>(error)
+    }
+    let configText = configRead.unwrap(); configRead.releaseContainer()
+    let indexText = indexRead.unwrap(); indexRead.releaseContainer()
+    let config = parseQwen38Config(configText)
+    let catalogResult = parseQwenTensorCatalog(indexText)
+    seen_string_release_owned(configText); seen_string_release_owned(indexText)
+    if config.isErr() or catalogResult.isErr() {
+        seen_string_release_owned(ownedModelHash); seen_string_release_owned(ownedSourceHash)
+        seen_string_release_owned(ownedConfigHash); seen_string_release_owned(ownedIndexHash)
+        if config.isErr() { config.unwrapErr().free() }
+        if catalogResult.isErr() { catalogResult.unwrapErr().free() }
+        config.releaseContainer(); catalogResult.releaseContainer()
+        paths.close(); paths.free()
+        return Err<QwenInspectReport, QwenInspectError>(inspectError(
+            "qwen.inspect.source-contract", "config_or_index",
+            "configuration or tensor index violates the frozen contract"))
+    }
+    config.unwrap().free(); config.releaseContainer()
+    let catalog = catalogResult.unwrap(); catalogResult.releaseContainer()
+    let tensors = inspectTensorHeaders(paths.root, catalog)
+    if tensors.isErr() {
+        let error = tensors.unwrapErr(); tensors.releaseContainer()
+        catalog.close(); catalog.shardIndex.free(); catalog.free()
+        seen_string_release_owned(ownedModelHash); seen_string_release_owned(ownedSourceHash)
+        seen_string_release_owned(ownedConfigHash); seen_string_release_owned(ownedIndexHash)
+        paths.close(); paths.free()
+        return Err<QwenInspectReport, QwenInspectError>(error)
+    }
+    let summary = tensors.unwrap(); tensors.releaseContainer()
+    let ownedCatalogHash = seen_string_clone_owned(catalog.fingerprint)
+    catalog.close(); catalog.shardIndex.free(); catalog.free()
+
+    let candidate = createQwenFullMemoryPlan(0 as Int32,
+        QWEN_INSPECT_TARGET_BYTES, QWEN_FULL_Q4_WEIGHT_BYTES, 128 as UInt64)
+    if candidate.isErr() {
+        summary.free()
+        seen_string_release_owned(ownedModelHash); seen_string_release_owned(ownedSourceHash)
+        seen_string_release_owned(ownedConfigHash); seen_string_release_owned(ownedIndexHash)
+        seen_string_release_owned(ownedCatalogHash)
+        candidate.unwrapErr().free(); candidate.releaseContainer()
+        paths.close(); paths.free()
+        return Err<QwenInspectReport, QwenInspectError>(inspectError(
+            "qwen.inspect.memory-plan", "q4", "candidate Q4 plan is invalid", 11))
+    }
+    let plan = candidate.unwrap(); candidate.releaseContainer()
+    var computeMajor: Int32 = 0 as Int32; var computeMinor: Int32 = 0 as Int32
+    var totalBytes: UInt64 = 0 as UInt64; var freeBytes: UInt64 = 0 as UInt64
+    var fits = false
+    if deviceOrdinal >= (0 as Int32) {
+        let openedDevice = CudaDevice.open(deviceOrdinal)
+        if openedDevice.isErr() {
+            plan.free(); summary.free()
+            seen_string_release_owned(ownedModelHash); seen_string_release_owned(ownedSourceHash)
+            seen_string_release_owned(ownedConfigHash); seen_string_release_owned(ownedIndexHash)
+            seen_string_release_owned(ownedCatalogHash)
+            openedDevice.unwrapErr().free(); openedDevice.releaseContainer()
+            paths.close(); paths.free()
+            return Err<QwenInspectReport, QwenInspectError>(inspectError(
+                "qwen.cuda.device", "--device", "failed to inspect requested CUDA device", 7))
+        }
+        let device = openedDevice.unwrap(); openedDevice.releaseContainer()
+        computeMajor = device.computeMajor; computeMinor = device.computeMinor
+        totalBytes = device.totalMemoryBytes; freeBytes = device.freeMemoryBytes
+        fits = computeMajor == (8 as Int32) and computeMinor == (9 as Int32) and
+            totalBytes >= QWEN_INSPECT_MINIMUM_DEVICE_BYTES and
+            freeBytes >= plan.allocationBytes
+        device.free()
+    }
+    let report = QwenInspectReport{
+        modelLockSha256: ownedModelHash, sourceLockSha256: ownedSourceHash,
+        configSha256: ownedConfigHash, tensorIndexSha256: ownedIndexHash,
+        catalogSha256: ownedCatalogHash, sourceBytes: summary.totalBytes,
+        textBytes: summary.textBytes, mtpBytes: summary.mtpBytes,
+        visionBytes: summary.visionBytes, textTensors: summary.textTensors,
+        mtpTensors: summary.mtpTensors, visionTensors: summary.visionTensors,
+        q4WeightBytes: plan.weightBytes,
+        q4AllocationBytes: plan.allocationBytes,
+        q4MinimumDeviceBytes: QWEN_INSPECT_MINIMUM_DEVICE_BYTES,
+        q4TargetDeviceBytes: QWEN_INSPECT_TARGET_BYTES,
+        q4TargetAdmittedBytes: plan.admittedBytes,
+        deviceRequested: deviceOrdinal >= (0 as Int32),
+        deviceOrdinal: deviceOrdinal, deviceComputeMajor: computeMajor,
+        deviceComputeMinor: computeMinor, deviceTotalBytes: totalBytes,
+        deviceFreeBytes: freeBytes, deviceFits: fits, closed: false }
+    plan.free(); summary.free()
+    let rendered = renderQwenInspectReport(report)
+    let written = writeTextAtomically(outputPath, rendered)
+    seen_string_release_owned(rendered)
+    if not written {
+        report.close(); report.free()
+        paths.close(); paths.free()
+        return Err<QwenInspectReport, QwenInspectError>(inspectError(
+            "qwen.inspect.output", "--output",
+            "failed to atomically write inspection evidence"))
+    }
+    paths.close(); paths.free()
+    return Ok<QwenInspectReport, QwenInspectError>(report)
+}
